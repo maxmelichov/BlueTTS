@@ -197,7 +197,7 @@ def train(
         mean = stats['mean'].to(device).view(1, -1, 1)
         std = stats['std'].to(device).view(1, -1, 1)
     
-    ref_wav_path_v1 = "reference.wav"
+    ref_wav_path_v1 = os.environ.get("REF_WAV_PATH_V1", "")
     if os.path.exists(ref_wav_path_v1):
         print(f"Loading inference reference for Voice 1 from {ref_wav_path_v1}")
         ref_wav_np, sr = sf.read(ref_wav_path_v1)
