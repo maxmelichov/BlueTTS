@@ -301,19 +301,19 @@ class Text2LatentDataset(Dataset):
         )
         
         if use_cross_ref:
-            # Pick a random utterance from the same speaker, excluding self
-            candidates = [i for i in same_speaker_indices if i != idx]
-            if candidates:
-                ref_idx = np.random.choice(candidates)
-                try:
-                    ref_wav = self._load_wav_by_index(ref_idx)
-                    is_self_ref = False
-                except Exception:
-                    # Fallback to self-reference on load failure
-                    ref_wav = wav.clone()
-                    is_self_ref = True
+            # O(1) rejection sampling — avoids building an O(N) exclusion list
+            ref_idx = idx
+            for _ in range(10):
+                candidate_idx = np.random.choice(same_speaker_indices)
+                if candidate_idx != idx:
+                    ref_idx = candidate_idx
+                    break
+
+            if ref_idx != idx:
+                ref_wav = self._load_wav_by_index(ref_idx)
+                is_self_ref = False
             else:
-                # Only one utterance for this speaker, fallback to self-ref
+                # Statistically only hits with 1-2 utterances per speaker
                 ref_wav = wav.clone()
                 is_self_ref = True
         else:
