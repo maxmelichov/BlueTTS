@@ -1,5 +1,7 @@
 import os
 import sys
+# Set CUDA device to 1 as requested for TRT creation/running
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import tensorrt as trt
 import torch
 import numpy as np
@@ -8,9 +10,9 @@ import argparse
 import soundfile as sf
 import json
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils import load_ttl_config
-from lightblue_onnx._vocab import text_to_indices
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+from data.text_vocab import text_to_indices
+from models.utils import load_ttl_config
 
 # Create a logger
 logger = trt.Logger(trt.Logger.WARNING)
@@ -111,29 +113,34 @@ class TRTEngine:
 def load_style_json(path):
     with open(path, "r") as f:
         data = json.load(f)
-    
+
     style_ttl = np.array(data["style_ttl"]["data"], dtype=np.float32)
-    style_keys = np.array(data["style_keys"]["data"], dtype=np.float32)
+    style_keys = None
+    if "style_keys" in data:
+        style_keys = np.array(data["style_keys"]["data"], dtype=np.float32)
     style_dp = None
     if "style_dp" in data:
         style_dp = np.array(data["style_dp"]["data"], dtype=np.float32)
-    
-    return torch.from_numpy(style_ttl), torch.from_numpy(style_keys), (torch.from_numpy(style_dp) if style_dp is not None else None)
+
+    return (
+        torch.from_numpy(style_ttl),
+        torch.from_numpy(style_keys) if style_keys is not None else None,
+        torch.from_numpy(style_dp) if style_dp is not None else None,
+    )
 
 def load_uncond(onnx_dir="onnx_models"):
-    """Load unconditional embeddings for CFG (same as ONNX inference)."""
+    """Load unconditional embeddings for CFG."""
     uncond_path = os.path.join(onnx_dir, "uncond.npz")
     if os.path.exists(uncond_path):
         uncond = np.load(uncond_path)
         u_text = torch.from_numpy(uncond['u_text'].astype(np.float32))
         u_ref = torch.from_numpy(uncond['u_ref'].astype(np.float32))
-        u_keys = torch.from_numpy(uncond['u_keys'].astype(np.float32)) if 'u_keys' in uncond.files else None
-        return u_text, u_ref, u_keys
+        return u_text, u_ref
     else:
         print("[WARN] uncond.npz not found. CFG will use zeros (not recommended).")
-        return None, None, None
+        return None, None
 
-def benchmark(text_input, z_ref_path, out_wav, style_json_path=None, steps=32, cfg_scale=3.0, speed=1.0, cfg=None):
+def benchmark(text_input, z_ref_path, out_wav, style_json_path=None, steps=32, cfg_scale=3.0, speed=1.0, cfg=None, lang="he"):
     print("Loading Engines...")
     try:
         ref_enc = None
@@ -145,14 +152,14 @@ def benchmark(text_input, z_ref_path, out_wav, style_json_path=None, steps=32, c
         text_enc = TRTEngine("trt_engines/text_encoder.trt")
         
         dp = None
-        if os.path.exists("trt_engines/length_pred.trt"):
-            dp = TRTEngine("trt_engines/length_pred.trt")
-
+        if os.path.exists("trt_engines/duration_predictor.trt"):
+            dp = TRTEngine("trt_engines/duration_predictor.trt")
+            
         dp_style = None
-        if os.path.exists("trt_engines/length_pred_style.trt"):
-            dp_style = TRTEngine("trt_engines/length_pred_style.trt")
-
-        vf = TRTEngine("trt_engines/backbone.trt")
+        if os.path.exists("trt_engines/duration_predictor_style.trt"):
+            dp_style = TRTEngine("trt_engines/duration_predictor_style.trt")
+            
+        vf = TRTEngine("trt_engines/vector_estimator.trt")
         vocoder = TRTEngine("trt_engines/vocoder.trt")
     except Exception as e:
         print(f"Failed to load engines: {e}")
@@ -168,17 +175,16 @@ def benchmark(text_input, z_ref_path, out_wav, style_json_path=None, steps=32, c
     normalizer_scale = cfg["normalizer_scale"] if cfg else 1.0
     
     # 0. Prep Input
-    ids = text_to_indices(text_input)
+    ids = text_to_indices(text_input, lang=lang)
     text_ids = torch.tensor([ids], dtype=torch.int64, device=device)
     T_text = text_ids.shape[1]
     text_mask = torch.ones(B, 1, T_text, dtype=torch.float32, device=device)
     
     # Load unconditional embeddings for CFG
-    u_text, u_ref, u_keys = load_uncond()
+    u_text, u_ref = load_uncond()
     if u_text is not None:
         u_text = u_text.to(device)
         u_ref = u_ref.to(device)
-        u_keys = u_keys.to(device) if u_keys is not None else None
     
     # Prep Reference
     ref_values = None
@@ -216,17 +222,17 @@ def benchmark(text_input, z_ref_path, out_wav, style_json_path=None, steps=32, c
 
         # If raw, normalize with stats + normalizer_scale (match training/inference_tts.py)
         if z_ref is not None and not z_ref_is_normalized:
-            if os.path.exists("stats_real_data.pt"):
-                stats = torch.load("stats_real_data.pt", map_location=device)
+            if os.path.exists("stats_multilingual.pt"):
+                stats = torch.load("stats_multilingual.pt", map_location=device)
                 mean = stats["mean"].to(device)
                 std = stats["std"].to(device)
                 if mean.ndim == 1: mean = mean.view(1, -1, 1)
                 if std.ndim == 1: std = std.view(1, -1, 1)
                 z_ref = ((z_ref - mean) / std) * normalizer_scale
                 z_ref_is_normalized = True
-                print(f"  [INFO] Normalized z_ref_raw using stats_real_data.pt (normalizer_scale={normalizer_scale})")
+                print(f"  [INFO] Normalized z_ref_raw using stats_multilingual.pt (normalizer_scale={normalizer_scale})")
             else:
-                print("[WARN] stats_real_data.pt not found; using raw z_ref (quality may suffer).")
+                print("[WARN] stats_multilingual.pt not found; using raw z_ref (quality may suffer).")
 
         # Match PyTorch inference preprocessing: trim tail ~5% and cap to 150 frames.
         if z_ref is not None and z_ref.ndim == 3:
@@ -255,7 +261,7 @@ def benchmark(text_input, z_ref_path, out_wav, style_json_path=None, steps=32, c
         print(f"Loading style from {style_json_path}")
         rv, rk, rdp = load_style_json(style_json_path)
         ref_values = rv.to(device)
-        ref_keys = rk.to(device)
+        ref_keys = rk.to(device) if rk is not None else None
         if rdp is not None:
             style_dp = rdp.to(device)
             if style_dp.dim() == 2: style_dp = style_dp.unsqueeze(0)
@@ -434,11 +440,11 @@ def benchmark(text_input, z_ref_path, out_wav, style_json_path=None, steps=32, c
     has_denoised = "denoised_latent" in vf_out_names
     has_velocity = "velocity" in vf_out_names
     if not (has_denoised or has_velocity):
-        raise ValueError(f"Unsupported backbone outputs: {vf_out_names}")
+        raise ValueError(f"Unsupported vector_estimator outputs: {vf_out_names}")
 
     style_mask = torch.ones(B, 1, ref_values.shape[1], dtype=torch.float32, device=device)
 
-    def vf_inputs(noisy, txt_ctx, style_vals, style_k, txt_mask, step_val):
+    def vf_inputs(noisy, txt_ctx, style_vals, txt_mask, step_val):
         """Build VF input dict matching the engine signature."""
         feed = {"noisy_latent": noisy}
         if "text_emb" in vf_in:
@@ -447,8 +453,6 @@ def benchmark(text_input, z_ref_path, out_wav, style_json_path=None, steps=32, c
             feed["text_context"] = txt_ctx
         if "style_ttl" in vf_in:
             feed["style_ttl"] = style_vals
-        if "style_keys" in vf_in:
-            feed["style_keys"] = style_k
         if "latent_mask" in vf_in:
             feed["latent_mask"] = latent_mask
         if "text_mask" in vf_in:
@@ -463,18 +467,17 @@ def benchmark(text_input, z_ref_path, out_wav, style_json_path=None, steps=32, c
     
     # Warmup
     for _ in range(5):
-        vf_out = vf.run(vf_inputs(noisy_latent, text_emb, ref_values, ref_keys, text_mask, 0))
+        vf.run(vf_inputs(noisy_latent, text_emb, ref_values, text_mask, 0))
 
     torch.cuda.synchronize()
     t0 = time.time()
-    for _ in range(10): 
+    for _ in range(10):
         x = noisy_latent.clone()
         for s in range(steps):
-            out = vf.run(vf_inputs(x, text_emb, ref_values, ref_keys, text_mask, s))
+            out = vf.run(vf_inputs(x, text_emb, ref_values, text_mask, s))
             if has_denoised:
                 x = out["denoised_latent"]
             else:
-                # velocity is diff_out; integrate with 1/total_step (matches vf_estimator.py ONNX path)
                 x = x + (out["velocity"] / total_step.view(1, 1, 1))
     torch.cuda.synchronize()
     t_vf_total = (time.time() - t0) / 10
@@ -483,23 +486,21 @@ def benchmark(text_input, z_ref_path, out_wav, style_json_path=None, steps=32, c
     # Real Inference Pass for Saving Audio (with CFG)
     print(f"Performing one real sampling pass for audio saving (CFG={cfg_scale})...")
     latent = torch.randn(B, compressed_channels, T_lat, dtype=torch.float32, device=device)
-    
+
     for s in range(steps):
-        cond_out_dict = vf.run(vf_inputs(latent, text_emb, ref_values, ref_keys, text_mask, s))
+        cond_next = vf.run(vf_inputs(latent, text_emb, ref_values, text_mask, s))
         if has_denoised:
-            cond_next = cond_out_dict["denoised_latent"]
+            cond_next = cond_next["denoised_latent"]
         else:
-            cond_next = latent + (cond_out_dict["velocity"] / total_step.view(1, 1, 1))
-        
-        # CFG: Unconditional pass
+            cond_next = latent + (cond_next["velocity"] / total_step.view(1, 1, 1))
+
+        # CFG: Unconditional pass (text-only; style kept for voice quality)
         if cfg_scale != 1.0:
-            u_k = u_keys if u_keys is not None else ref_keys
-            uncond_out_dict = vf.run(vf_inputs(latent, u_text_ctx, u_style, u_k, u_text_mask, s))
+            uncond_out = vf.run(vf_inputs(latent, u_text_ctx, u_style, u_text_mask, s))
             if has_denoised:
-                uncond_next = uncond_out_dict["denoised_latent"]
+                uncond_next = uncond_out["denoised_latent"]
             else:
-                uncond_next = latent + (uncond_out_dict["velocity"] / total_step.view(1, 1, 1))
-            # CFG on next-state outputs: x_next = uncond + scale * (cond - uncond)
+                uncond_next = latent + (uncond_out["velocity"] / total_step.view(1, 1, 1))
             latent = uncond_next + cfg_scale * (cond_next - uncond_next)
         else:
             latent = cond_next
@@ -508,7 +509,7 @@ def benchmark(text_input, z_ref_path, out_wav, style_json_path=None, steps=32, c
     # Load stats for denormalization (check multiple locations like ONNX inference)
     mean = None
     std = None
-    stats_paths = ["onnx_models/stats.npz", "trt_engines/stats.npz", "stats_real_data.pt"]
+    stats_paths = ["onnx_models/stats.npz", "trt_engines/stats.npz", "stats_multilingual.pt"]
     for sp in stats_paths:
         if os.path.exists(sp):
             if sp.endswith(".npz"):
@@ -576,7 +577,9 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=32, help="Denoising steps")
     parser.add_argument("--cfg", type=float, default=3.0, help="Classifier Free Guidance scale")
     parser.add_argument("--speed", type=float, default=1.0, help="Speed factor (higher = faster/shorter)")
-    parser.add_argument("--config", type=str, default="tts.json", help="Path to tts.json config")
+    parser.add_argument("--config", type=str, default="configs/tts.json", help="Path to tts.json config")
+    parser.add_argument("--lang", type=str, default="he", choices=["he", "en", "de", "it", "es", "fr", "pt"],
+                        help="Language of input text for text_to_indices (default: he)")
     args = parser.parse_args()
 
     # Load config
@@ -595,5 +598,5 @@ if __name__ == "__main__":
             print("Error: Must provide --z_ref or --style_json")
             sys.exit(1)
 
-    benchmark(args.text, args.z_ref, args.out, style_json_path=args.style_json, 
-              steps=args.steps, cfg_scale=args.cfg, speed=args.speed, cfg=ttl_cfg)
+    benchmark(args.text, args.z_ref, args.out, style_json_path=args.style_json,
+              steps=args.steps, cfg_scale=args.cfg, speed=args.speed, cfg=ttl_cfg, lang=args.lang)
