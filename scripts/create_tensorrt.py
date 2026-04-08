@@ -1,12 +1,14 @@
 import os
+# Set CUDA device to 1 as requested
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import sys
 import logging
 import argparse
 import numpy as np
 import tensorrt as trt
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from utils import load_ttl_config
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+from models.utils import load_ttl_config
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("EngineBuilder")
@@ -205,7 +207,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-w", "--workspace", default=24, type=int, help="The max memory workspace size to allow in GB"
     )
-    parser.add_argument("--config", type=str, default="tts.json", help="Path to tts.json config")
+    parser.add_argument("--config", type=str, default="configs/tts.json", help="Path to tts.json config")
     args = parser.parse_args()
 
     # Load config
