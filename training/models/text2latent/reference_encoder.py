@@ -35,7 +35,7 @@ class ReferenceEncoder(nn.Module):
         hidden_dim: int = 1024,  # User Requirement
         num_blocks: int = 6,
         num_tokens: int = 50,
-        num_heads: int = 4,      # tts.json: style_token_layer.n_heads=2
+        num_heads: int = 2,      # tts.json: style_token_layer.n_heads=2
     ):
         super().__init__()
         self.d_model = d_model
@@ -71,9 +71,9 @@ class ReferenceEncoder(nn.Module):
                 "attn": nn.MultiheadAttention(d_model, num_heads, batch_first=True),
                 "ffn": nn.Sequential(
                     nn.LayerNorm(d_model),
-                    nn.Linear(d_model, d_model * 4),
+                    nn.Linear(d_model, d_model * mlp_ratio),
                     nn.GELU(),
-                    nn.Linear(d_model * 4, d_model),
+                    nn.Linear(d_model * mlp_ratio, d_model),
                 ),
             })
             for _ in range(2)
@@ -134,7 +134,5 @@ class ReferenceEncoder(nn.Module):
             q = q + attn_out
             q = q + layer["ffn"](q)
 
-        # Returns:
-        # 1. Ref Values: The output of the attention (contextualized audio summary)
-        # 2. Ref Keys: The original learnable tokens (static, used for matching in TextEncoder)
-        return q, self.ref_keys.unsqueeze(0).expand(B, -1, -1)
+        # Return the contextualized style values [B, num_tokens, d_model]
+        return q

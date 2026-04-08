@@ -473,7 +473,7 @@ class TextEncoder(nn.Module):
     Vocab size kept at 37 as per configuration.
     """
     def __init__(self,
-                 vocab_size: int = 37,
+                 vocab_size: int = 384,
                  d_model: int = 256,
                  n_conv_layers: int = 6,
                  n_attn_layers: int = 4,
@@ -520,6 +520,14 @@ class TextEncoder(nn.Module):
         """
         # Embedding
         x = self.text_embedder(text_ids)   # [B, L, C]
+
+        # Broadcast language token embedding to every position so that all
+        # phonemes carry language information, regardless of sequence length.
+        # Without this, windowed attention (window=4) and ConvNeXt (kernel=5)
+        # limit the language token's reach to only the first ~25 positions.
+        lang_emb = x[:, 0:1, :].clone()              # [B, 1, C] — cloned to avoid autograd in-place issues
+        x[:, 1:, :] = x[:, 1:, :] + lang_emb   # add to phoneme positions only
+
         x = x.transpose(1, 2)              # [B, C, L]
 
         if text_mask is not None:
@@ -549,6 +557,37 @@ class TextEncoder(nn.Module):
             
         return x
 
-    @property
-    def ref_keys(self) -> torch.Tensor:
-        return self.speech_prompted_text_encoder.style_key
+
+
+if __name__ == "__main__":
+    batch_size = 2
+    text_length = 60
+    vocab_size = 384
+    d_model = 256
+
+    model = TextEncoder(vocab_size=vocab_size, d_model=d_model)
+    model.eval()
+
+    text_ids = torch.randint(0, vocab_size, (batch_size, text_length)).long()
+    text_mask = torch.ones(batch_size, 1, text_length)
+
+    # Style values from reference encoder: [B, 50, 256]
+    N_ref = 50
+    style_ttl = torch.randn(batch_size, N_ref, d_model)
+    
+    # Test 1: ONNX-style positional call (text_ids, style_ttl, text_mask)
+    with torch.no_grad():
+        h_text = model(text_ids, style_ttl, text_mask=text_mask)
+    print("ONNX-style call:", h_text.shape)
+
+    # Test 2: Training-style keyword call (ref_values, ref_keys, text_mask)
+    # ref_values = torch.randn(batch_size, N_ref, d_model)
+    # ref_keys = torch.randn(batch_size, N_ref, d_model)  # ignored, uses baked-in
+    # with torch.no_grad():
+    #     h_text2, style_key2 = model(
+    #         text_ids,
+    #         ref_keys=ref_keys,
+    #         text_mask=text_mask,
+    #         ref_values=ref_values,
+    #     )
+    # print("Training-style call:", h_text2.shape, style_key2.shape)
