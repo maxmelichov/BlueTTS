@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from models.utils import decompress_latents
+from bluecodec.utils import decompress_latents
 
 
 def build_reference_only(z_ref_input, valid_z_ref_len, device):

@@ -17,8 +17,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from data.text2latent_dataset import Text2LatentDataset, collate_text2latent
 from data.text_vocab import CHAR_TO_ID
-from models.utils import LinearMelSpectrogram, compress_latents
-from models.autoencoder.latent_encoder import LatentEncoder
+from bluecodec import LatentEncoder
+from bluecodec.utils import LinearMelSpectrogram, compress_latents
 from models.text2latent.dp_network import DPNetwork
 
 
