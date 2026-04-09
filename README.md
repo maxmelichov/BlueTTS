@@ -37,7 +37,9 @@ uv run scripts/create_tensorrt.py --onnx_dir onnx_models --engine_dir trt_engine
 uv run scripts/benchmark_trt.py --style_json voices/female1.json --steps 32
 ```
 
-## Papers:
+## Papers
+
+```bibtex
 @ARTICLE{2025arXiv250323108K,
        author = {{Kim}, Hyeongju and {Yang}, Jinhyeok and {Yu}, Yechan and {Ji}, Seunghun and {Morton}, Jacob and {Bous}, Frederik and {Byun}, Joon and {Lee}, Juheon},
         title = "{SupertonicTTS: Towards Highly Efficient and Streamlined Text-to-Speech System}",
@@ -79,6 +81,8 @@ archivePrefix = {arXiv},
       primaryClass={cs.SD},
       url={https://arxiv.org/abs/2512.17293}, 
 }
+```
+
 ## License
 
 MIT
