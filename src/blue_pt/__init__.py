@@ -9,6 +9,12 @@ import torch
 
 from ._vocab import text_to_indices, text_to_indices_multilang
 
+_src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _src not in sys.path:
+    sys.path.insert(0, _src)
+from _common import Style, TextProcessor, chunk_text  # noqa: E402
+del _src
+
 # Resolve training models relative to repo root
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _TRAINING = os.path.join(os.path.dirname(os.path.dirname(_HERE)), "training")
@@ -39,6 +45,7 @@ class LightBlueTTS:
         text2latent_ckpt: Optional[str] = None,
         ae_ckpt: Optional[str] = None,
         dp_ckpt: Optional[str] = None,
+        phonikud_path: Optional[str] = None,
     ):
         self.weights_dir = weights_dir
         self.style_json = style_json
@@ -54,6 +61,7 @@ class LightBlueTTS:
         self._load_config(config_path)
         self._load_models(text2latent_ckpt, ae_ckpt, dp_ckpt)
         self._load_stats()
+        self._text_proc = TextProcessor(phonikud_path)
 
     # ------------------------------------------------------------------
     # Setup
@@ -198,7 +206,7 @@ class LightBlueTTS:
         Returns:
             (samples, sample_rate) — float32 numpy array and int sample rate.
         """
-        chunks = self._chunk(phonemes, self.chunk_len)
+        chunks = chunk_text(phonemes, self.chunk_len)
         silence = np.zeros(int(self.silence_sec * self.sample_rate), dtype=np.float32)
         parts = []
         for i, chunk in enumerate(chunks):
@@ -208,27 +216,18 @@ class LightBlueTTS:
         wav = np.concatenate(parts) if parts else np.array([], dtype=np.float32)
         return wav, self.sample_rate
 
+    def synthesize(self, text: str, lang: str = "he") -> Tuple[np.ndarray, int]:
+        """Phonemize raw text (phonikud for Hebrew, espeak for others) then synthesize.
+
+        Returns:
+            (samples, sample_rate) — float32 numpy array and int sample rate.
+        """
+        phonemes = self._text_proc.phonemize(text, lang=lang)
+        return self.create(phonemes, lang=lang)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
-
-    def _chunk(self, text: str, max_len: int) -> list[str]:
-        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", text.strip()) if p.strip()]
-        pattern = r"(?<=[.!?])\s+"
-        chunks = []
-        for para in paragraphs:
-            sentences = re.split(pattern, para)
-            current = ""
-            for s in sentences:
-                if len(current) + len(s) + 1 <= max_len:
-                    current += (" " if current else "") + s
-                else:
-                    if current:
-                        chunks.append(current.strip())
-                    current = s
-            if current:
-                chunks.append(current.strip())
-        return chunks or [text]
 
     def _load_style_json(self, path: str):
         with open(path) as f:
