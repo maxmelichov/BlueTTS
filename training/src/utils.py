@@ -83,7 +83,6 @@ def sample_audio(
     ref_enc_mask,
     u_text,
     u_ref,
-    u_keys,
     mean,
     std,
     duration_predictor=None,
@@ -93,7 +92,6 @@ def sample_audio(
     debug_label=None,
     speed=1.0,
     style_ttl=None,
-    style_keys=None,
     style_dp=None,
     latent_dim=24,
     chunk_compress_factor=6,
@@ -108,9 +106,8 @@ def sample_audio(
 
     if style_ttl is not None:
         ref_values = style_ttl
-        _ = style_keys if style_keys is not None else style_ttl
     else:
-        ref_values, _ = reference_encoder(z_ref, mask=ref_enc_mask)
+        ref_values = reference_encoder(z_ref, mask=ref_enc_mask)
 
     if duration_predictor is not None:
         dur_pred = duration_predictor(
@@ -148,15 +145,8 @@ def sample_audio(
 
     h_text = text_encoder(text_ids, ref_values, text_mask=text_mask)
 
-    if isinstance(text_encoder, DDP):
-         vf_style_keys = text_encoder.module.ref_keys
-    else:
-         vf_style_keys = text_encoder.ref_keys
-    vf_style_keys = vf_style_keys.expand(B, -1, -1)
-
     h_text_null = u_text.expand(B, -1, 1)
     h_ref_null = u_ref.expand(B, -1, -1)
-    h_keys_null = u_keys.expand(B, -1, -1) if u_keys is not None else vf_style_keys
 
     x = torch.randn(B, C, T, device=device)
     dt = 1.0 / steps
@@ -168,7 +158,6 @@ def sample_audio(
             noisy_latent=x_in,
             text_emb=h_text,
             style_ttl=ref_values,
-            style_keys=vf_style_keys,
             latent_mask=latent_mask,
             text_mask=text_mask,
             current_step=t,
@@ -179,7 +168,6 @@ def sample_audio(
                 noisy_latent=x_in,
                 text_emb=h_text_null,
                 style_ttl=h_ref_null,
-                style_keys=h_keys_null,
                 latent_mask=latent_mask,
                 text_mask=torch.ones(B, 1, 1, device=device),
                 current_step=t,
