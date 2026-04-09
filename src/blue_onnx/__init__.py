@@ -1,12 +1,18 @@
 import os
 import json
-import re
-from typing import Optional, Tuple
+import sys
+from typing import List, Optional, Tuple
 
 import numpy as np
 import onnxruntime as ort
 
 from ._vocab import text_to_indices
+
+_src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _src not in sys.path:
+    sys.path.insert(0, _src)
+from _common import Style, TextProcessor, chunk_text  # noqa: E402
+del _src
 
 
 class LightBlueTTS:
@@ -23,6 +29,7 @@ class LightBlueTTS:
         chunk_len: int = 150,
         silence_sec: float = 0.15,
         fade_duration: float = 0.02,
+        phonikud_path: Optional[str] = None,
     ):
         self.onnx_dir = onnx_dir
         self.style_json = style_json
@@ -39,6 +46,7 @@ class LightBlueTTS:
         self._load_stats()
         self._load_uncond()
         self._load_shuffle_keys()
+        self._text_proc = TextProcessor(phonikud_path)
 
     # ------------------------------------------------------------------
     # Setup
@@ -145,24 +153,30 @@ class LightBlueTTS:
     # Public API
     # ------------------------------------------------------------------
 
-    def create(self, phonemes: str) -> Tuple[np.ndarray, int]:
-        """Synthesize speech from pre-phonemized (IPA) text.
-
-        Args:
-            phonemes: IPA phoneme string (caller is responsible for phonemization).
+    def create(self, phonemes: str, lang: str = "he") -> Tuple[np.ndarray, int]:
+        """Synthesize speech from a pre-phonemized (IPA) string.
 
         Returns:
             (samples, sample_rate) — float32 numpy array and int sample rate.
         """
-        chunks = self._chunk(phonemes, self.chunk_len)
+        chunks = chunk_text(phonemes, self.chunk_len)
         silence = np.zeros(int(self.silence_sec * self.sample_rate), dtype=np.float32)
         parts = []
         for i, chunk in enumerate(chunks):
-            parts.append(self._infer_chunk(chunk))
+            parts.append(self._infer_chunk(chunk, lang=lang))
             if i < len(chunks) - 1:
                 parts.append(silence)
         wav = np.concatenate(parts) if parts else np.array([], dtype=np.float32)
         return wav, self.sample_rate
+
+    def synthesize(self, text: str, lang: str = "he") -> Tuple[np.ndarray, int]:
+        """Phonemize raw text (phonikud for Hebrew, espeak for others) then synthesize.
+
+        Returns:
+            (samples, sample_rate) — float32 numpy array and int sample rate.
+        """
+        phonemes = self._text_proc.phonemize(text, lang=lang)
+        return self.create(phonemes, lang=lang)
 
     # ------------------------------------------------------------------
     # Internals
@@ -173,24 +187,6 @@ class LightBlueTTS:
         if keys:
             feed = {**feed, **keys}
         return sess.run(None, feed)
-
-    def _chunk(self, text: str, max_len: int) -> list[str]:
-        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", text.strip()) if p.strip()]
-        pattern = r"(?<=[.!?])\s+"
-        chunks = []
-        for para in paragraphs:
-            sentences = re.split(pattern, para)
-            current = ""
-            for s in sentences:
-                if len(current) + len(s) + 1 <= max_len:
-                    current += (" " if current else "") + s
-                else:
-                    if current:
-                        chunks.append(current.strip())
-                    current = s
-            if current:
-                chunks.append(current.strip())
-        return chunks or [text]
 
     def _load_style_json(self, path: str):
         with open(path) as f:
@@ -234,7 +230,7 @@ class LightBlueTTS:
         ref_values, ref_keys = self._run(self._ref_enc, feed, "reference_encoder")[:2]
         return ref_values, ref_keys
 
-    def _infer_chunk(self, phonemes: str) -> np.ndarray:
+    def _infer_chunk(self, phonemes: str, lang: str = "he") -> np.ndarray:
         if self.mean is None or self.std is None:
             raise ValueError("stats.npz not loaded.")
 
@@ -246,7 +242,7 @@ class LightBlueTTS:
             raise ValueError("Provide style_json with z_ref or style_ttl content.")
 
         # Text encoding
-        indices = text_to_indices(phonemes)
+        indices = text_to_indices(phonemes, lang=lang)
         text_ids = np.array([indices], dtype=np.int64)
         text_mask = np.ones((1, 1, len(indices)), dtype=np.float32)
 
@@ -429,3 +425,29 @@ class LightBlueTTS:
 
         wav = wav.squeeze()
         return self._apply_fade(wav)
+
+
+# ─── Module-level loaders ─────────────────────────────────────────────────────
+
+def load_voice_style(style_paths: List[str]) -> Style:
+    """Load pre-extracted style vectors from one or more style JSON files."""
+    B = len(style_paths)
+    with open(style_paths[0]) as f:
+        first = json.load(f)
+
+    ttl_dims = first["style_ttl"]["dims"]
+    ttl = np.zeros([B, ttl_dims[1], ttl_dims[2]], dtype=np.float32)
+
+    dp: Optional[np.ndarray] = None
+    if "style_dp" in first:
+        dp_dims = first["style_dp"]["dims"]
+        dp = np.zeros([B, dp_dims[1], dp_dims[2]], dtype=np.float32)
+
+    for i, path in enumerate(style_paths):
+        with open(path) as f:
+            d = json.load(f)
+        ttl[i] = np.array(d["style_ttl"]["data"], dtype=np.float32).reshape(ttl_dims[1], ttl_dims[2])
+        if dp is not None and "style_dp" in d:
+            dp[i] = np.array(d["style_dp"]["data"], dtype=np.float32).reshape(dp_dims[1], dp_dims[2])
+
+    return Style(ttl=ttl, dp=dp)
