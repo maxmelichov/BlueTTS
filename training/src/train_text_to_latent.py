@@ -21,9 +21,8 @@ from tqdm import tqdm
 from data.text2latent_dataset import Text2LatentDataset, collate_text2latent
 from data.audio_utils import ensure_sr
 from data.text_vocab import text_to_indices, VOCAB_SIZE, normalize_text
-from models.autoencoder.latent_encoder import LatentEncoder
-from models.autoencoder.latent_decoder import LatentDecoder1D
-from models.utils import LinearMelSpectrogram, compress_latents, decompress_latents
+from bluecodec import LatentEncoder, LatentDecoder1D
+from bluecodec.utils import LinearMelSpectrogram, compress_latents, decompress_latents
 from models.text2latent.text_encoder import TextEncoder
 from models.text2latent.vf_estimator import VectorFieldEstimator
 from models.text2latent.reference_encoder import ReferenceEncoder

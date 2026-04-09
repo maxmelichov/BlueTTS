@@ -11,7 +11,7 @@ import onnxruntime as ort
 # Import your models
 from models.text2latent.text_encoder import TextEncoder
 from models.text2latent.vf_estimator import VectorFieldEstimator
-from models.autoencoder.latent_decoder import LatentDecoder1D
+from bluecodec import LatentDecoder1D
 from models.text2latent.dp_network import DPNetwork
 from models.text2latent.reference_encoder import ReferenceEncoder
 from models.utils import load_ttl_config
