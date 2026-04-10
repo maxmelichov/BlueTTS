@@ -298,6 +298,7 @@ class LightBlueTRT:
 
         te_in = set(self._text_enc.input_names())
         te_feed: Dict[str, torch.Tensor] = {"text_ids": text_ids}
+
         if "text_mask"  in te_in: te_feed["text_mask"]  = text_mask
         if "style_ttl"  in te_in: te_feed["style_ttl"]  = ref_values
         if "ref_values" in te_in: te_feed["ref_values"] = ref_values
@@ -356,19 +357,25 @@ class LightBlueTRT:
         latent_mask: torch.Tensor,
         step:       int,
     ) -> Dict[str, torch.Tensor]:
-        vf_in = set(self._vf.input_names())
+        vf_in   = set(self._vf.input_names())
         total_t = torch.tensor([float(self.steps)], dtype=torch.float32, device=self.device)
         step_t  = torch.tensor([float(step)],       dtype=torch.float32, device=self.device)
+
         feed: Dict[str, torch.Tensor] = {"noisy_latent": noisy}
+
         if "text_emb"     in vf_in: feed["text_emb"]     = text_emb
-        if "text_context" in vf_in: feed["text_context"]  = text_emb
+        if "text_context" in vf_in: feed["text_context"] = text_emb
         if "style_ttl"    in vf_in: feed["style_ttl"]    = ref_values
         if "ref_values"   in vf_in: feed["ref_values"]   = ref_values
         if "latent_mask"  in vf_in: feed["latent_mask"]  = latent_mask
         if "text_mask"    in vf_in: feed["text_mask"]    = text_mask
-        if "style_mask"   in vf_in: feed["style_mask"]   = torch.ones(1, 1, ref_values.shape[1], dtype=torch.float32, device=self.device)
+        if "style_mask"   in vf_in:
+            feed["style_mask"] = torch.ones(
+                1, 1, ref_values.shape[1], dtype=torch.float32, device=self.device
+            )
         if "current_step" in vf_in: feed["current_step"] = step_t
         if "total_step"   in vf_in: feed["total_step"]   = total_t
+
         return feed
 
     def _flow_matching(
