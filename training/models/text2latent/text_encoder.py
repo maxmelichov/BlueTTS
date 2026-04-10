@@ -3,34 +3,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# =========================================================
-# LayerNorm with [B, C, L] layout
-# Used in ConvNeXt and AttnEncoder
-# Trace: norm.norm.weight (LayerNorm) -> Transpose
-# =========================================================
-
 class LayerNorm(nn.Module):
     def __init__(self, channels: int, eps: float = 1e-6):
         super().__init__()
         self.norm = nn.LayerNorm(channels, eps=eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, C, L]
-        x = x.transpose(1, 2)  # [B, L, C]
+        x = x.transpose(1, 2)
         x = self.norm(x)
-        x = x.transpose(1, 2)  # [B, C, L]
+        x = x.transpose(1, 2)
         return x
 
 
-# =========================================================
-# ConvNeXt Block (1D)
-# =========================================================
-
 class ConvNeXtBlock(nn.Module):
-    """
-    ConvNeXt Block with explicit symmetric replicate (edge) padding.
-    Matches ONNX graph: Pad(pads=[0,0,2,0,0,2], mode='edge') -> Conv(padding=0) for kernel_size=5.
-    """
     def __init__(self,
                  dim: int,
                  expansion_factor: int = 4,
@@ -38,11 +23,8 @@ class ConvNeXtBlock(nn.Module):
                  dilation: int = 1,
                  layer_scale_init_value: float = 1e-6):
         super().__init__()
-        hidden_dim = dim * expansion_factor  # e.g., 256 * 4 = 1024
+        hidden_dim = dim * expansion_factor
 
-        # ONNX uses explicit symmetric padding on the time axis.
-        # For kernel_size=5, dilation=1 this is left=2, right=2:
-        # pads=[0,0,2,0,0,2] for [N,C,L].
         if (kernel_size % 2) != 1:
             raise ValueError(f"ConvNeXtBlock expects odd kernel_size, got {kernel_size}")
         self.pad = ((kernel_size - 1) // 2) * dilation
@@ -60,17 +42,15 @@ class ConvNeXtBlock(nn.Module):
     def forward(self,
                 x: torch.Tensor,
                 mask: torch.Tensor | None = None) -> torch.Tensor:
-        # x: [B, C, L]
         if mask is not None:
             x = x * mask
         residual = x
 
-        # Explicit symmetric replicate pad to match ONNX Pad(mode='edge').
         x = F.pad(x, (self.pad, self.pad), mode='replicate')
         x = self.dwconv(x)
         if mask is not None:
             x = x * mask
-        
+
         x = self.norm(x)
         x = self.pwconv1(x)
         x = self.act(x)
@@ -83,10 +63,6 @@ class ConvNeXtBlock(nn.Module):
         return x
 
 
-# =========================================================
-# Structural Wrapper for ConvNeXt Stack
-# Ensures keys match: convnext.convnext.0...
-# =========================================================
 
 class ConvNeXtWrapper(nn.Module):
     def __init__(self, d_model, n_layers, expansion_factor, kernel_size=5, dilation_lst=None):
@@ -104,9 +80,6 @@ class ConvNeXtWrapper(nn.Module):
         return x
 
 
-# =========================================================
-# Relative Multi-Head Self-Attention (Windowed)
-# =========================================================
 
 class RelativeMultiHeadAttention(nn.Module):
     def __init__(self,
@@ -127,7 +100,6 @@ class RelativeMultiHeadAttention(nn.Module):
         self.conv_v = nn.Conv1d(channels, channels, 1)
         self.conv_o = nn.Conv1d(channels, channels, 1)
 
-        # Relative embeddings [1, 2*w+1, head_dim]
         self.emb_rel_k = nn.Parameter(torch.randn(1, 2 * window_size + 1, self.head_dim) * 0.02)
         self.emb_rel_v = nn.Parameter(torch.randn(1, 2 * window_size + 1, self.head_dim) * 0.02)
 
@@ -138,45 +110,37 @@ class RelativeMultiHeadAttention(nn.Module):
                 attn_mask: torch.Tensor | None = None) -> torch.Tensor:
         B, C, L = x.shape
 
-        # Projections
-        q = self.conv_q(x).view(B, self.n_heads, self.head_dim, L).transpose(2, 3)  # [B, H, L, D]
+        q = self.conv_q(x).view(B, self.n_heads, self.head_dim, L).transpose(2, 3)
         q = q * self.scale
-        k = self.conv_k(x).view(B, self.n_heads, self.head_dim, L).transpose(2, 3)  # [B, H, L, D]
-        v = self.conv_v(x).view(B, self.n_heads, self.head_dim, L).transpose(2, 3)  # [B, H, L, D]
+        k = self.conv_k(x).view(B, self.n_heads, self.head_dim, L).transpose(2, 3)
+        v = self.conv_v(x).view(B, self.n_heads, self.head_dim, L).transpose(2, 3)
 
-        # Content-Content scores
-        scores = torch.matmul(q, k.transpose(-2, -1))  # [B, H, L, L]
+        scores = torch.matmul(q, k.transpose(-2, -1))
 
-        # Content-Relative scores (windowed: zero outside local window)
         t = torch.arange(L, device=x.device)
         diff = t[None, :] - t[:, None]
-        # Mask for positions within the local window
-        window_mask = (diff.abs() <= self.window_size)  # [L, L]
+        window_mask = (diff.abs() <= self.window_size)
         diff_clamped = torch.clamp(diff, -self.window_size, self.window_size)
         indices = diff_clamped + self.window_size
-        
-        rel_k = self.emb_rel_k[0][indices]  # [L, L, D]
+
+        rel_k = self.emb_rel_k[0][indices]
         rel_scores = torch.einsum('bhld,ljd->bhlj', q, rel_k)
-        # Zero out positions outside the local window (matches ONNX banded structure)
         rel_scores = rel_scores * window_mask[None, None, :, :]
-        
+
         scores = scores + rel_scores
 
-        # 2D attention mask [B, 1, L, L] broadcasts to [B, H, L, L]
         if attn_mask is not None:
-            scores = scores.masked_fill(attn_mask == 0, -1e4)  # ONNX uses -10000
+            scores = scores.masked_fill(attn_mask == 0, -1e4)
 
         attn = torch.softmax(scores, dim=-1)
         attn = self.drop(attn)
-        
-        # Content-Content value
-        out = torch.matmul(attn, v)  # [B, H, L, D]
-        
-        # Content-Relative value (windowed: zero outside local window)
-        rel_v = self.emb_rel_v[0][indices] # [L, L, D]
-        rel_v = rel_v * window_mask[:, :, None]  # zero out-of-window embeddings
+
+        out = torch.matmul(attn, v)
+
+        rel_v = self.emb_rel_v[0][indices]
+        rel_v = rel_v * window_mask[:, :, None]
         out_rel = torch.einsum('bhlj,ljd->bhld', attn, rel_v)
-        
+
         out = out + out_rel
 
         out = out.transpose(2, 3).contiguous().view(B, C, L)
@@ -287,20 +251,13 @@ class LinearWrapped(nn.Module):
         return self.linear(x)
 
 class StyleNorm(nn.Module):
-    """
-    Wraps LayerNorm for StyleAttention.
-    Matches trace: norm.norm.weight
-    Performs norm on [B, T, C] then transposes to [B, C, T]
-    Trace: norm/norm/LayerNormalization -> norm/Transpose
-    """
     def __init__(self, dim, eps: float = 1e-6):
         super().__init__()
         self.norm = nn.LayerNorm(dim, eps=eps)
 
     def forward(self, x):
-        # x is [B, T, C]
         x = self.norm(x)
-        x = x.transpose(1, 2) # [B, C, T]
+        x = x.transpose(1, 2)
         return x
 
 class TextEmbedderWrapper(nn.Module):
@@ -341,67 +298,43 @@ class StyleAttentionLayer(nn.Module):
                 values: torch.Tensor,
                 mask_t: torch.Tensor | None = None) -> torch.Tensor:
         
-        # x is [B, T, C] (query)
-        B, T, C = x.shape
+        B, T, _ = x.shape
         
-        # Q from text: W_query/linear
-        q = self.W_query(x) # [B, T, C]
+        q = self.W_query(x)
         
-        # ONNX: Split -> Unsqueeze -> Concat to create [H, B, T, D]
-        # Equivalent to chunk(heads, -1) -> stack(0)
         qs = q.chunk(self.num_heads, dim=-1)
-        q = torch.stack(qs, dim=0) # [H, B, T, D]
+        q = torch.stack(qs, dim=0)
 
-        # Keys (style_key) processed through W_key/linear (matches ONNX)
-        # keys: [1, 50, 256] or [B, 50, 256]
-        B_k = keys.shape[0]
-        k = self.W_key(keys)  # [B_k, 50, 256]
+        k = self.W_key(keys)
         
         ks = k.chunk(self.num_heads, dim=-1)
-        k = torch.stack(ks, dim=0) # [H, B_k, 50, D]
+        k = torch.stack(ks, dim=0)
         
         k = torch.tanh(k)
         
-        # Values from style_ttl: W_value/linear
         if values.dim() == 2:
             values = values.unsqueeze(0)
         if values.shape[0] != B:
             values = values.expand(B, -1, -1)
         
-        v = self.W_value(values) # [B, 50, C]
+        v = self.W_value(values)
         vs = v.chunk(self.num_heads, dim=-1)
-        v = torch.stack(vs, dim=0) # [H, B, 50, D]
+        v = torch.stack(vs, dim=0)
 
-        # Scores
-        # q: [H, B, T, D]
-        # k: [H, B_k, 50, D]
-        # Need q * k^T -> [H, B, T, 50]
-        # k.transpose(-1, -2) -> [H, B_k, D, 50]
-        
         scores = torch.matmul(q, k.transpose(-1, -2)) * self.scale
         attn = torch.softmax(scores, dim=-1)
 
-        # ONNX: Where(mask==0, 0, attn) — zero out attention weights at masked query positions
         if mask_t is not None:
-            # mask_t: [B, T, 1]
-            # We need to broadcast to [H, B, T, 50]
-            # mask_t.unsqueeze(0) -> [1, B, T, 1]
-            attn_mask = (mask_t.unsqueeze(0) == 0)  # True where padding
+            attn_mask = (mask_t.unsqueeze(0) == 0)
             attn = attn.masked_fill(attn_mask, 0.0)
 
-        # Out
-        # attn: [H, B, T, 50]
-        # v: [H, B, 50, D]
-        out = torch.matmul(attn, v) # [H, B, T, D]
+        out = torch.matmul(attn, v)
 
-        # Recombine
-        # ONNX: Split(dim=0) -> Concat(dim=-1) -> Squeeze(dim=0)
         outs = out.chunk(self.num_heads, dim=0)
         out = torch.cat(outs, dim=-1).squeeze(0)
         
         out = self.out_fc(out)
 
-        # Masking using transposed mask [B, T, 1]
         if mask_t is not None:
             out = out * mask_t
 
@@ -517,45 +450,27 @@ class TextEncoder(nn.Module):
                 text_ids: torch.Tensor,
                 style_ttl: torch.Tensor,
                 text_mask: torch.Tensor | None = None) -> torch.Tensor:
-        """
-        Args:
-            text_ids:   [B, T_text]  int64 - character indices
-            style_ttl:  [B, 50, 256] float32 - style values (ONNX export name)
-            text_mask:  [B, 1, T_text] float32 - padding mask
-        Returns:
-            text_emb:  [B, 256, T_text] float32
-        """
-        # Embedding
-        x = self.text_embedder(text_ids)   # [B, L, C]
+        x = self.text_embedder(text_ids)
 
-        # Broadcast language token embedding to every position so that all
-        # phonemes carry language information, regardless of sequence length.
-        # Without this, windowed attention (window=4) and ConvNeXt (kernel=5)
-        # limit the language token's reach to only the first ~25 positions.
-        lang_emb = x[:, 0:1, :].clone()              # [B, 1, C] — cloned to avoid autograd in-place issues
-        x[:, 1:, :] = x[:, 1:, :] + lang_emb   # add to phoneme positions only
+        lang_emb = x[:, 0:1, :].clone()
+        x[:, 1:, :] = x[:, 1:, :] + lang_emb
 
-        x = x.transpose(1, 2)              # [B, C, L]
+        x = x.transpose(1, 2)
 
         if text_mask is not None:
             x = x * text_mask
 
-        # ConvNeXt
         x = self.convnext(x, mask=text_mask)
         convnext_output = x
 
-        # Self Attention
         x = self.attn_encoder(x, mask=text_mask)
 
-        # Residual Connection
         x = x + convnext_output
 
-        # Projection
         x = self.proj_out(x)
         if text_mask is not None:
             x = x * text_mask
 
-        # Style Attention (keys always from baked-in style_key)
         x = self.speech_prompted_text_encoder(
             x,
             style_values=style_ttl,

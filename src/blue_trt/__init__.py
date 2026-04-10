@@ -15,13 +15,8 @@ from _blue_vocab import text_to_indices  # noqa: E402
 del _src
 
 
-# ─── TRT logger (module-level singleton) ──────────────────────────────────────
-
 _logger = trt.Logger(trt.Logger.WARNING)
 trt.init_libnvinfer_plugins(_logger, namespace="")
-
-
-# ─── TRT engine wrapper ───────────────────────────────────────────────────────
 
 _TRT_TO_TORCH = {
     trt.float32: torch.float32,
@@ -69,8 +64,6 @@ class TRTEngine:
             if not t.is_contiguous():
                 t = t.contiguous()
             self.context.set_input_shape(name, t.shape)
-            idx = self.engine.get_tensor_name
-            # find tensor index
             for i in range(self.engine.num_io_tensors):
                 if self.engine.get_tensor_name(i) == name:
                     bindings[i] = t.data_ptr()
@@ -135,10 +128,6 @@ class LightBlueTRT:
         self._load_stats()
         self._load_uncond()
         self._text_proc = TextProcessor(phonikud_path)
-
-    # ------------------------------------------------------------------
-    # Setup
-    # ------------------------------------------------------------------
 
     def _load_config(self, config_path: str):
         self.normalizer_scale = 1.0
@@ -220,10 +209,6 @@ class LightBlueTRT:
         if self._u_text is None:
             print("[WARN] uncond.npz not found — CFG will be disabled.")
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def create(self, phonemes: str, lang: str = "he") -> Tuple[np.ndarray, int]:
         """Synthesize speech from a pre-phonemized (IPA) string.
 
@@ -248,10 +233,6 @@ class LightBlueTRT:
         """
         phonemes = self._text_proc.phonemize(text, lang=lang)
         return self.create(phonemes, lang=lang)
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
 
     def _load_style_json(self, path: str):
         with open(path) as f:
@@ -304,12 +285,10 @@ class LightBlueTRT:
         if z_ref is None and style_ttl is None:
             raise ValueError("Provide style_json with z_ref or style_ttl content.")
 
-        # Text encoding
         indices  = text_to_indices(phonemes, lang=lang)
         text_ids = torch.tensor([indices], dtype=torch.int64, device=self.device)
         text_mask = torch.ones(1, 1, len(indices), dtype=torch.float32, device=self.device)
 
-        # Style
         z_ref_norm = None
         if z_ref is not None:
             z_ref_norm = ((z_ref - self.mean) / self.std) * float(self.normalizer_scale)
@@ -330,7 +309,6 @@ class LightBlueTRT:
 
         ref_keys = style_keys if style_keys is not None else ref_values
 
-        # Text encoder
         te_in = set(self._text_enc.input_names())
         te_feed: Dict[str, torch.Tensor] = {"text_ids": text_ids}
         if "text_mask"  in te_in: te_feed["text_mask"]  = text_mask
@@ -341,13 +319,8 @@ class LightBlueTRT:
         te_out   = self._text_enc.run(te_feed)
         text_emb = te_out.get("text_emb") or next(iter(te_out.values()))
 
-        # Duration
         T_lat = self._predict_duration(text_ids, text_mask, z_ref_norm, style_dp)
-
-        # Flow matching
         latent = self._flow_matching(text_emb, ref_values, text_mask, T_lat)
-
-        # Decode
         return self._decode(latent)
 
     def _predict_duration(
@@ -382,7 +355,6 @@ class LightBlueTRT:
         T_cap   = max(20, min(txt_len * 3 + 20, 600))
         T_lat   = min(max(int(T_lat), 1), T_cap, 800)
 
-        # Vocoder max: latent frames × ccf ≤ 2048
         max_t_lat = 2048 // self.chunk_compress_factor
         T_lat = min(T_lat, max_t_lat)
 
@@ -423,7 +395,6 @@ class LightBlueTRT:
         x = torch.randn(1, self.compressed_channels, T_lat, dtype=torch.float32, device=self.device)
         latent_mask = torch.ones(1, 1, T_lat, dtype=torch.float32, device=self.device)
         total_t = torch.tensor([float(self.steps)], dtype=torch.float32, device=self.device)
-
         use_cfg = self.cfg_scale != 1.0 and self._u_text is not None
         if use_cfg:
             u_text_mask = torch.ones(1, 1, 1, dtype=torch.float32, device=self.device)
@@ -460,10 +431,7 @@ class LightBlueTRT:
         return wav
 
     def _decode(self, latent: torch.Tensor) -> np.ndarray:
-        # Denormalize
         z = (latent / float(self.normalizer_scale)) * self.std + self.mean
-
-        # Decompress: [1, C*ccf, T] → [1, C, T*ccf]
         B, _, T = z.shape
         z_dec = (
             z.view(B, self.latent_dim, self.chunk_compress_factor, T)
@@ -473,8 +441,6 @@ class LightBlueTRT:
 
         voc_out = self._vocoder.run({"latent": z_dec})
         wav = voc_out.get("waveform") or next(iter(voc_out.values()))
-
-        # Trim boundary artifacts
         frame_len = self.hop_length * self.chunk_compress_factor
         if wav.shape[-1] > 2 * frame_len:
             wav = wav[..., frame_len:-frame_len]
@@ -483,7 +449,6 @@ class LightBlueTRT:
         return self._apply_fade(wav)
 
 
-# ─── Module-level loaders ─────────────────────────────────────────────────────
 
 def load_voice_style(style_paths: List[str], device: str = "cuda") -> Style:
     """Load pre-extracted style vectors from one or more style JSON files."""

@@ -1,30 +1,6 @@
-"""
-Shared multilingual IPA vocabulary for all blue_* packages.
-
-Layout:
-  0..156   = Piper core symbols (exact IDs from rhasspy/piper-checkpoints)
-  157..243 = Extended symbols (uppercase letters, additional IPA, punctuation)
-  244..383 = Language tokens (140 slots)
-
-VOCAB_SIZE = 384  (embedding-friendly: 384 = 6 × 64)
-
-Special indices:
-  PAD_ID = 0  (_)   padding / unknown
-  BOS_ID = 1  (^)   begin-of-sequence
-  EOS_ID = 2  ($)   end-of-sequence
-
-Adding a new language:
-  1. Add one line to LANG_ID below
-  2. Add training data with a 'lang' column in the CSV
-  3. Resume training — no architecture change needed
-"""
-
 import re
 from unicodedata import normalize as uni_normalize
 
-# ============================================================
-# Piper phoneme map (exact IDs from rhasspy/piper-checkpoints)
-# ============================================================
 _PIPER_MAP: dict[str, int] = {
     "_": 0, "^": 1, "$": 2, " ": 3,
     "!": 4, "'": 5, "(": 6, ")": 7, ",": 8, "-": 9, ".": 10,
@@ -58,9 +34,6 @@ _PIPER_MAP: dict[str, int] = {
     "g": 154, "ʦ": 155, "X": 156,
 }
 
-# ============================================================
-# Extended symbol map (indices 157..243)
-# ============================================================
 _EXTENDED_MAP: dict[str, int] = {
     "A": 157, "B": 158, "C": 159, "D": 160, "E": 161, "F": 162, "G": 163,
     "H": 164, "I": 165, "J": 166, "K": 167, "L": 168, "M": 169, "N": 170,
@@ -84,9 +57,6 @@ _EXTENDED_MAP: dict[str, int] = {
     "\u030C": 242, "\u0307": 243,
 }
 
-# ============================================================
-# Region constants
-# ============================================================
 PIPER_REGION_END  = 156
 LANG_REGION_START = 244
 LANG_REGION_SIZE  = 140
@@ -96,31 +66,16 @@ PAD_ID = 0
 BOS_ID = 1
 EOS_ID = 2
 
-# ============================================================
-# Language tokens  (indices 244..383)
-# ============================================================
 LANG_ID: dict[str, int] = {
-    "he": LANG_REGION_START + 0,   # 244 — Hebrew
-    "en": LANG_REGION_START + 1,   # 245 — English
-    "es": LANG_REGION_START + 2,   # 246 — Spanish
-    # "fr": LANG_REGION_START + 3,  # 247 — French
-    # "ar": LANG_REGION_START + 4,  # 248 — Arabic
-    # "pt": LANG_REGION_START + 5,  # 249 — Portuguese
-    # "ko": LANG_REGION_START + 6,  # 250 — Korean
-    # "ja": LANG_REGION_START + 7,  # 251 — Japanese
-    "de": LANG_REGION_START + 8,   # 252 — German
-    "it": LANG_REGION_START + 9,   # 253 — Italian
-    # "ru": LANG_REGION_START + 10, # 254 — Russian
-    # "zh": LANG_REGION_START + 11, # 255 — Chinese
-    # "hi": LANG_REGION_START + 12, # 256 — Hindi
-    # "tr": LANG_REGION_START + 13, # 257 — Turkish
+    "he": LANG_REGION_START + 0,
+    "en": LANG_REGION_START + 1,
+    "es": LANG_REGION_START + 2,
+    "de": LANG_REGION_START + 8,
+    "it": LANG_REGION_START + 9,
 }
 
 LANG_NAMES: dict[int, str] = {v: k for k, v in LANG_ID.items()}
 
-# ============================================================
-# Lookup tables
-# ============================================================
 CHAR_TO_ID: dict[str, int] = {**_PIPER_MAP, **_EXTENDED_MAP}
 ID_TO_CHAR: dict[int, str] = {v: k for k, v in CHAR_TO_ID.items()}
 for _lang_name, _lang_idx in LANG_ID.items():
@@ -128,9 +83,6 @@ for _lang_name, _lang_idx in LANG_ID.items():
 
 VOCAB_LIST: list[str] = list(CHAR_TO_ID.keys())
 
-# ============================================================
-# Safety assertions
-# ============================================================
 assert VOCAB_SIZE == 384
 assert len(_PIPER_MAP) == 157, f"Piper map must have 157 entries, got {len(_PIPER_MAP)}"
 assert max(_PIPER_MAP.values()) == PIPER_REGION_END
@@ -139,10 +91,6 @@ assert all(PIPER_REGION_END < v < LANG_REGION_START for v in _EXTENDED_MAP.value
 assert len(set(_EXTENDED_MAP.values())) == len(_EXTENDED_MAP)
 assert not (set(_PIPER_MAP.values()) & set(_EXTENDED_MAP.values()))
 
-
-# ============================================================
-# Public API
-# ============================================================
 
 def text_to_indices(text: str, lang: str = "he") -> list[int]:
     """Convert an IPA string to vocab indices with a language token prepended."""
