@@ -29,8 +29,6 @@ _TRT_TO_TORCH = {
 
 
 class TRTEngine:
-    """Thin wrapper around a serialized TensorRT engine."""
-
     def __init__(self, engine_path: str):
         runtime = trt.Runtime(_logger)
         with open(engine_path, "rb") as f:
@@ -54,7 +52,6 @@ class TRTEngine:
         return self._output_names
 
     def run(self, inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Run inference. inputs/outputs are CUDA torch tensors."""
         bindings = [0] * self.engine.num_io_tensors
 
         for name in self._input_names:
@@ -210,11 +207,6 @@ class LightBlueTRT:
             print("[WARN] uncond.npz not found — CFG will be disabled.")
 
     def create(self, phonemes: str, lang: str = "he") -> Tuple[np.ndarray, int]:
-        """Synthesize speech from a pre-phonemized (IPA) string.
-
-        Returns:
-            (samples, sample_rate) — float32 numpy array and int sample rate.
-        """
         chunks = chunk_text(phonemes, self.chunk_len)
         silence = np.zeros(int(self.silence_sec * self.sample_rate), dtype=np.float32)
         parts = []
@@ -226,11 +218,6 @@ class LightBlueTRT:
         return wav, self.sample_rate
 
     def synthesize(self, text: str, lang: str = "he") -> Tuple[np.ndarray, int]:
-        """Phonemize raw text (phonikud for Hebrew, espeak for others) then synthesize.
-
-        Returns:
-            (samples, sample_rate) — float32 numpy array and int sample rate.
-        """
         phonemes = self._text_proc.phonemize(text, lang=lang)
         return self.create(phonemes, lang=lang)
 
@@ -451,7 +438,6 @@ class LightBlueTRT:
 
 
 def load_voice_style(style_paths: List[str], device: str = "cuda") -> Style:
-    """Load pre-extracted style vectors from one or more style JSON files."""
     B = len(style_paths)
     with open(style_paths[0]) as f:
         first = json.load(f)
