@@ -5,13 +5,12 @@ import json
 import random
 import numpy as np
 import soundfile as sf
-# Add project root to sys.path
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchaudio
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, WeightedRandomSampler, DistributedSampler
@@ -22,7 +21,7 @@ from data.text2latent_dataset import Text2LatentDataset, collate_text2latent
 from data.audio_utils import ensure_sr
 from data.text_vocab import text_to_indices, VOCAB_SIZE, normalize_text
 from bluecodec import LatentEncoder, LatentDecoder1D
-from bluecodec.utils import LinearMelSpectrogram, compress_latents, decompress_latents
+from bluecodec.utils import LinearMelSpectrogram, compress_latents
 from models.text2latent.text_encoder import TextEncoder
 from models.text2latent.vf_estimator import VectorFieldEstimator
 from models.text2latent.reference_encoder import ReferenceEncoder
@@ -87,7 +86,7 @@ def set_seed(seed=42):
 
 def init_distributed(device, checkpoint_dir, finetune):
     """Initialise DDP, create log dir, apply finetune overrides. Returns rank, local_rank, device, log_dir, spfm_start_override."""
-    # DDP Init
+    
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         dist.init_process_group("nccl")
         rank = dist.get_rank()
@@ -111,10 +110,10 @@ def init_distributed(device, checkpoint_dir, finetune):
     else:
         log_dir = os.path.join(checkpoint_dir, "logs")
 
-    # Finetune mode overrides
+    
     if finetune:
         lr = 5e-4
-        # WildSpoof (2512.17293) Sec 2.2: "SPFM is activated after an initial
+        
         spfm_start_override = 40_000
         if rank == 0:
             print(f"[Finetune Mode] lr={lr}, SPFM warm-up={spfm_start_override} steps")
@@ -125,9 +124,9 @@ def init_distributed(device, checkpoint_dir, finetune):
 
 def load_config(config_path, Ke, puncond, rank):
     """Parse tts.json and return all TTL hyper-parameters as a flat dict."""
-    # =========================================================
-    # Load TTL Config from tts.json
-    # =========================================================
+    
+    
+    
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
@@ -137,68 +136,76 @@ def load_config(config_path, Ke, puncond, rank):
     ttl_cfg = full_config["ttl"]
     ae_cfg_json = full_config.get("ae", {})
 
-    # --- Core dimensions (Paper Sec 3.2.1) ---
-    latent_dim = ttl_cfg["latent_dim"]                          # 24
-    chunk_compress_factor = ttl_cfg["chunk_compress_factor"]    # 6
-    compressed_channels = latent_dim * chunk_compress_factor     # 144
+    
+    latent_dim = ttl_cfg["latent_dim"]                          
+    chunk_compress_factor = ttl_cfg["chunk_compress_factor"]    
+    compressed_channels = latent_dim * chunk_compress_factor     
 
-    # --- Batch Expander (Paper Sec 3.2.2 / Algorithm 1) ---
-    cfg_Ke = ttl_cfg["batch_expander"]["n_batch_expand"]        # 6
+    
+    cfg_Ke = ttl_cfg["batch_expander"]["n_batch_expand"]        
     if Ke is None:
         Ke = cfg_Ke
 
-    # --- Normalizer (applied on top of mean/std normalization) ---
-    normalizer_scale = ttl_cfg["normalizer"]["scale"]           # 0.25
+    
+    normalizer_scale = ttl_cfg["normalizer"]["scale"]           
 
-    # --- Flow Matching ---
-    sigma_min = ttl_cfg["flow_matching"]["sig_min"]             # 0 (paper: 10^-8)
+    
+    sigma_min = ttl_cfg["flow_matching"]["sig_min"]             
 
-    # --- Text Encoder ---
+    
     te_cfg = ttl_cfg["text_encoder"]
-    te_d_model = te_cfg["text_embedder"]["char_emb_dim"]                     # 256
-    te_convnext_layers = te_cfg["convnext"]["num_layers"]                    # 6
-    te_convnext_intermediate = te_cfg["convnext"]["intermediate_dim"]        # 1024
-    te_expansion_factor = te_convnext_intermediate // te_d_model             # 4
-    te_attn_n_heads = te_cfg["attn_encoder"]["n_heads"]                      # 4
-    te_attn_n_layers = te_cfg["attn_encoder"]["n_layers"]                    # 4
-    te_attn_filter_channels = te_cfg["attn_encoder"]["filter_channels"]      # 1024
-    te_attn_p_dropout = te_cfg["attn_encoder"]["p_dropout"]                  # 0.0 or 0.1
+    te_d_model = te_cfg["text_embedder"]["char_emb_dim"]                     
+    te_convnext_layers = te_cfg["convnext"]["num_layers"]                    
+    te_convnext_intermediate = te_cfg["convnext"]["intermediate_dim"]        
+    te_expansion_factor = te_convnext_intermediate // te_d_model             
+    te_cfg["attn_encoder"]["n_heads"]                      
+    te_attn_n_layers = te_cfg["attn_encoder"]["n_layers"]                    
+    te_cfg["attn_encoder"]["filter_channels"]      
+    te_attn_p_dropout = te_cfg["attn_encoder"]["p_dropout"]                  
 
-    # --- Style Encoder / Reference Encoder (Paper Sec 3.2.3) ---
+    
     se_cfg = ttl_cfg["style_encoder"]
-    se_d_model = se_cfg["proj_in"]["odim"]                          # 256
-    se_hidden_dim = se_cfg["convnext"]["intermediate_dim"]          # 1024
-    se_num_blocks = se_cfg["convnext"]["num_layers"]                # 6
-    se_n_style = se_cfg["style_token_layer"]["n_style"]             # 50
-    se_n_heads = se_cfg["style_token_layer"]["n_heads"]             # 2
+    se_d_model = se_cfg["proj_in"]["odim"]                          
+    se_hidden_dim = se_cfg["convnext"]["intermediate_dim"]          
+    se_num_blocks = se_cfg["convnext"]["num_layers"]                
+    se_n_style = se_cfg["style_token_layer"]["n_style"]             
+    se_n_heads = se_cfg["style_token_layer"]["n_heads"]             
 
-    # --- Speech-Prompted Text Encoder (cross-attention in TextEncoder) ---
+    
     spte_cfg = ttl_cfg["speech_prompted_text_encoder"]
-    spte_n_heads = spte_cfg["n_heads"]                              # 2
-    spte_n_style = se_n_style                                       # 50 (shared with style encoder)
+    spte_cfg["n_heads"]                              
 
-    # --- Unconditional Masker (Paper Sec 3.2.4 / CFG) ---
+    
     um_cfg = ttl_cfg["uncond_masker"]
-    prob_both_uncond = um_cfg["prob_both_uncond"]                   # 0.04
-    prob_text_uncond = um_cfg["prob_text_uncond"]                   # 0.01
-    uncond_init_std = um_cfg["std"]                                 # 0.1
-    um_text_dim = um_cfg["text_dim"]                                # 256
-    um_n_style = um_cfg["n_style"]                                  # 50
-    um_style_value_dim = um_cfg["style_value_dim"]                  # 256
+    prob_both_uncond = um_cfg["prob_both_uncond"]                   
+    prob_text_uncond = um_cfg["prob_text_uncond"]                   
+    uncond_init_std = um_cfg["std"]                                 
+    um_text_dim = um_cfg["text_dim"]                                
+    um_n_style = um_cfg["n_style"]                                  
+    um_style_value_dim = um_cfg["style_value_dim"]                  
 
-    # If puncond was not overridden, use sum of config probs (total ~0.05)
+    
     if puncond is None:
         puncond = prob_both_uncond + prob_text_uncond
 
-    # --- Vector Field Estimator (Paper Sec 3.2.3 / Appendix A.2.3) ---
+    
     vf_cfg = ttl_cfg["vector_field"]
-    vf_hidden = vf_cfg["proj_in"]["odim"]                              # 512
-    vf_time_dim = vf_cfg["time_encoder"]["time_dim"]                   # 64
-    vf_n_blocks = vf_cfg["main_blocks"]["n_blocks"]                    # 4
-    vf_text_dim = vf_cfg["main_blocks"]["text_cond_layer"]["text_dim"] # 256
-    vf_text_n_heads = vf_cfg["main_blocks"]["text_cond_layer"]["n_heads"]  # 4
-    vf_style_dim = vf_cfg["main_blocks"]["style_cond_layer"]["style_dim"]  # 256
-    vf_rotary_scale = vf_cfg["main_blocks"]["text_cond_layer"]["rotary_scale"]  # 10
+    vf_hidden = vf_cfg["proj_in"]["odim"]                              
+    vf_time_dim = vf_cfg["time_encoder"]["time_dim"]                   
+    vf_n_blocks = vf_cfg["main_blocks"]["n_blocks"]                    
+    vf_text_dim = vf_cfg["main_blocks"]["text_cond_layer"]["text_dim"] 
+    vf_cfg["main_blocks"]["text_cond_layer"]["n_heads"]  
+    vf_style_dim = vf_cfg["main_blocks"]["style_cond_layer"]["style_dim"]  
+    vf_rotary_scale = vf_cfg["main_blocks"]["text_cond_layer"]["rotary_scale"]  
+
+    te_ksz = te_cfg["convnext"].get("ksz", 5)
+    te_dilation_lst = te_cfg["convnext"].get("dilation_lst", [1] * te_convnext_layers)
+    
+    se_ksz = se_cfg["convnext"].get("ksz", 5)
+    se_dilation_lst = se_cfg["convnext"].get("dilation_lst", [1] * se_num_blocks)
+    
+    vf_main_blocks_cfg = vf_cfg.get("main_blocks", {})
+    vf_last_convnext_cfg = vf_cfg.get("last_convnext", {})
 
     if rank == 0:
         print(f"\n{'='*60}")
@@ -227,20 +234,26 @@ def load_config(config_path, Ke, puncond, rank):
         te_d_model=te_d_model, te_convnext_layers=te_convnext_layers,
         te_expansion_factor=te_expansion_factor, te_attn_n_layers=te_attn_n_layers,
         te_attn_p_dropout=te_attn_p_dropout,
+        te_ksz=te_ksz, te_dilation_lst=te_dilation_lst,
+        te_attn_n_heads=te_attn_n_heads, te_attn_filter_channels=te_attn_filter_channels,
+        spte_n_heads=spte_n_heads,
         se_d_model=se_d_model, se_hidden_dim=se_hidden_dim,
         se_num_blocks=se_num_blocks, se_n_style=se_n_style, se_n_heads=se_n_heads,
+        se_ksz=se_ksz, se_dilation_lst=se_dilation_lst,
         prob_both_uncond=prob_both_uncond, prob_text_uncond=prob_text_uncond,
         uncond_init_std=uncond_init_std, um_text_dim=um_text_dim,
         um_n_style=um_n_style, um_style_value_dim=um_style_value_dim,
         vf_hidden=vf_hidden, vf_time_dim=vf_time_dim, vf_n_blocks=vf_n_blocks,
         vf_text_dim=vf_text_dim, vf_style_dim=vf_style_dim,
         vf_rotary_scale=vf_rotary_scale, puncond=puncond,
+        vf_main_blocks_cfg=vf_main_blocks_cfg, vf_last_convnext_cfg=vf_last_convnext_cfg,
+        vf_text_n_heads=vf_text_n_heads,
     )
 
 
 def load_stats(stats_path, device):
     """Load per-channel mean/std latent statistics. Returns mean, std."""
-    # 1. Load Stats
+    
     if not os.path.exists(stats_path):
         print(f"Error: Stats file {stats_path} not found. Run compute_latent_stats.py first.")
         return
@@ -250,16 +263,16 @@ def load_stats(stats_path, device):
         mean = stats["mean"].to(device)
         std = stats["std"].to(device)
     else:
-        # Fallback for old stats files
-        mean = stats['mean'].to(device).view(1, -1, 1) # [1, 144, 1]
+        
+        mean = stats['mean'].to(device).view(1, -1, 1) 
         std = stats['std'].to(device).view(1, -1, 1)
     return mean, std
 
 
 def build_ae_models(ae_cfg_json, ae_checkpoint, device):
     """Build and load frozen AE encoder/decoder + mel spectrogram. Returns mel_spec, ae_encoder, ae_decoder, hop_length, ae_sample_rate."""
-    # 2. Load Models
-    # AE Encoder (Frozen)
+    
+    
     ae_enc_arch = ae_cfg_json['encoder']
     ae_spec_cfg = ae_enc_arch.get('spec_processor', {})
     hop_length = ae_spec_cfg.get('hop_length', 512)
@@ -273,10 +286,10 @@ def build_ae_models(ae_cfg_json, ae_checkpoint, device):
     ).to(device)
     ae_encoder = LatentEncoder(cfg=ae_enc_arch).to(device)
 
-    # AE Decoder (Frozen) - For Inference
+    
     ae_decoder = LatentDecoder1D(cfg=ae_cfg_json['decoder']).to(device)
 
-    # Load AE Weights
+    
     if os.path.exists(ae_checkpoint):
         print(f"Loading AE checkpoint from {ae_checkpoint}")
         ckpt = torch.load(ae_checkpoint, map_location='cpu')
@@ -305,75 +318,95 @@ def build_ae_models(ae_cfg_json, ae_checkpoint, device):
 
 def build_ttl_models(cfg, lr, device):
     """Instantiate TextEncoder, ReferenceEncoder, VFEstimator, UncondParams, optional DP model, and AdamW optimizer. Returns all models + optimizer + params."""
-    # unpack config
+    
     compressed_channels = cfg['compressed_channels']
     te_d_model = cfg['te_d_model']
     te_convnext_layers = cfg['te_convnext_layers']
     te_expansion_factor = cfg['te_expansion_factor']
     te_attn_n_layers = cfg['te_attn_n_layers']
     te_attn_p_dropout = cfg['te_attn_p_dropout']
+    te_ksz = cfg['te_ksz']
+    te_dilation_lst = cfg['te_dilation_lst']
+    te_attn_n_heads = cfg['te_attn_n_heads']
+    te_attn_filter_channels = cfg['te_attn_filter_channels']
+    spte_n_heads = cfg['spte_n_heads']
     se_d_model = cfg['se_d_model']
     se_hidden_dim = cfg['se_hidden_dim']
     se_num_blocks = cfg['se_num_blocks']
     se_n_style = cfg['se_n_style']
     se_n_heads = cfg['se_n_heads']
+    se_ksz = cfg['se_ksz']
+    se_dilation_lst = cfg['se_dilation_lst']
     vf_hidden = cfg['vf_hidden']
     vf_text_dim = cfg['vf_text_dim']
     vf_style_dim = cfg['vf_style_dim']
     vf_n_blocks = cfg['vf_n_blocks']
     vf_time_dim = cfg['vf_time_dim']
     vf_rotary_scale = cfg['vf_rotary_scale']
+    vf_main_blocks_cfg = cfg['vf_main_blocks_cfg']
+    vf_last_convnext_cfg = cfg['vf_last_convnext_cfg']
+    vf_text_n_heads = cfg['vf_text_n_heads']
     um_text_dim = cfg['um_text_dim']
     um_n_style = cfg['um_n_style']
     um_style_value_dim = cfg['um_style_value_dim']
     uncond_init_std = cfg['uncond_init_std']
 
-    # --- ARCHITECTURE SETUP (from ttl config) ---
+    
 
-    # 1. Text Encoder (config: ttl.text_encoder)
+    
     text_encoder = TextEncoder(
         vocab_size=VOCAB_SIZE,
-        d_model=te_d_model,                    # 256
-        n_conv_layers=te_convnext_layers,      # 6
-        n_attn_layers=te_attn_n_layers,        # 4
-        expansion_factor=te_expansion_factor,  # 4 (1024/256)
-        p_dropout=te_attn_p_dropout,           # config: 0.0 or 0.1
+        d_model=te_d_model,                    
+        n_conv_layers=te_convnext_layers,      
+        n_attn_layers=te_attn_n_layers,        
+        expansion_factor=te_expansion_factor,  
+        p_dropout=te_attn_p_dropout,           
+        kernel_size=te_ksz,
+        dilation_lst=te_dilation_lst,
+        attn_n_heads=te_attn_n_heads,
+        attn_filter_channels=te_attn_filter_channels,
+        spte_n_heads=spte_n_heads,
     ).to(device)
 
-    # 2. Reference Encoder (config: ttl.style_encoder)
+    
     reference_encoder = ReferenceEncoder(
-        in_channels=compressed_channels,       # 144 = 24 * 6
-        d_model=se_d_model,                    # 256
-        hidden_dim=se_hidden_dim,              # 1024
-        num_blocks=se_num_blocks,              # 6
-        num_tokens=se_n_style,                 # 50
-        num_heads=se_n_heads,                  # 2 (config: style_token_layer.n_heads)
+        in_channels=compressed_channels,       
+        d_model=se_d_model,                    
+        hidden_dim=se_hidden_dim,              
+        num_blocks=se_num_blocks,              
+        num_tokens=se_n_style,                 
+        num_heads=se_n_heads,                  
+        kernel_size=se_ksz,
+        dilation_lst=se_dilation_lst,
     ).to(device)
 
-    # 3. Vector Field Estimator (config: ttl.vector_field)
+    
     vf_estimator = VectorFieldEstimator(
-        in_channels=compressed_channels,       # 144
-        out_channels=compressed_channels,      # 144
-        hidden_channels=vf_hidden,             # 512
-        text_dim=vf_text_dim,                  # 256
-        style_dim=vf_style_dim,                # 256
-        num_style_tokens=se_n_style,           # 50
-        num_superblocks=vf_n_blocks,           # 4
-        time_embed_dim=vf_time_dim,            # 64
-        rope_gamma=float(vf_rotary_scale),     # 10.0 (config: rotary_scale)
+        in_channels=compressed_channels,       
+        out_channels=compressed_channels,      
+        hidden_channels=vf_hidden,             
+        text_dim=vf_text_dim,                  
+        style_dim=vf_style_dim,                
+        num_style_tokens=se_n_style,           
+        num_superblocks=vf_n_blocks,           
+        time_embed_dim=vf_time_dim,            
+        rope_gamma=float(vf_rotary_scale),     
+        main_blocks_cfg=vf_main_blocks_cfg,
+        last_convnext_cfg=vf_last_convnext_cfg,
+        text_n_heads=vf_text_n_heads,
     ).to(device)
 
-    # 4. Unconditional Tokens (config: ttl.uncond_masker)
+    
     uncond_params = UncondParams(
-        text_dim=um_text_dim,                  # 256
-        n_style=um_n_style,                    # 50
-        style_value_dim=um_style_value_dim,    # 256
-        init_std=uncond_init_std,              # 0.1
+        text_dim=um_text_dim,                  
+        n_style=um_n_style,                    
+        style_value_dim=um_style_value_dim,    
+        init_std=uncond_init_std,              
     ).to(device)
     u_text = uncond_params.u_text
     u_ref = uncond_params.u_ref
 
-    # DP (Optional)
+    
     dp_model = None
     dp_ckpt_path = "checkpoints/duration_predictor/duration_predictor_final.pt"
     if os.path.exists(dp_ckpt_path):
@@ -386,7 +419,7 @@ def build_ttl_models(cfg, lr, device):
         except Exception as e:
             print(f"Failed to load DP: {e}")
 
-    # Optimizer
+    
     params = (
         list(text_encoder.parameters()) +
         list(reference_encoder.parameters()) +
@@ -399,23 +432,23 @@ def build_ttl_models(cfg, lr, device):
 
 def build_dataloader(ae_sample_rate, batch_size, rank):
     """Create dataset, sampler, and dataloader. Returns dataloader, sampler, dataset."""
-    # Dataset
+    
     metadata_path = "generated_audio/combined_dataset_cleaned_real_data.csv"
     dataset = Text2LatentDataset(
         metadata_path,
         sample_rate=ae_sample_rate,
         max_wav_len=ae_sample_rate * 20,
         max_text_len=300,
-        cross_ref_prob=0.5,  # 50% cross-ref for zero-shot speaker generalization
+        cross_ref_prob=0.5,  
     )
     if rank == 0:
         print(f"Dataset loaded with {len(dataset)} samples.")
 
-    # Sampler Setup
+    
     if dist.is_initialized():
         sampler = DistributedSampler(dataset, shuffle=True)
     else:
-        # Calculate inverse-frequency weights for balanced speaker sampling
+        
         speaker_ids = dataset.speaker_ids
         unique_speakers, counts = np.unique(speaker_ids, return_counts=True)
         freq = dict(zip(unique_speakers, counts))
@@ -472,7 +505,7 @@ def run_inference(
 
         print("Running Inference...")
 
-        # Unwrap for inference to avoid DDP sync issues on single rank
+        
         vf_infer = vf_estimator.module if isinstance(vf_estimator, DDP) else vf_estimator
         te_infer = text_encoder.module if isinstance(text_encoder, DDP) else text_encoder
         re_infer = reference_encoder.module if isinstance(reference_encoder, DDP) else reference_encoder
@@ -482,7 +515,7 @@ def run_inference(
         re_infer.eval()
 
         try:
-            # Hebrew sentences (pre-computed IPA)
+            
             hebrew_sentences = [
                 "ʃalˈom janˈon kˈaχa niʃmˈa hamˈodel heχadˈaʃ mˈa daʔtχˈa ? lifʔamˈim tsaʁˈiχ baχajˈim lelatˈeʃ ʁaʔjˈon ʃˈuv vaʃˈuv ʔˈad ʃehˈu matslˈiaχ"
             ]
@@ -504,8 +537,8 @@ def run_inference(
                 'es', 'es',
             )
 
-            # Computes style_ttl + style_dp once from the reference wav,
-            # then reuses them across all sentences — matches ONNX inference pattern.
+            
+            
             def run_inference_for_ref(ref_wav_torch, suffix, sentences, lang, label):
                 if ref_wav_torch is None or not sentences:
                     return
@@ -539,7 +572,7 @@ def run_inference(
                     wav = wav_out.squeeze().cpu().numpy()
                     sf.write(os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_{suffix}.wav"), wav, ae_sample_rate)
 
-            # Run for Voice 1
+            
             if ref_wav_torch_v1 is not None:
                 run_inference_for_ref(ref_wav_torch_v1, "voice1", hebrew_sentences, "he", "hebrew")
                 run_inference_for_ref(ref_wav_torch_v1, "voice1", english_sentences, "en", "english")
@@ -547,7 +580,7 @@ def run_inference(
                 run_inference_for_ref(ref_wav_torch_v1, "voice1", italian_sentences, "it", "italian")
                 run_inference_for_ref(ref_wav_torch_v1, "voice1", spanish_sentences, "es", "spanish")
 
-            # Run for Validation Batch
+            
             if val_batch is not None:
                 with torch.no_grad():
                     ref_z_val = val_z_ref[0:1]
@@ -589,26 +622,26 @@ def run_inference(
                         wav = wav_out.squeeze().cpu().numpy()
                         sf.write(os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_val_sample.wav"), wav, ae_sample_rate)
 
-            # VC Check: val_batch[0] content → reference.wav speaker
-            # Saves source audio + converted output so content preservation can be verified.
+            
+            
             vc_ref_path = "reference.wav"
             if val_batch is not None and os.path.exists(vc_ref_path):
                 try:
-                    # Save source for comparison
+                    
                     sf.write(
                         os.path.join(log_dir, f"step_{global_step}_vc_source.wav"),
                         val_wavs[0].squeeze().cpu().numpy(),
                         ae_sample_rate,
                     )
 
-                    # Load reference.wav
+                    
                     vc_ref_np, vc_ref_sr = sf.read(vc_ref_path)
                     vc_ref_wav = torch.from_numpy(vc_ref_np).float()
                     if vc_ref_wav.dim() > 1:
                         vc_ref_wav = vc_ref_wav.mean(dim=-1)
                     vc_ref_wav = ensure_sr(vc_ref_wav, vc_ref_sr, ae_sample_rate, device=device)
                     if vc_ref_wav.dim() == 1:
-                        vc_ref_wav = vc_ref_wav.unsqueeze(0)  # [1, T]
+                        vc_ref_wav = vc_ref_wav.unsqueeze(0)  
 
                     with torch.no_grad():
                         vc_ref_z_norm = encode_wav_to_latent(vc_ref_wav, mel_spec, ae_encoder, chunk_compress_factor, mean, std, normalizer_scale)
@@ -651,14 +684,14 @@ def train(
     checkpoint_dir="checkpoints/text2latent",
     ae_checkpoint="checkpoints/ae/ae_latest.pt",
     stats_path="stats_multilingual.pt",
-    config_path="configs/tts.json",  # Path to tts.json config
+    config_path="configs/tts.json",  
     epochs=1000,
     batch_size=14,
     lr=5e-4,
-    Ke=None,  # Context-sharing expansion factor (None = use config ttl.batch_expander.n_batch_expand)
-    puncond=None, # CFG dropout probability (None = use config ttl.uncond_masker probs)
+    Ke=None,  
+    puncond=None, 
     device="cuda:1" if torch.cuda.is_available() else "cpu",
-    finetune=False,  # Finetune mode: lr=1e-4, SPFM starts after 5K steps
+    finetune=False,  
     accumulation_steps=1
 ):
     rank, local_rank, device, log_dir, spfm_start_override = init_distributed(device, checkpoint_dir, finetune)
@@ -666,30 +699,30 @@ def train(
     ae_cfg_json = cfg['ae_cfg_json']
     latent_dim = cfg['latent_dim']
     chunk_compress_factor = cfg['chunk_compress_factor']
-    compressed_channels = cfg['compressed_channels']
+    cfg['compressed_channels']
     Ke = cfg['Ke']
     normalizer_scale = cfg['normalizer_scale']
     sigma_min = cfg['sigma_min']
     prob_both_uncond = cfg['prob_both_uncond']
-    prob_text_uncond = cfg['prob_text_uncond']
+    cfg['prob_text_uncond']
     puncond = cfg['puncond']
     mean, std = load_stats(stats_path, device)
-    # Load reference audio
-    # Load reference audio for voice 1 (Inference only)
+    
+    
     ref_wav_path_v1 = "/home/maxm/AE_training_data_all/slow_44K/data/real_data/yoav_times/recording_id002/chunk_0002_7.4-19.6s.wav"
     if os.path.exists(ref_wav_path_v1):
         print(f"Loading inference reference for Voice 1 from {ref_wav_path_v1}")
         ref_wav_np, sr = sf.read(ref_wav_path_v1)
         ref_wav_torch_v1 = torch.from_numpy(ref_wav_np).float().to(device)
-        if ref_wav_torch_v1.dim() > 1: ref_wav_torch_v1 = ref_wav_torch_v1.mean(dim=1) # mono
+        if ref_wav_torch_v1.dim() > 1: ref_wav_torch_v1 = ref_wav_torch_v1.mean(dim=1) 
 
-        # Resample to 44.1kHz using high-quality resampler
+        
         if sr != 44100:
             ref_wav_torch_v1 = ensure_sr(ref_wav_torch_v1, sr, 44100, device=device)
         else:
-            ref_wav_torch_v1 = ref_wav_torch_v1.unsqueeze(0) # [1, T]
+            ref_wav_torch_v1 = ref_wav_torch_v1.unsqueeze(0) 
 
-        # enforce [1, T]
+        
         if ref_wav_torch_v1.dim() == 2 and ref_wav_torch_v1.size(0) != 1:
             ref_wav_torch_v1 = ref_wav_torch_v1.mean(dim=0, keepdim=True)
         elif ref_wav_torch_v1.dim() == 1:
@@ -704,7 +737,7 @@ def train(
 
     global_step = 0
 
-    # Resume
+    
     scheduler_state = None
     ckpts = glob.glob(os.path.join(checkpoint_dir, "ckpt_step_*.pt"))
     if ckpts:
@@ -715,7 +748,7 @@ def train(
 
         shapes_changed = False
         if 'vf_estimator' in checkpoint:
-            # Filter out size mismatches
+            
             model_state = vf_estimator.state_dict()
             ckpt_state = checkpoint['vf_estimator']
             filtered_state = {}
@@ -736,7 +769,7 @@ def train(
         if 'u_ref' in checkpoint:
             u_ref.data = checkpoint['u_ref']
 
-        # Initialize Optimizer here to load state
+        
         optimizer = AdamW(params, lr=lr)
 
         if 'optimizer' in checkpoint:
@@ -753,7 +786,7 @@ def train(
         if 'global_step' in checkpoint:
             global_step = checkpoint['global_step']
             if finetune:
-                # global_step = global_step // 2
+                
                 spfm_start_override = global_step + spfm_start_override
                 print(f"Finetune mode: global_step halved to {global_step} and spfm_start_override set to {spfm_start_override}")
 
@@ -765,18 +798,18 @@ def train(
     else:
         print("No checkpoint found. Starting from scratch.")
 
-    # For finetune: start fresh scheduler from -1 (base lr)
-    # For resume: continue from current global_step
+    
+    
     scheduler_last_epoch = -1 if finetune else (global_step - 1)
 
-    # When resuming with a fresh optimizer (state load failed), MultiStepLR
-    # requires 'initial_lr' in param_groups when last_epoch != -1.
+    
+    
     if scheduler_last_epoch != -1:
         for pg in optimizer.param_groups:
             if 'initial_lr' not in pg:
                 pg['initial_lr'] = pg['lr']
 
-    # Paper (Sec 4.2): "lr initially set to 5e-4 and halved every 300k iterations"
+    
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=[300_000, 600_000],
@@ -790,17 +823,17 @@ def train(
         except Exception as e:
             print(f"Warning: Failed to load scheduler state: {e}")
 
-    # DDP Wrapping
+    
     if dist.is_initialized():
         text_encoder = DDP(text_encoder, device_ids=[local_rank], find_unused_parameters=True)
         reference_encoder = DDP(reference_encoder, device_ids=[local_rank], find_unused_parameters=True)
         vf_estimator = DDP(vf_estimator, device_ids=[local_rank], find_unused_parameters=True)
         uncond_params = DDP(uncond_params, device_ids=[local_rank], find_unused_parameters=True)
     dataloader, sampler, dataset = build_dataloader(ae_sample_rate, batch_size, rank)
-    # Validation Batch
+    
     try:
         val_batch = next(iter(dataloader))
-        # Handle unpacking dynamically for validation too
+        
         if len(val_batch) == 9:
             val_wavs, val_text_ids, val_text_masks, val_lengths, _, val_ref_wavs, val_ref_lengths, val_is_self, _ = val_batch
         else:
@@ -837,7 +870,6 @@ def train(
     while global_step < max_steps:
         if dist.is_initialized():
             sampler.set_epoch(epoch)
-        epoch += 1
 
         text_encoder.train()
         reference_encoder.train()
@@ -849,7 +881,7 @@ def train(
         epoch_loss = 0.0
         num_batches = 0
 
-        # NEW: SPFM accumulators
+        
         spfm_dirty_total = 0
         spfm_total_samples = 0
         spfm_score_sum = 0.0
@@ -858,15 +890,15 @@ def train(
         for batch_idx, batch in enumerate(progress_bar):
             if global_step >= max_steps: break
 
-            # Unpack batch with new ref_speaker_ids
-            # wavs, texts, masks, wav_lens, spk_ids, ref_wavs, ref_lens, is_self, ref_spk_ids
+            
+            
             if len(batch) == 9:
                  wavs, text_ids, text_masks, lengths, speaker_ids, ref_wavs, ref_lengths, is_self_ref, ref_speaker_ids = batch
                  ref_speaker_ids = ref_speaker_ids.to(device)
             else:
-                 # Fallback for old collate (should not happen if dataset updated)
+                 
                  wavs, text_ids, text_masks, lengths, speaker_ids, ref_wavs, ref_lengths, is_self_ref = batch
-                 ref_speaker_ids = speaker_ids # Assume same
+                 ref_speaker_ids = speaker_ids 
 
             wavs = wavs.to(device)
             text_ids = text_ids.to(device)
@@ -876,7 +908,7 @@ def train(
             is_self_ref = is_self_ref.to(device)
             speaker_ids = speaker_ids.to(device)
 
-            # Sanity Check Logging (every 100 steps)
+            
             if global_step % 100 == 0:
                 same_speaker = (speaker_ids == ref_speaker_ids).float().mean().item()
                 self_ref_ratio = is_self_ref.float().mean().item()
@@ -898,14 +930,14 @@ def train(
             valid_mel_len = lengths.to(device).float() / hop_length
             valid_z_len = (valid_mel_len / chunk_compress_factor).ceil().long().clamp(min=1, max=T)
 
-            # Zero out padded regions in z_1 for stability - MOVED UP
+            
             latent_mask = (torch.arange(T, device=device).expand(B, T) < valid_z_len.unsqueeze(1)).unsqueeze(1).float()
             z_1 = z_1 * latent_mask
 
             valid_mel_len_ref = ref_lengths.to(device).float() / hop_length
             valid_z_len_ref = (valid_mel_len_ref / chunk_compress_factor).ceil().long().clamp(min=1, max=z_ref_full.shape[2])
 
-            # Mask z_ref_full before slicing to prevent garbage leakage
+            
             T_ref_in = z_ref_full.shape[2]
             ref_full_mask = (torch.arange(T_ref_in, device=device).expand(B, T_ref_in) < valid_z_len_ref.unsqueeze(1)).unsqueeze(1).float()
             z_ref_full = z_ref_full * ref_full_mask
@@ -915,18 +947,18 @@ def train(
                 chunk_compress_factor=chunk_compress_factor
             )
 
-            # --- Encode Conditions ---
-            # 1. Reference Encoder: extract speaker style values only
+            
+            
             ref_values = reference_encoder(z_ref, mask=ref_enc_mask)
 
-            # Validation for Reference Encoder Mask Respect (Every 1000 steps)
+            
             if global_step % 1000 == 0:
                 with torch.no_grad():
-                     # Permute padded regions of z_ref and check if ref_values change
+                     
                      z_ref_noise = z_ref.clone()
-                     # Invert mask: 1 where padding
+                     
                      inv_mask = (1.0 - ref_enc_mask)
-                     # Add noise only to padded regions
+                     
                      z_ref_noise = z_ref_noise + inv_mask * torch.randn_like(z_ref) * 10.0
 
                      ref_vals_noise = reference_encoder(z_ref_noise, mask=ref_enc_mask)
@@ -934,49 +966,48 @@ def train(
                      if diff > 1e-5:
                          print(f"WARNING: ReferenceEncoder is sensitive to padded values! Max Diff: {diff}")
 
-            # 2. Text Encoder: speaker-adaptive text
+            
             h_text = text_encoder(
                 text_ids,
                 ref_values,
                 text_mask=text_masks,
             )
 
-            # Compute valid/padding mask ONCE for base batch (used by SPFM + FM)
-            # (latent_mask already computed above)
-            valid_len_mask = latent_mask
+            
+            
 
             _, D_text, T_txt = h_text.shape
 
-            # ---------------------------------------------
-            # SPFM: Self-Purifying Flow Matching (paper-aligned)
-            # ---------------------------------------------
-            spfm_mask = torch.ones(B, 1, 1, device=device)  # keep all by default
+            
+            
+            
+            spfm_mask = torch.ones(B, 1, 1, device=device)  
             spfm_start = spfm_start_override if spfm_start_override is not None else 40_000
             end_spfm = max_steps
 
             if global_step >= spfm_start and global_step <= end_spfm:
-                # Optimized SPFM: Use existing tensors (cheaper)
-                # No eval() switch, no re-computation
+                
+                
 
                 with torch.no_grad():
-                    # Reuse computed conditions
+                    
                     h_text_spfm = h_text
                     ref_values_spfm = ref_values
 
                     _, D_text_spfm, T_txt_spfm = h_text_spfm.shape
 
-                    # Probe time t' = Fixed 0.5 (Paper recommendation)
+                    
                     t_spfm = torch.full((B,), 0.5, device=device)
                     t_b = t_spfm.view(B, 1, 1)
 
-                    # Fresh noise x0
+                    
                     x0 = torch.randn(B, C, T, device=device)
 
-                    # Same interpolation rule (sigma_min from config: ttl.flow_matching.sig_min)
+                    
                     x_t = (1 - (1 - sigma_min) * t_b) * x0 + t_b * z_1
                     v_target_spfm = z_1 - (1 - sigma_min) * x0
 
-                    # Mask x_t before VF to avoid padding noise affecting the decision
+                    
                     x_t_in = x_t * latent_mask
 
                     v_cond = vf_estimator(
@@ -988,7 +1019,7 @@ def train(
                         current_step=t_spfm,
                     )
 
-                    # Unconditional tensors
+                    
                     u_text_spfm = u_text.expand(B, D_text_spfm, 1)
                     u_ref_spfm  = u_ref.expand(B, -1, -1)
                     u_text_mask_spfm = torch.ones(B, 1, 1, device=device)
@@ -1002,12 +1033,12 @@ def train(
                         current_step=t_spfm,
                     )
 
-                    # Loss mask: padding AND self-ref hole
-                    final_mask_spfm = latent_mask * target_loss_mask          # [B,1,T]
-                    mask_ct = final_mask_spfm.expand(-1, C, -1)               # [B,C,T]
-                    denom = (final_mask_spfm.sum(dim=(1,2)) * C).clamp_min(1) # [B]
+                    
+                    final_mask_spfm = latent_mask * target_loss_mask          
+                    mask_ct = final_mask_spfm.expand(-1, C, -1)               
+                    denom = (final_mask_spfm.sum(dim=(1,2)) * C).clamp_min(1) 
 
-                    # MSE for Decision (Paper-aligned)
+                    
                     err_c2 = (v_cond   - v_target_spfm).pow(2)
                     err_u2 = (v_uncond - v_target_spfm).pow(2)
 
@@ -1017,20 +1048,20 @@ def train(
                     is_dirty_candidate = (L_cond > L_uncond)
                     spfm_score = L_cond - L_uncond
 
-                    # No Top-K filtering on detection (Pure "honest" detection)
+                    
                     spfm_mask = torch.ones(B, 1, 1, device=device)
                     dirty_indices = torch.where(is_dirty_candidate)[0]
 
                     if dirty_indices.numel() > 0:
                          spfm_mask[dirty_indices] = 0.0
 
-                    # Log raw dirty count for visibility
+                    
                     raw_dirty_count = dirty_indices.numel()
 
                     if global_step % 1000 == 0:
                         print(f"[SPFM] Detected Dirty: {raw_dirty_count}/{B}")
 
-                # 4) Diagnostics: use TEXT length and LATENT length (not waveform length)
+                
                 dirty_bool = (spfm_mask.squeeze(-1).squeeze(-1) < 0.5)
                 dirty_count = dirty_bool.sum().item()
 
@@ -1042,8 +1073,8 @@ def train(
                 if global_step % 1000 == 0 and rank == 0:
                     clean_bool = ~dirty_bool
 
-                    txt_len = text_masks.sum(dim=(1, 2)).float()   # tokens
-                    lat_len = valid_z_len.float()                  # latent frames
+                    txt_len = text_masks.sum(dim=(1, 2)).float()   
+                    lat_len = valid_z_len.float()                  
 
                     avg_txt_clean = txt_len[clean_bool].mean().item() if clean_bool.any() else 0.0
                     avg_txt_dirty = txt_len[dirty_bool].mean().item() if dirty_bool.any() else 0.0
@@ -1057,7 +1088,7 @@ def train(
                         f"LatLen clean/dirty: {avg_lat_clean:.1f}/{avg_lat_dirty:.1f}"
                     )
 
-            # Batch Expansion
+            
             z_1_exp = z_1.repeat_interleave(Ke, dim=0)
             h_text_exp = h_text.repeat_interleave(Ke, dim=0)
             ref_values_exp = ref_values.repeat_interleave(Ke, dim=0)
@@ -1075,50 +1106,50 @@ def train(
                 x_t = (1 - (1 - sigma_min) * t_broad) * x_0 + t_broad * z_1_exp
                 v_target = z_1_exp - (1 - sigma_min) * x_0
 
-            # ------------------------------------------------------------------
-            # CFG & SPFM Routing (config: ttl.uncond_masker)
-            # ------------------------------------------------------------------
-            # Two-mode unconditional dropout per config:
-            #   prob_both_uncond: drop BOTH text AND style  (config: 0.04)
-            #   prob_text_uncond: drop ONLY text, keep style (config: 0.01)
+            
+            
+            
+            
+            
+            
 
-            # 1. Determine per-sample unconditional modes
+            
             cfg_rand = torch.rand(B_eff, device=device)
             drop_both = cfg_rand < prob_both_uncond
             drop_text_only = (cfg_rand >= prob_both_uncond) & (cfg_rand < puncond)
             force_text_uncond = drop_both | drop_text_only
             force_style_uncond = drop_both.clone()
 
-            # SPFM Dirty Injection
+            
             if spfm_mask_exp is not None:
                 is_dirty = (spfm_mask_exp.view(B_eff) < 0.5)
                 force_text_uncond = force_text_uncond | is_dirty
                 force_style_uncond = force_style_uncond | is_dirty
 
-            # 2. Build mixed cond/uncond inputs
+            
             mask_text_uncond = force_text_uncond.view(-1, 1, 1).float()
             mask_text_cond = 1.0 - mask_text_uncond
             mask_style_uncond = force_style_uncond.view(-1, 1, 1).float()
             mask_style_cond = 1.0 - mask_style_uncond
 
-            # Text context
+            
             u_text_padded = F.pad(u_text, (0, T_txt - 1))
             u_text_batch = u_text_padded.expand(B_eff, -1, -1)
             h_context = h_text_exp * mask_text_cond + u_text_batch * mask_text_uncond
 
-            # Text mask
+            
             mask_uncond_valid = torch.zeros_like(text_masks_base_exp)
             mask_uncond_valid[:, :, 0] = 1.0
             text_mask_final = text_masks_base_exp * mask_text_cond + mask_uncond_valid * mask_text_uncond
 
-            # Style values only (VF uses its own self.style_key for timing)
+            
             u_ref_batch = u_ref.expand(B_eff, -1, -1)
             ref_values_final = ref_values_exp * mask_style_cond + u_ref_batch * mask_style_uncond
 
-            # Mask x_t before VF to ensure padding doesn't leak into convolution history
+            
             x_t_in = x_t * latent_mask_exp
 
-            # 3. Single Forward Pass
+            
             v_pred = vf_estimator(
                 noisy_latent=x_t_in,
                 text_emb=h_context,
@@ -1128,20 +1159,20 @@ def train(
                 current_step=t
             )
 
-            # 5. Loss Calculation (L1)
-            # Define final mask for loss (padding + reference hole)
+            
+            
             final_mask = latent_mask_exp * target_loss_mask_exp
 
             loss_raw = F.l1_loss(v_pred, v_target, reduction='none')
             mask_ct = final_mask.expand(-1, C, -1)
             loss = (loss_raw * mask_ct).sum() / (mask_ct.sum() + 1e-8)
 
-            # Normalize loss for gradient accumulation
+            
             loss = loss / accumulation_steps
 
             if global_step % 1000 == 0 and rank == 0:
                 with torch.no_grad():
-                    # Calculate stats
+                    
                     dirty_rate = (spfm_mask_exp < 0.5).float().mean().item()
                     p_text_uncond_eff = force_text_uncond.float().mean().item()
                     p_style_uncond_eff = force_style_uncond.float().mean().item()
@@ -1168,7 +1199,7 @@ def train(
 
                 global_step += 1
 
-            # Scale loss back up for logging
+            
             epoch_loss += loss.item() * accumulation_steps
             num_batches += 1
             avg_loss = epoch_loss / num_batches
@@ -1188,7 +1219,7 @@ def train(
                     ref_wav_torch_v1=ref_wav_torch_v1,
                 )
 
-        # Flush remaining gradients if dataloader length is not divisible by accumulation_steps
+        
         if num_batches % accumulation_steps != 0:
             torch.nn.utils.clip_grad_norm_(params, 10.0)
             optimizer.step()
@@ -1198,7 +1229,7 @@ def train(
 
         if spfm_call_batches > 0:
             if dist.is_initialized():
-                # Aggregate SPFM stats across all GPUs
+                
                 spfm_stats = torch.tensor([
                     spfm_dirty_total, 
                     spfm_total_samples, 
