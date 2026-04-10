@@ -122,8 +122,10 @@ def text_to_indices(text: str, lang: str = "he") -> list[int]:
     lang_token = LANG_ID[lang]
     return [lang_token] + [CHAR_TO_ID.get(ch, PAD_ID) for ch in text]
 
+
 def indices_to_text(indices: list[int]) -> str:
     return "".join(ID_TO_CHAR.get(i, "?") for i in indices)
+
 
 def normalize_text(text: str, lang: str = "he") -> str:
     text = text.strip()
@@ -142,6 +144,7 @@ def normalize_text(text: str, lang: str = "he") -> str:
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
+
 def check_coverage(text: str) -> dict:
     known, unknown = [], []
     for ch in text:
@@ -153,6 +156,7 @@ def check_coverage(text: str) -> dict:
         "missing_chars": sorted(set(unknown)),
         "missing_codepoints": [f"U+{ord(c):04X}" for c in sorted(set(unknown))],
     }
+
 
 def get_supported_languages() -> list[str]:
     return list(LANG_ID.keys())
