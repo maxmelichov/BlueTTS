@@ -51,7 +51,6 @@ def build_reference_from_latents(z_1, valid_z_len, z_ref_input, valid_z_ref_len,
             copy_len = min(length, T)
             z_ref_left[i, :, :copy_len] = z_1[i, :, mask_start:mask_start + copy_len]
             ref_mask_left[i, :, :copy_len] = 1.0
-
         else:
             half_ref = max(1, ref_T // 2)
             upper_bound = max(1, min(max_frames, half_ref))
