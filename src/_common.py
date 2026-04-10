@@ -1,17 +1,9 @@
-"""
-Shared helpers for all blue_* inference packages.
-
-Contains: Style, TextProcessor, chunk_text
-No backend-specific deps (numpy / torch stay in each package's __init__).
-"""
-
 import os
 import re
 import sys
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
-# Ensure this file's directory (src/) is on sys.path so _blue_vocab is importable.
 _here = os.path.dirname(os.path.abspath(__file__))
 if _here not in sys.path:
     sys.path.insert(0, _here)
@@ -19,19 +11,12 @@ if _here not in sys.path:
 from _blue_vocab import normalize_text  # noqa: E402
 
 
-# ─── Data class ───────────────────────────────────────────────────────────────
-
 @dataclass
 class Style:
-    """Pre-extracted speaker style vectors (backend-agnostic container).
-
-    Fields hold np.ndarray (blue_onnx) or torch.Tensor (blue_trt / blue_pt).
-    """
+    """Pre-extracted speaker style vectors (backend-agnostic container)."""
     ttl: Any            # [B, n_style, style_dim]
     dp:  Optional[Any] = None   # [B, dp_tokens, dp_dim] or None
 
-
-# ─── Text helpers ─────────────────────────────────────────────────────────────
 
 class TextProcessor:
     """Multilingual phonemization — phonikud for Hebrew, espeak for others."""
