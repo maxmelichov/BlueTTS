@@ -18,15 +18,57 @@ uv run hf download notmax123/LightBlue --repo-type model --local-dir ./onnx_mode
 wget https://huggingface.co/thewh1teagle/phonikud-onnx/resolve/main/phonikud-1.0.int8.onnx
 ```
 
-## Usage
+## Usage & Examples
 
-```bash
-uv run examples/basic.py
+You can use the `src.blue_onnx` module directly to run inference. The model supports 5 languages (`he`, `en`, `es`, `it`, `ge`) and you can even mix them in a single sentence using `<lan></lan>` tags!
+
+### Basic Example
+
+```python
+import soundfile as sf
+from src.blue_onnx import LightBlueTTS
+
+# Initialize the TTS engine with the ONNX models and a voice style
+tts = LightBlueTTS(
+    onnx_dir="onnx_models", 
+    style_json="voices/female1.json",
+    phonikud_path="phonikud-1.0.int8.onnx" # Required for Hebrew text
+)
+
+# Synthesize speech
+text = "שלום, זהו מודל דיבור בעברית."
+samples, sr = tts.synthesize(text, lang="he")
+
+# Save to file
+sf.write("output.wav", samples, sr)
+print("Saved output.wav")
 ```
 
-## Examples
+### Multi-Language Example
 
-See [examples](examples/)
+You can combine multiple languages in a single prompt by using `<lan></lan>` tags (e.g., `<en></en>`, `<es></es>`, `<it></it>`, `<ge></ge>`, `<he></he>`). 
+
+```python
+import soundfile as sf
+from src.blue_onnx import LightBlueTTS
+
+tts = LightBlueTTS(
+    onnx_dir="onnx_models", 
+    style_json="voices/female1.json",
+    phonikud_path="phonikud-1.0.int8.onnx"
+)
+
+# Mix Hebrew, English, and Spanish in one sentence!
+mixed_text = "שלום לכולם, <en>welcome to the presentation</en>, <es>espero que lo disfruten</es>."
+
+# Synthesize the mixed text (default base language is Hebrew)
+samples, sr = tts.synthesize(mixed_text, lang="he")
+
+sf.write("mixed_output.wav", samples, sr)
+print("Saved mixed_output.wav")
+```
+
+See the [examples](examples/) folder for more scripts.
 
 ## TensorRT
 
