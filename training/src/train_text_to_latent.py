@@ -481,7 +481,7 @@ def run_inference(
     mean, std, normalizer_scale, latent_dim, chunk_compress_factor, ae_sample_rate,
     val_batch, val_z_ref, val_ref_enc_mask, val_text_ids, val_text_masks, val_wavs,
     u_text, u_ref, optimizer, scheduler, device,
-    ref_wav_torch_v1=None,
+    rank, ref_wav_torch_v1=None,
 ):
     """Save checkpoint and generate inference audio samples. Called every 1000 steps."""
     if global_step % 1000 == 0 and rank == 0:
@@ -1218,7 +1218,7 @@ def train(
                     mean, std, normalizer_scale, latent_dim, chunk_compress_factor, ae_sample_rate,
                     val_batch, val_z_ref, val_ref_enc_mask, val_text_ids, val_text_masks, val_wavs,
                     u_text, u_ref, optimizer, scheduler, device,
-                    ref_wav_torch_v1=ref_wav_torch_v1,
+                    rank, ref_wav_torch_v1=ref_wav_torch_v1,
                 )
 
         
