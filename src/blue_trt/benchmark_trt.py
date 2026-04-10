@@ -578,7 +578,7 @@ if __name__ == "__main__":
     parser.add_argument("--cfg", type=float, default=3.0, help="Classifier Free Guidance scale")
     parser.add_argument("--speed", type=float, default=1.0, help="Speed factor (higher = faster/shorter)")
     parser.add_argument("--config", type=str, default="configs/tts.json", help="Path to tts.json config")
-    parser.add_argument("--lang", type=str, default="he", choices=["he", "en", "de", "it", "es", "fr", "pt"],
+    parser.add_argument("--lang", type=str, default="he", choices=["he", "en", "ge", "it", "es"],
                         help="Language of input text for text_to_indices (default: he)")
     args = parser.parse_args()
 

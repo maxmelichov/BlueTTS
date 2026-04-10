@@ -89,11 +89,13 @@ class ConvNeXtBlock(nn.Module):
 # =========================================================
 
 class ConvNeXtWrapper(nn.Module):
-    def __init__(self, d_model, n_layers, expansion_factor):
+    def __init__(self, d_model, n_layers, expansion_factor, kernel_size=5, dilation_lst=None):
         super().__init__()
+        if dilation_lst is None:
+            dilation_lst = [1] * n_layers
         self.convnext = nn.ModuleList([
-            ConvNeXtBlock(d_model, expansion_factor=expansion_factor)
-            for _ in range(n_layers)
+            ConvNeXtBlock(d_model, expansion_factor=expansion_factor, kernel_size=kernel_size, dilation=dilation_lst[i])
+            for i in range(n_layers)
         ])
 
     def forward(self, x, mask=None):
@@ -478,7 +480,12 @@ class TextEncoder(nn.Module):
                  n_conv_layers: int = 6,
                  n_attn_layers: int = 4,
                  expansion_factor: int = 4,
-                 p_dropout: float = 0.1):
+                 p_dropout: float = 0.1,
+                 kernel_size: int = 5,
+                 dilation_lst: list = None,
+                 attn_n_heads: int = 4,
+                 attn_filter_channels: int = 1024,
+                 spte_n_heads: int = 2):
         super().__init__()
 
         self.d_model = d_model
@@ -488,19 +495,19 @@ class TextEncoder(nn.Module):
         self.text_embedder = TextEmbedderWrapper(vocab_size, d_model)
 
         # Wrapper for matching keys: convnext.convnext
-        self.convnext = ConvNeXtWrapper(d_model, n_conv_layers, expansion_factor)
+        self.convnext = ConvNeXtWrapper(d_model, n_conv_layers, expansion_factor, kernel_size=kernel_size, dilation_lst=dilation_lst)
 
         self.attn_encoder = AttnEncoder(
             d_model,
-            n_heads=4,
-            filter_channels=hidden_dim,
+            n_heads=attn_n_heads,
+            filter_channels=attn_filter_channels,
             n_layers=n_attn_layers,
             p_dropout=p_dropout
         )
 
         self.speech_prompted_text_encoder = StyleAttention(
             d_model,
-            num_heads=2,
+            num_heads=spte_n_heads,
             num_style_tokens=50
         )
 

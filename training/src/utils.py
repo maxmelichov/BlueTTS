@@ -1,7 +1,6 @@
 import random
 import numpy as np
 import torch
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 from bluecodec.utils import decompress_latents
 

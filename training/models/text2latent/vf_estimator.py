@@ -4,8 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .text_encoder import LayerNorm as LayerNormWrapper
-
 # -----------------------------------------------------------------------------
 # Wrappers to match Checkpoint/Notebook Structure
 # -----------------------------------------------------------------------------
@@ -20,6 +18,21 @@ class LinearWrapper(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(x)
+
+class LayerNormWrapper(nn.Module):
+    """
+    Wraps nn.LayerNorm. Expects [B, C, T] input, normalizes over C.
+    """
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim, eps=eps)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, C, T] -> [B, T, C] -> norm -> [B, C, T]
+        x = x.transpose(1, 2)
+        x = self.norm(x)
+        x = x.transpose(1, 2)
+        return x
 
 class ProjectionWrapper(nn.Module):
     """
@@ -469,6 +482,9 @@ class VectorFieldEstimator(nn.Module):
         num_superblocks: int = 4,
         time_embed_dim: int = 64,    # Matches ONNX graph
         rope_gamma: float = 10.0,  # LARoPE scaling factor (tts.json: rotary_scale=10)
+        main_blocks_cfg: dict = None,
+        last_convnext_cfg: dict = None,
+        text_n_heads: int = 4,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -506,10 +522,17 @@ class VectorFieldEstimator(nn.Module):
         # Constant_9 in each attention block all equal 16.0).
         shared_attn_scale = math.sqrt(256)  # = sqrt(attn_dim) = 16.0
         
+        mb_cfg = main_blocks_cfg or {}
+        lc_cfg = last_convnext_cfg or {}
+        
+        c0_cfg = mb_cfg.get("convnext_0", {})
+        c1_cfg = mb_cfg.get("convnext_1", {})
+        c2_cfg = mb_cfg.get("convnext_2", {})
+        
         for _ in range(num_superblocks):
             # 0: 4x Dilated ConvNeXt
             self.main_blocks.append(
-                ConvNeXtStack(hidden_channels, kernel_size=5, dilations=[1, 2, 4, 8])
+                ConvNeXtStack(hidden_channels, kernel_size=c0_cfg.get("ksz", 5), dilations=c0_cfg.get("dilation_lst", [1, 2, 4, 8]))
             )
             # 1: Time Injection
             self.main_blocks.append(
@@ -517,14 +540,14 @@ class VectorFieldEstimator(nn.Module):
             )
             # 2: 1x Standard ConvNeXt
             self.main_blocks.append(
-                ConvNeXtStack(hidden_channels, kernel_size=5, dilations=[1])
+                ConvNeXtStack(hidden_channels, kernel_size=c1_cfg.get("ksz", 5), dilations=c1_cfg.get("dilation_lst", [1]))
             )
             # 3: Text Attention (Length-Aware RoPE / LARoPE)
             self.main_blocks.append(
                 CrossAttentionBlock(
                     d_model=hidden_channels,
                     d_context=text_dim,
-                    num_heads=4,
+                    num_heads=text_n_heads,
                     attn_dim=256,
                     use_rope=True,
                     rope_gamma=self.rope_gamma,
@@ -533,7 +556,7 @@ class VectorFieldEstimator(nn.Module):
             )
             # 4: 1x Standard ConvNeXt
             self.main_blocks.append(
-                ConvNeXtStack(hidden_channels, kernel_size=5, dilations=[1])
+                ConvNeXtStack(hidden_channels, kernel_size=c2_cfg.get("ksz", 5), dilations=c2_cfg.get("dilation_lst", [1]))
             )
             # 5: Style Attention (No RoPE, Tanh on Keys)
             self.main_blocks.append(
@@ -549,7 +572,7 @@ class VectorFieldEstimator(nn.Module):
             
         # 4. Last ConvNeXt
         self.last_convnext = ConvNeXtStack(
-            hidden_channels, kernel_size=5, dilations=[1, 1, 1, 1]
+            hidden_channels, kernel_size=lc_cfg.get("ksz", 5), dilations=lc_cfg.get("dilation_lst", [1, 1, 1, 1])
         )
         
         # 5. Output Projection
@@ -669,3 +692,37 @@ class VectorFieldEstimator(nn.Module):
         else:
             # Training: return raw vector field prediction
             return diff_out
+
+if __name__ == "__main__":
+    B = 1
+    T_latent = 100
+    T_text = 60
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Running on {device}")
+
+    model = VectorFieldEstimator(
+        in_channels=144, hidden_channels=512, out_channels=144,
+        text_dim=256, style_dim=256, num_superblocks=4, time_embed_dim=64,
+    ).to(device).eval()
+
+    print(f"Params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
+
+    # ONNX input spec
+    noisy_latent = torch.randn(B, 144, T_latent, device=device)
+    text_emb     = torch.randn(B, 256, T_text, device=device)
+    style_ttl    = torch.randn(B, 50, 256, device=device)
+    latent_mask  = torch.ones(B, 1, T_latent, device=device)
+    text_mask    = torch.ones(B, 1, T_text, device=device)
+    current_step = torch.tensor([5.0], device=device)
+    total_step   = torch.tensor([32.0], device=device)
+    style_keys   = torch.randn(1, 50, 256, device=device)
+
+    with torch.no_grad():
+        out = model(noisy_latent, text_emb, style_ttl,
+                    latent_mask, text_mask, current_step, total_step,
+                    style_keys=style_keys)
+
+    print(f"Output: {out.shape}")
+    assert out.shape == (B, 144, T_latent)
+    print("OK")

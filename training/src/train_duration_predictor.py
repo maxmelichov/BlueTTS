@@ -5,6 +5,7 @@ import random
 import json
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torch.utils.data import DataLoader, WeightedRandomSampler
@@ -16,9 +17,9 @@ from functools import partial
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from data.text2latent_dataset import Text2LatentDataset, collate_text2latent
-from data.text_vocab import CHAR_TO_ID
-from bluecodec import LatentEncoder
-from bluecodec.utils import LinearMelSpectrogram, compress_latents
+from data.text_vocab import CHAR_TO_ID, VOCAB_SIZE
+from models.utils import LinearMelSpectrogram, compress_latents
+from models.autoencoder.latent_encoder import LatentEncoder
 from models.text2latent.dp_network import DPNetwork
 
 
@@ -258,8 +259,8 @@ def collate_dp(batch, spk2idx=None, unknown_spk=0):
 
 def train_duration_predictor(
     checkpoint_dir: str = "checkpoints/duration_predictor",
-    ae_checkpoint: str = "checkpoints/ae/ae_latest_newer.pt",
-    stats_path: str = "stats_real_data.pt",
+    ae_checkpoint: str = "checkpoints/ae/ae_latest.pt",
+    stats_path: str = "stats_multilingual.pt",
     config_path: str = "configs/tts.json",
     max_steps: int = 1000,
     batch_size: int = 64,
@@ -275,14 +276,6 @@ def train_duration_predictor(
     dp_cfg = _load_dp_config(config_path)
     full_cfg = dp_cfg.get("_full", {})
 
-    ae_cfg_json = full_cfg.get("ae", {})
-    ae_enc_json = ae_cfg_json.get("encoder", {})
-    ae_spec_json = ae_enc_json.get("spec_processor", {})
-    ae_hop_length = ae_spec_json.get("hop_length", 512)
-    ae_sample_rate = ae_cfg_json.get("sample_rate", 44100)
-    ae_n_fft = ae_spec_json.get("n_fft", 2048)
-    ae_n_mels = ae_spec_json.get("n_mels", 228)
-
     latent_dim = int(dp_cfg.get("latent_dim", 24))
     chunk_compress_factor = int(dp_cfg.get("chunk_compress_factor", 6))
     normalizer_scale = float(dp_cfg.get("normalizer", {}).get("scale", 1.0))
@@ -290,6 +283,10 @@ def train_duration_predictor(
     stl = dp_cfg.get("style_encoder", {}).get("style_token_layer", {})
     style_tokens = int(stl.get("n_style", 8))
     style_dim = int(stl.get("style_value_dim", 16))
+
+    sentence_encoder_cfg = dp_cfg.get("sentence_encoder", {})
+    style_encoder_cfg = dp_cfg.get("style_encoder", {})
+    predictor_cfg = dp_cfg.get("predictor", {})
 
     compressed_channels = latent_dim * chunk_compress_factor
 
@@ -304,21 +301,16 @@ def train_duration_predictor(
     print(f"{'='*60}\n")
 
     # 1) AE encoder (frozen)
-    ae_cfg = {
-        "ksz":              ae_enc_json.get("ksz", 7),
-        "hdim":             ae_enc_json.get("hdim", 512),
-        "intermediate_dim": ae_enc_json.get("intermediate_dim", 2048),
-        "dilation_lst":     ae_enc_json.get("dilation_lst", [1] * 10),
-        "odim":             ae_enc_json.get("odim", 24),
-        "idim":             ae_enc_json.get("idim", 1253),
-    }
+    ae_enc_arch = full_cfg['ae']['encoder']
+    ae_spec_cfg = ae_enc_arch.get('spec_processor', {})
     mel_spec = LinearMelSpectrogram(
-        sample_rate=ae_sample_rate,
-        n_fft=ae_n_fft,
-        hop_length=ae_hop_length,
-        n_mels=ae_n_mels,
+        sample_rate=ae_spec_cfg.get('sample_rate', 44100),
+        n_fft=ae_spec_cfg.get('n_fft', 2048),
+        win_length=ae_spec_cfg.get('win_length', ae_spec_cfg.get('n_fft', 2048)),
+        hop_length=ae_spec_cfg.get('hop_length', 512),
+        n_mels=ae_spec_cfg.get('n_mels', 228),
     ).to(device)
-    ae_encoder = LatentEncoder(cfg=ae_cfg).to(device)
+    ae_encoder = LatentEncoder(cfg=ae_enc_arch).to(device)
 
     if os.path.exists(ae_checkpoint):
         print(f"Loading AE checkpoint from {ae_checkpoint}")
@@ -337,16 +329,24 @@ def train_duration_predictor(
     mel_spec.eval()
 
     # 2) Duration Predictor (paper-style DPNetwork)
-    # Keep vocab_size = 37 (Hebrew G2B + Punctuation)
-    model = DPNetwork(vocab_size=37, style_tokens=style_tokens, style_dim=style_dim).to(device)
+    model = DPNetwork(
+        vocab_size=VOCAB_SIZE,
+        style_tokens=style_tokens,
+        style_dim=style_dim,
+        sentence_encoder_cfg=sentence_encoder_cfg,
+        style_encoder_cfg=style_encoder_cfg,
+        predictor_cfg=predictor_cfg,
+    ).to(device)
     optimizer = AdamW(model.parameters(), lr=lr)
+    # model.load_state_dict(torch.load("checkpoints/duration_predictor/duration_predictor_1000.pt", map_location="cpu"))
+    # model.load_state_dict(torch.load("checkpoints/duration_predictor/duration_predictor_final.pt", map_location="cpu"))
 
     # 3) Dataset
     metadata_path = "generated_audio/combined_dataset_cleaned_real_data.csv"
     dataset = Text2LatentDataset(
         metadata_path,
-        sample_rate=ae_sample_rate,
-        max_wav_len=ae_sample_rate * 20,
+        sample_rate=44100,
+        max_wav_len=44100 * 20,
         max_text_len=800,
     )
 
@@ -447,7 +447,7 @@ def train_duration_predictor(
             B, C, T_lat = z.shape
 
             # Compute valid latent length from waveform length
-            valid_mel_len = lengths.to(device).float() / ae_hop_length
+            valid_mel_len = lengths.to(device).float() / 512
             valid_z_len = (valid_mel_len / chunk_compress_factor).ceil().long().clamp(min=1, max=T_lat)
 
             # -------------------------------------------------
@@ -554,7 +554,7 @@ if __name__ == "__main__":
         default="configs/tts.json",
         help="Path to tts.json config file (default: configs/tts.json)",
     )
-    parser.add_argument("--max_steps", type=int, default=6000)
+    parser.add_argument("--max_steps", type=int, default=9181)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--device", type=str, default=None)
