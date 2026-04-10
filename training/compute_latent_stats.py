@@ -66,11 +66,15 @@ def main():
     if os.path.exists(checkpoint_path):
         print(f"Loading AE checkpoint from {checkpoint_path}")
         ckpt = torch.load(checkpoint_path, map_location="cpu")
-        if "encoder" in ckpt: encoder.load_state_dict(ckpt["encoder"])
-        elif "state_dict" in ckpt: encoder.load_state_dict(ckpt["state_dict"], strict=False)
+        if "encoder" in ckpt:
+            encoder.load_state_dict(ckpt["encoder"])
+        elif "state_dict" in ckpt:
+            encoder.load_state_dict(ckpt["state_dict"], strict=False)
         else:
-            try: encoder.load_state_dict(ckpt)
-            except Exception as e: print(f"Could not load AE encoder: {e}")
+            try:
+                encoder.load_state_dict(ckpt)
+            except Exception as e:
+                print(f"Could not load AE encoder: {e}")
     else:
         print(f"WARNING: Checkpoint {checkpoint_path} not found.")
     encoder.eval()
@@ -83,11 +87,18 @@ def main():
             mel = mel_spec(wavs.squeeze(1))
             z = compress_latents(encoder(mel), factor=compression_factor)
             B, C, T_z = z.shape
-            valid_z_len = (lengths.to(device).float() / float(hop_length) / compression_factor).ceil().long().clamp(min=1, max=T_z)
-            mask = torch.arange(T_z, device=device).expand(B, T_z) < valid_z_len.unsqueeze(1)
+
+            valid_z_len = (
+                lengths.to(device).float() / float(hop_length) / compression_factor
+            ).ceil().long().clamp(min=1, max=T_z)
+
+            mask    = torch.arange(T_z, device=device).expand(B, T_z) < valid_z_len.unsqueeze(1)
             valid_z = z.permute(0, 2, 1).contiguous()[mask]
-            if valid_z.numel() == 0: continue
-            total_sum += valid_z.sum(dim=0)
+
+            if valid_z.numel() == 0:
+                continue
+
+            total_sum    += valid_z.sum(dim=0)
             total_sq_sum += (valid_z ** 2).sum(dim=0)
             total_frames += valid_z.shape[0]
     if total_frames == 0:
