@@ -36,6 +36,8 @@ class ReferenceEncoder(nn.Module):
         num_blocks: int = 6,
         num_tokens: int = 50,
         num_heads: int = 2,      # tts.json: style_token_layer.n_heads=2
+        kernel_size: int = 5,
+        dilation_lst: list = None,
     ):
         super().__init__()
         self.d_model = d_model
@@ -55,7 +57,7 @@ class ReferenceEncoder(nn.Module):
         # Uses ConvNeXtWrapper for consistent weight naming (norm.norm.weight)
         # with the rest of the codebase (text_encoder, duration_predictor).
         # Keys: convnext.convnext.N.{dwconv,norm,pwconv1,pwconv2,gamma}
-        self.convnext = ConvNeXtWrapper(d_model, n_layers=num_blocks, expansion_factor=mlp_ratio)
+        self.convnext = ConvNeXtWrapper(d_model, n_layers=num_blocks, expansion_factor=mlp_ratio, kernel_size=kernel_size, dilation_lst=dilation_lst)
         
         self.pos_emb = SinusoidalPositionalEmbedding(d_model)
         

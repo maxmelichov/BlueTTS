@@ -19,11 +19,17 @@ class DPNetwork(TTSDurationModel):
         latent_channels: int = 144,   # kept for call-site compat, unused
         style_tokens: int = 8,
         style_dim: int = 16,
+        sentence_encoder_cfg: dict = None,
+        style_encoder_cfg: dict = None,
+        predictor_cfg: dict = None,
     ):
         super().__init__(
             vocab_size=vocab_size,
             style_tokens=style_tokens,
             style_dim=style_dim,
+            sentence_encoder_cfg=sentence_encoder_cfg,
+            style_encoder_cfg=style_encoder_cfg,
+            predictor_cfg=predictor_cfg,
         )
 
     def forward(

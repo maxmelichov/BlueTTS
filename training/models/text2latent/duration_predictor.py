@@ -201,12 +201,26 @@ class DurationEstimator(nn.Module):
 
 
 class TTSDurationModel(nn.Module):
-    def __init__(self, vocab_size=37, style_tokens=8, style_dim=16):
+    def __init__(self, vocab_size=37, style_tokens=8, style_dim=16, sentence_encoder_cfg=None, style_encoder_cfg=None, predictor_cfg=None):
         super().__init__()
         self.vocab_size = vocab_size
-        self.sentence_encoder = DPTextEncoder(vocab_size=vocab_size)
-        self.ref_encoder = DPReferenceEncoder(num_queries=style_tokens, query_dim=style_dim)
-        self.predictor = DurationEstimator(text_dim=64, style_dim=style_tokens * style_dim)
+        
+        # Parse configs
+        se_cfg = sentence_encoder_cfg or {}
+        st_cfg = style_encoder_cfg or {}
+        pr_cfg = predictor_cfg or {}
+        
+        se_d_model = se_cfg.get("char_emb_dim", 64)
+        
+        st_proj = st_cfg.get("proj_in", {})
+        st_d_model = st_proj.get("odim", 64)
+        
+        pr_text_dim = pr_cfg.get("sentence_dim", 64)
+        pr_style_dim = pr_cfg.get("n_style", style_tokens) * pr_cfg.get("style_dim", style_dim)
+        
+        self.sentence_encoder = DPTextEncoder(vocab_size=vocab_size, d_model=se_d_model)
+        self.ref_encoder = DPReferenceEncoder(num_queries=style_tokens, query_dim=style_dim, d_model=st_d_model)
+        self.predictor = DurationEstimator(text_dim=pr_text_dim, style_dim=pr_style_dim)
 
     def forward(self, text_ids, z_ref=None, text_mask=None, ref_mask=None, style_tokens=None, return_log=False):
         """
@@ -235,3 +249,30 @@ class TTSDurationModel(nn.Module):
         duration = self.predictor(text_emb, style_emb, text_mask=text_mask, return_log=return_log) # [B]
         
         return duration
+
+if __name__ == "__main__":
+    model = TTSDurationModel(vocab_size=37, style_tokens=8, style_dim=16)
+    model.eval()
+    B = 2
+    T = 50
+
+    # --- Test 1: ONNX style-path (text_ids, style_dp, text_mask) ---
+    text = torch.randint(0, 37, (B, T))
+    style_dp = torch.randn(B, 8, 16)
+    text_mask = torch.ones(B, 1, T)
+    with torch.no_grad():
+        dur_style = model(text, text_mask=text_mask, style_tokens=style_dp)
+    print(f"Style path  - Duration output: {dur_style.shape}  values: {dur_style}")
+
+    # --- Test 2: Full path with z_ref (ref_encoder computes style) ---
+    z_ref = torch.randn(B, 144, 100)
+    ref_mask = torch.ones(B, 1, 100)
+    with torch.no_grad():
+        dur_ref = model(text, z_ref=z_ref, text_mask=text_mask, ref_mask=ref_mask)
+    print(f"Ref path    - Duration output: {dur_ref.shape}  values: {dur_ref}")
+
+    # --- Verify parameter names match ONNX (with tts.dp. prefix) ---
+    print(f"\nTotal params (excl ref_encoder): "
+          f"{sum(1 for n, _ in model.named_parameters() if 'ref_encoder' not in n)}")
+    print("Vocab size note: ONNX uses 163, code uses 37 "
+          "(only char_embedder.weight shape differs)")

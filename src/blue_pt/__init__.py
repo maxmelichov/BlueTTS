@@ -7,12 +7,11 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 
-from ._vocab import text_to_indices, text_to_indices_multilang
-
 _src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _src not in sys.path:
     sys.path.insert(0, _src)
 from _common import Style, TextProcessor, chunk_text  # noqa: E402
+from _blue_vocab import text_to_indices, text_to_indices_multilang  # noqa: E402
 del _src
 
 # Resolve training models relative to repo root
