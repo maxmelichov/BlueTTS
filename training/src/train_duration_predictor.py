@@ -13,7 +13,6 @@ from torch.optim import AdamW
 from tqdm import tqdm
 from functools import partial
 
-# Add project root
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from data.text2latent_dataset import Text2LatentDataset, collate_text2latent
@@ -24,8 +23,6 @@ from models.text2latent.dp_network import DPNetwork
 
 
 def set_seed(seed: int = 42):
-    import random
-    import numpy as np
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -35,12 +32,6 @@ def set_seed(seed: int = 42):
 
 
 def _load_dp_config(config_path: str) -> dict:
-    """
-    Load `configs/tts.json` and return a DP training config dict.
-
-    We prefer the top-level "dp" section (new format). If it's missing, we
-    fall back to a minimal compatibility config derived from "ttl".
-    """
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
@@ -58,171 +49,15 @@ def _load_dp_config(config_path: str) -> dict:
         "latent_dim": ttl_cfg.get("latent_dim", 24),
         "chunk_compress_factor": ttl_cfg.get("chunk_compress_factor", 6),
         "normalizer": {"scale": ttl_cfg.get("normalizer", {}).get("scale", 1.0)},
-        # Defaults matching `TTSDurationModel` paper implementation.
         "style_encoder": {"style_token_layer": {"n_style": 8, "style_value_dim": 16}},
     }
 
 
-def collate_with_repeat_same_file(
-    batch,
-    sr: int = 44100,
-    repeat_p: float = 0.3,
-    sep_id: int = None,
-    n_min: int = 2,
-    n_max: int = 10,
-    silence_sec: float = 0.2,
-    spk2idx: dict = None,          # NEW: raw_spk_id -> contiguous idx
-    unknown_spk: int = 0,          # NEW: fallback index if raw id not found
-    max_total_samples: int = None, # cap total wav length after repetition
-):
-    """
-    Repeat the SAME sample N times to synthesize longer sequences.
-
-    batch items: (wav_1d[T], text_ids[L], speaker_id:int)
-    returns: wavs_padded, texts_padded, text_masks, wav_lengths, speaker_ids_idx
-    """
-    import random
-    import torch
-
-    assert sep_id is not None and sep_id != 0
-    assert 2 <= n_min <= n_max
-    assert spk2idx is not None, "Pass spk2idx via functools.partial(...)"
-
-    B = len(batch)
-    num_rep = int(B * repeat_p)
-    num_normal = B - num_rep
-
-    # Unpack once
-    wavs = [b[0].reshape(-1) for b in batch]  # ensure 1D
-    texts = [b[1] for b in batch]
-    speaker_ids_raw = [b[2] for b in batch]
-
-    # Map raw speaker IDs to contiguous indices (stable)
-    speaker_ids = []
-    for s in speaker_ids_raw:
-        if s in spk2idx:
-             speaker_ids.append(int(spk2idx[s]))
-        else:
-             # Try int cast if key is missing (e.g. string "1" vs int 1)
-             try:
-                 s_int = int(s)
-                 if s_int in spk2idx:
-                     speaker_ids.append(int(spk2idx[s_int]))
-                 else:
-                     speaker_ids.append(unknown_spk)
-             except (ValueError, TypeError):
-                 speaker_ids.append(unknown_spk)
-
-    # Shuffle indices so normal/repeat is unbiased
-    idxs = list(range(B))
-    random.shuffle(idxs)
-
-    # Pre-create separator token ONCE (CPU)
-    t_dtype = texts[0].dtype
-    sep_tok = torch.tensor([sep_id], dtype=t_dtype)
-
-    silence_len = int(silence_sec * sr)
-    silence = torch.zeros(silence_len, dtype=wavs[0].dtype) if silence_len > 0 else None
-
-    new_wavs = []
-    new_texts = []
-    new_speaker_ids = []
-
-    # 1) Normal samples
-    for i in idxs[:num_normal]:
-        new_wavs.append(wavs[i])
-        new_texts.append(texts[i])
-        new_speaker_ids.append(speaker_ids[i])
-
-    # 2) Repeated samples (repeat SAME sample => same speaker)
-    for _ in range(num_rep):
-        idx0 = idxs[random.randrange(B)]
-        w0 = wavs[idx0]
-        t0 = texts[idx0]
-        spk = speaker_ids[idx0]
-
-        N = random.randint(n_min, n_max)
-
-        # Cap N so the total waveform stays under max_total_samples
-        if max_total_samples is not None and w0.numel() > 0:
-            max_N = max(1, max_total_samples // w0.numel())
-            N = min(N, max_N)
-
-        # ---- wav repeat ----
-        if silence is None:
-            w_cat = w0.repeat(N)
-        else:
-            total_len = N * w0.numel() + (N - 1) * silence_len
-            w_cat = torch.empty(total_len, dtype=w0.dtype)
-            pos = 0
-            for k in range(N):
-                w_cat[pos:pos + w0.numel()] = w0
-                pos += w0.numel()
-                if k < N - 1:
-                    w_cat[pos:pos + silence_len] = silence
-                    pos += silence_len
-
-        # ---- text repeat ----
-        if N == 1:
-            t_cat = t0
-        else:
-            L = t0.numel()
-            total_L = N * L + (N - 1)
-            t_cat = torch.empty(total_L, dtype=t0.dtype)
-            pos = 0
-            sep_val = int(sep_tok.item())
-            for k in range(N):
-                t_cat[pos:pos + L] = t0
-                pos += L
-                if k < N - 1:
-                    t_cat[pos] = sep_val
-                    pos += 1
-
-        new_wavs.append(w_cat)
-        new_texts.append(t_cat)
-        new_speaker_ids.append(spk)
-
-    # ---- padding ----
-    max_wav_len = max(w.numel() for w in new_wavs)
-    max_text_len = max(t.numel() for t in new_texts)
-    out_B = len(new_wavs)
-
-    wavs_padded = torch.zeros(out_B, 1, max_wav_len, dtype=new_wavs[0].dtype)
-    wav_lengths = torch.empty(out_B, dtype=torch.long)
-
-    texts_padded = torch.zeros(out_B, max_text_len, dtype=new_texts[0].dtype)  # PAD=0
-    text_masks = torch.zeros(out_B, 1, max_text_len, dtype=torch.float32)
-
-    for i, (w, t) in enumerate(zip(new_wavs, new_texts)):
-        wl = w.numel()
-        tl = t.numel()
-        wavs_padded[i, 0, :wl] = w
-        wav_lengths[i] = wl
-        texts_padded[i, :tl] = t
-        text_masks[i, 0, :tl] = 1.0
-
-    speaker_ids_tensor = torch.tensor(new_speaker_ids, dtype=torch.long)
-    return wavs_padded, texts_padded, text_masks, wav_lengths, speaker_ids_tensor
-
-
 def collate_dp(batch, spk2idx=None, unknown_spk=0):
-    """
-    Simple collate for duration predictor training (paper Sec 4.2).
-
-    No sample repetition — each utterance is treated individually.
-    The DP predicts utterance-level total latent duration.
-
-    batch items from Text2LatentDataset:
-        (wav, text_ids, speaker_id, ref_wav, is_self_ref, ref_speaker_id)
-    returns:
-        wavs_padded [B,1,T], texts_padded [B,L], text_masks [B,1,L],
-        wav_lengths [B], speaker_ids [B]
-    """
     wavs = [b[0].reshape(-1) for b in batch]
     texts = [b[1] for b in batch]
     speaker_ids_raw = [b[2] for b in batch]
 
-    # Map raw speaker IDs to contiguous indices
     speaker_ids = []
     for s in speaker_ids_raw:
         if spk2idx is not None and s in spk2idx:
@@ -270,9 +105,6 @@ def train_duration_predictor(
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Initializing Duration Predictor training on {device}...")
 
-    # =========================================================
-    # Load DP Config from tts.json
-    # =========================================================
     dp_cfg = _load_dp_config(config_path)
     full_cfg = dp_cfg.get("_full", {})
 
@@ -328,7 +160,7 @@ def train_duration_predictor(
     ae_encoder.requires_grad_(False)
     mel_spec.eval()
 
-    # 2) Duration Predictor (paper-style DPNetwork)
+    # 2) Duration Predictor
     model = DPNetwork(
         vocab_size=VOCAB_SIZE,
         style_tokens=style_tokens,
@@ -338,8 +170,6 @@ def train_duration_predictor(
         predictor_cfg=predictor_cfg,
     ).to(device)
     optimizer = AdamW(model.parameters(), lr=lr)
-    # model.load_state_dict(torch.load("checkpoints/duration_predictor/duration_predictor_1000.pt", map_location="cpu"))
-    # model.load_state_dict(torch.load("checkpoints/duration_predictor/duration_predictor_final.pt", map_location="cpu"))
 
     # 3) Dataset
     metadata_path = "generated_audio/combined_dataset_cleaned_real_data.csv"
@@ -350,13 +180,11 @@ def train_duration_predictor(
         max_text_len=800,
     )
 
-    # Calculate weights for sampling
     speaker_ids = dataset.speaker_ids
     unique_speakers, counts = np.unique(speaker_ids, return_counts=True)
     freq = dict(zip(unique_speakers, counts))
     print(f"Speaker counts: {freq}")
-    
-    # NEW: Build spk2idx mapping
+
     try:
         spk_raw = np.array(speaker_ids, dtype=np.int64)
         uniq = np.unique(spk_raw)
@@ -365,20 +193,18 @@ def train_duration_predictor(
         print(f"Warning: Could not cast speaker_ids to int64 ({e}). Using raw values.")
         uniq = np.unique(speaker_ids)
         spk2idx = {s: int(i) for i, s in enumerate(uniq)}
-        
+
     num_speakers = len(uniq)
     print("num_speakers mapped:", num_speakers)
-    
+
     weights = np.array([1.0 / freq[s] for s in speaker_ids], dtype=np.float32)
     weights = torch.from_numpy(weights)
-    
     sampler = WeightedRandomSampler(weights, num_samples=len(dataset), replacement=True)
-    
-    # Paper Sec 4.2: DP is trained on individual utterances (no repetition).
+
     collate_fn = partial(collate_dp, spk2idx=spk2idx, unknown_spk=0)
+
     def worker_init_fn(worker_id):
         np.random.seed(42 + worker_id)
-        import random
         random.seed(42 + worker_id)
 
     dataloader = DataLoader(
@@ -427,32 +253,24 @@ def train_duration_predictor(
                 break
 
             wavs, text_ids, text_masks, lengths, speaker_ids = batch
-            wavs = wavs.to(device)          # [B, 1, T_wav]
-            text_ids = text_ids.to(device)  # [B, T_text]
-            text_masks = text_masks.to(device)  # [B, 1, T_text]
-            speaker_ids = speaker_ids.to(device) # [B]
+            wavs = wavs.to(device)
+            text_ids = text_ids.to(device)
+            text_masks = text_masks.to(device)
+            speaker_ids = speaker_ids.to(device)
 
             B = wavs.shape[0]
 
-            # -------------------------------------------------
-            # 1) Latent extraction + normalization
-            # -------------------------------------------------
             with torch.no_grad():
                 mel = mel_spec(wavs.squeeze(1))       # [B, 228, T_mel]
                 z = ae_encoder(mel)                   # [B, 24, T_lat]
                 z = compress_latents(z, factor=chunk_compress_factor)  # [B, Cc, T_lat_c]
-                # normalized compressed latents (+ optional extra normalizer scale)
                 z = ((z - mean) / std) * normalizer_scale
 
             B, C, T_lat = z.shape
 
-            # Compute valid latent length from waveform length
             valid_mel_len = lengths.to(device).float() / 512
             valid_z_len = (valid_mel_len / chunk_compress_factor).ceil().long().clamp(min=1, max=T_lat)
 
-            # -------------------------------------------------
-            # 2) Build reference segments (5% to 95% of speech)
-            # -------------------------------------------------
             # Move to CPU/numpy once to avoid per-sample GPU sync
             vz_np = valid_z_len.cpu().numpy()
 
@@ -462,7 +280,6 @@ def train_duration_predictor(
             for i in range(B):
                 L_i = int(vz_np[i])
 
-                # Range [5%, 95%] of usable frames
                 start_min = int(L_i * 0.05)
                 start_max = int(L_i * 0.95)
 
@@ -487,9 +304,6 @@ def train_duration_predictor(
                 z_ref[i, :, :L_ref] = z[i, :, s:e]
                 ref_mask[i, :, :L_ref] = 1.0
 
-            # -------------------------------------------------
-            # 3) Forward DPNetwork (in LOG domain)
-            # -------------------------------------------------
             log_pred = model(
                 text_ids=text_ids,
                 z_ref=z_ref,
@@ -499,22 +313,17 @@ def train_duration_predictor(
             )  # [B]
 
             if global_step == 0:
-                print(f"[Sanity] Pred shape: {log_pred.shape}") # Should be [B]
+                print(f"[Sanity] Pred shape: {log_pred.shape}")
                 print("raw speaker examples:", dataset.speaker_ids[:10])
                 print("mapped speaker examples:", speaker_ids[:10])
                 print("unique mapped:", speaker_ids.unique())
 
-            # -------------------------------------------------
-            # 4) Target and loss (in LOG domain)
-            # -------------------------------------------------
             dur_gt = valid_z_len.float()  # [B]
             log_gt = torch.log(dur_gt.clamp(min=1e-5))
 
-            # L1 loss on log duration
             loss = F.l1_loss(log_pred, log_gt)
 
             if global_step % 20 == 0:
-                # Sanity check print (convert back to linear for display)
                 pred_linear = torch.exp(log_pred[:4]).detach()
                 gt_linear = dur_gt[:4].detach()
                 print(f"\n[Step {global_step}]")
@@ -537,7 +346,6 @@ def train_duration_predictor(
                 torch.save(model.state_dict(), save_path)
                 print(f"Saved DP checkpoint to {save_path}")
 
-    # Final save
     final_path = os.path.join(checkpoint_dir, "duration_predictor_final.pt")
     torch.save(model.state_dict(), final_path)
     print(f"Duration Predictor training complete. Saved to {final_path}")
@@ -548,12 +356,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="configs/tts.json",
-        help="Path to tts.json config file (default: configs/tts.json)",
-    )
+    parser.add_argument("--config", type=str, default="configs/tts.json")
     parser.add_argument("--max_steps", type=int, default=9181)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
