@@ -158,9 +158,9 @@ def load_config(config_path, Ke, puncond, rank):
     te_convnext_layers = te_cfg["convnext"]["num_layers"]                    
     te_convnext_intermediate = te_cfg["convnext"]["intermediate_dim"]        
     te_expansion_factor = te_convnext_intermediate // te_d_model             
-    te_cfg["attn_encoder"]["n_heads"]                      
+    te_attn_n_heads = te_cfg["attn_encoder"]["n_heads"]                      
     te_attn_n_layers = te_cfg["attn_encoder"]["n_layers"]                    
-    te_cfg["attn_encoder"]["filter_channels"]      
+    te_attn_filter_channels = te_cfg["attn_encoder"]["filter_channels"]      
     te_attn_p_dropout = te_cfg["attn_encoder"]["p_dropout"]                  
 
     
@@ -173,7 +173,7 @@ def load_config(config_path, Ke, puncond, rank):
 
     
     spte_cfg = ttl_cfg["speech_prompted_text_encoder"]
-    spte_cfg["n_heads"]                              
+    spte_n_heads = spte_cfg["n_heads"]                              
 
     
     um_cfg = ttl_cfg["uncond_masker"]
@@ -194,7 +194,7 @@ def load_config(config_path, Ke, puncond, rank):
     vf_time_dim = vf_cfg["time_encoder"]["time_dim"]                   
     vf_n_blocks = vf_cfg["main_blocks"]["n_blocks"]                    
     vf_text_dim = vf_cfg["main_blocks"]["text_cond_layer"]["text_dim"] 
-    vf_cfg["main_blocks"]["text_cond_layer"]["n_heads"]  
+    vf_text_n_heads = vf_cfg["main_blocks"]["text_cond_layer"]["n_heads"]  
     vf_style_dim = vf_cfg["main_blocks"]["style_cond_layer"]["style_dim"]  
     vf_rotary_scale = vf_cfg["main_blocks"]["text_cond_layer"]["rotary_scale"]  
 
@@ -867,6 +867,8 @@ def train(
 
     if rank == 0:
         print('Starting training loop...')
+    
+    epoch = 0
     while global_step < max_steps:
         if dist.is_initialized():
             sampler.set_epoch(epoch)
@@ -1251,6 +1253,8 @@ def train(
                 f"score_mean={epoch_score_mean:.3f} "
                 f"batches={spfm_call_batches}"
             )
+        
+        epoch += 1
 
     if rank == 0:
         print("Training complete.")
