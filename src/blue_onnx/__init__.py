@@ -47,10 +47,6 @@ class LightBlueTTS:
         self._load_shuffle_keys()
         self._text_proc = TextProcessor(phonikud_path)
 
-    # ------------------------------------------------------------------
-    # Setup
-    # ------------------------------------------------------------------
-
     def _load_config(self, config_path: str):
         self.normalizer_scale = 1.0
         self.latent_dim = 24
@@ -148,10 +144,6 @@ class LightBlueTTS:
                 model, inp = parts
                 self._model_keys.setdefault(model, {})[inp] = data[k]
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def create(self, phonemes: str, lang: str = "he") -> Tuple[np.ndarray, int]:
         """Synthesize speech from a pre-phonemized (IPA) string.
 
@@ -176,10 +168,6 @@ class LightBlueTTS:
         """
         phonemes = self._text_proc.phonemize(text, lang=lang)
         return self.create(phonemes, lang=lang)
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
 
     def _run(self, sess: ort.InferenceSession, feed: dict, model_name: str):
         keys = self._model_keys.get(model_name)
@@ -240,12 +228,10 @@ class LightBlueTTS:
         if z_ref is None and style_ttl is None:
             raise ValueError("Provide style_json with z_ref or style_ttl content.")
 
-        # Text encoding
         indices = text_to_indices(phonemes, lang=lang)
         text_ids = np.array([indices], dtype=np.int64)
         text_mask = np.ones((1, 1, len(indices)), dtype=np.float32)
 
-        # Style
         z_ref_norm = None
         if z_ref is not None:
             z_ref_norm = ((z_ref - self.mean) / self.std) * float(self.normalizer_scale)
@@ -267,7 +253,6 @@ class LightBlueTTS:
 
         ref_keys = style_keys if style_keys is not None else ref_values
 
-        # Text encoder
         te_names = {i.name for i in self._text_enc.get_inputs()}
         te_feed = {"text_ids": text_ids}
         if "text_mask" in te_names:
@@ -285,13 +270,8 @@ class LightBlueTTS:
 
         text_emb = self._run(self._text_enc, te_feed, "text_encoder")[0]
 
-        # Duration
         T_lat = self._predict_duration(text_ids, text_mask, z_ref_norm, style_dp)
-
-        # Flow matching
         x = self._flow_matching(text_emb, ref_values, text_mask, T_lat)
-
-        # Decode
         return self._decode(x)
 
     def _predict_duration(self, text_ids, text_mask, z_ref_norm, style_dp) -> int:
@@ -426,7 +406,6 @@ class LightBlueTTS:
         return self._apply_fade(wav)
 
 
-# ─── Module-level loaders ─────────────────────────────────────────────────────
 
 def load_voice_style(style_paths: List[str]) -> Style:
     """Load pre-extracted style vectors from one or more style JSON files."""
