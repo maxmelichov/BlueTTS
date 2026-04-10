@@ -33,17 +33,13 @@ class ReferenceEncoder(nn.Module):
     ):
         super().__init__()
         self.d_model = d_model
-
         if hidden_dim % d_model != 0:
             raise ValueError(f"hidden_dim ({hidden_dim}) must be divisible by d_model ({d_model})")
-        
-        mlp_ratio = hidden_dim // d_model 
-
+        mlp_ratio = hidden_dim // d_model
         self.input_proj = nn.Conv1d(in_channels, d_model, kernel_size=1)
         self.convnext = ConvNeXtWrapper(d_model, n_layers=num_blocks, expansion_factor=mlp_ratio, kernel_size=kernel_size, dilation_lst=dilation_lst)
         self.pos_emb = SinusoidalPositionalEmbedding(d_model)
         self.ref_keys = nn.Parameter(torch.randn(num_tokens, d_model) * 0.02)
-
         self.attn_layers = nn.ModuleList([
             nn.ModuleDict({
                 "norm_q": nn.LayerNorm(d_model),
@@ -65,13 +61,10 @@ class ReferenceEncoder(nn.Module):
         x = self.convnext(x, mask=mask)
         kv_seq = x.transpose(1, 2)
         kv_seq = kv_seq + self.pos_emb(kv_seq)
-
         key_padding_mask = None
         if mask is not None:
             key_padding_mask = (mask.squeeze(1) == 0)
-
         q = self.ref_keys.unsqueeze(0).expand(B, -1, -1)
-
         for layer in self.attn_layers:
             q_norm = layer["norm_q"](q)
             kv_norm = layer["norm_kv"](kv_seq)
@@ -83,5 +76,4 @@ class ReferenceEncoder(nn.Module):
             )
             q = q + attn_out
             q = q + layer["ffn"](q)
-
         return q
