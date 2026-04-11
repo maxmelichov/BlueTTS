@@ -1,7 +1,7 @@
-import json
 import os
-import re
+import json
 import sys
+import re
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,13 +11,19 @@ import tensorrt as trt
 _src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _src not in sys.path:
     sys.path.insert(0, _src)
+
+from _blue_vocab import text_to_indices, text_to_indices_multilang
 from _common import Style, TextProcessor, chunk_text  # noqa: E402
-from _blue_vocab import text_to_indices, text_to_indices_multilang  # noqa: E402
 del _src
 
 
+# ─── TRT logger (module-level singleton) ──────────────────────────────────────
+
 _logger = trt.Logger(trt.Logger.WARNING)
 trt.init_libnvinfer_plugins(_logger, namespace="")
+
+
+# ─── TRT engine wrapper ───────────────────────────────────────────────────────
 
 _TRT_TO_TORCH = {
     trt.float32: torch.float32,
@@ -30,6 +36,8 @@ _TRT_TO_TORCH = {
 
 
 class TRTEngine:
+    """Thin wrapper around a serialized TensorRT engine."""
+
     def __init__(self, engine_path: str):
         runtime = trt.Runtime(_logger)
         with open(engine_path, "rb") as f:
@@ -53,6 +61,7 @@ class TRTEngine:
         return self._output_names
 
     def run(self, inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Run inference. inputs/outputs are CUDA torch tensors."""
         bindings = [0] * self.engine.num_io_tensors
 
         for name in self._input_names:
@@ -62,6 +71,8 @@ class TRTEngine:
             if not t.is_contiguous():
                 t = t.contiguous()
             self.context.set_input_shape(name, t.shape)
+            idx = self.engine.get_tensor_name
+            # find tensor index
             for i in range(self.engine.num_io_tensors):
                 if self.engine.get_tensor_name(i) == name:
                     bindings[i] = t.data_ptr()
@@ -107,7 +118,7 @@ class BlueTRT:
         chunk_len: int = 150,
         silence_sec: float = 0.15,
         fade_duration: float = 0.02,
-        renikud_path: Optional[str] = None,
+        phonikud_path: Optional[str] = None,
         device: str = "cuda",
     ):
         self.trt_dir = trt_dir
@@ -125,7 +136,11 @@ class BlueTRT:
         self._init_engines()
         self._load_stats()
         self._load_uncond()
-        self._text_proc = TextProcessor(renikud_path)
+        self._text_proc = TextProcessor(phonikud_path)
+
+    # ------------------------------------------------------------------
+    # Setup
+    # ------------------------------------------------------------------
 
     def _load_config(self, config_path: str):
         self.normalizer_scale = 1.0
@@ -207,7 +222,16 @@ class BlueTRT:
         if self._u_text is None:
             print("[WARN] uncond.npz not found — CFG will be disabled.")
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def create(self, phonemes: str, lang: str = "he") -> Tuple[np.ndarray, int]:
+        """Synthesize speech from a pre-phonemized (IPA) string.
+
+        Returns:
+            (samples, sample_rate) — float32 numpy array and int sample rate.
+        """
         chunks = chunk_text(phonemes, self.chunk_len)
         silence = np.zeros(int(self.silence_sec * self.sample_rate), dtype=np.float32)
         parts = []
@@ -219,8 +243,17 @@ class BlueTRT:
         return wav, self.sample_rate
 
     def synthesize(self, text: str, lang: str = "he") -> Tuple[np.ndarray, int]:
+        """Phonemize raw text (phonikud for Hebrew, espeak for others) then synthesize.
+
+        Returns:
+            (samples, sample_rate) — float32 numpy array and int sample rate.
+        """
         phonemes = self._text_proc.phonemize(text, lang=lang)
         return self.create(phonemes, lang=lang)
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
 
     def _load_style_json(self, path: str):
         with open(path) as f:
@@ -258,8 +291,8 @@ class BlueTRT:
             feed[inp_names[1]] = mask
 
         out = self._ref_enc.run(feed)
-        ref_values = out["ref_values"] if "ref_values" in out else next(iter(out.values()))
-        ref_keys = out.get("ref_keys")
+        ref_values = out.get("ref_values") or next(iter(out.values()))
+        ref_keys   = out.get("ref_keys")
         return ref_values, ref_keys
 
     def _infer_chunk(self, phonemes: str, lang: str = "he") -> np.ndarray:
@@ -273,14 +306,17 @@ class BlueTRT:
         if z_ref is None and style_ttl is None:
             raise ValueError("Provide style_json with z_ref or style_ttl content.")
 
+        # Text encoding
         text_plain = re.sub(r"</?[a-z]{2,8}>", "", phonemes)
         indices_dp = text_to_indices(text_plain, lang=lang)
+        ids_dp = torch.tensor([indices_dp], dtype=torch.int64, device=self.device)
+        mask_dp = torch.ones(1, 1, len(indices_dp), dtype=torch.float32, device=self.device)
+
         indices_full = text_to_indices_multilang(phonemes, base_lang=lang)
-        text_ids_dp = torch.tensor([indices_dp], dtype=torch.int64, device=self.device)
-        text_mask_dp = torch.ones(1, 1, len(indices_dp), dtype=torch.float32, device=self.device)
         text_ids = torch.tensor([indices_full], dtype=torch.int64, device=self.device)
         text_mask = torch.ones(1, 1, len(indices_full), dtype=torch.float32, device=self.device)
 
+        # Style
         z_ref_norm = None
         if z_ref is not None:
             z_ref_norm = ((z_ref - self.mean) / self.std) * float(self.normalizer_scale)
@@ -301,19 +337,24 @@ class BlueTRT:
 
         ref_keys = style_keys if style_keys is not None else ref_values
 
+        # Text encoder
         te_in = set(self._text_enc.input_names())
         te_feed: Dict[str, torch.Tensor] = {"text_ids": text_ids}
-
         if "text_mask"  in te_in: te_feed["text_mask"]  = text_mask
         if "style_ttl"  in te_in: te_feed["style_ttl"]  = ref_values
         if "ref_values" in te_in: te_feed["ref_values"] = ref_values
         if "ref_keys"   in te_in: te_feed["ref_keys"]   = ref_keys
 
-        te_out = self._text_enc.run(te_feed)
-        text_emb = te_out["text_emb"] if "text_emb" in te_out else next(iter(te_out.values()))
+        te_out   = self._text_enc.run(te_feed)
+        text_emb = te_out.get("text_emb") or next(iter(te_out.values()))
 
-        T_lat = self._predict_duration(text_ids_dp, text_mask_dp, z_ref_norm, style_dp)
+        # Duration
+        T_lat = self._predict_duration(ids_dp, mask_dp, z_ref_norm, style_dp)
+
+        # Flow matching
         latent = self._flow_matching(text_emb, ref_values, text_mask, T_lat)
+
+        # Decode
         return self._decode(latent)
 
     def _predict_duration(
@@ -348,6 +389,7 @@ class BlueTRT:
         T_cap   = max(20, min(txt_len * 3 + 20, 600))
         T_lat   = min(max(int(T_lat), 1), T_cap, 800)
 
+        # Vocoder max: latent frames × ccf ≤ 2048
         max_t_lat = 2048 // self.chunk_compress_factor
         T_lat = min(T_lat, max_t_lat)
 
@@ -362,25 +404,19 @@ class BlueTRT:
         latent_mask: torch.Tensor,
         step:       int,
     ) -> Dict[str, torch.Tensor]:
-        vf_in   = set(self._vf.input_names())
+        vf_in = set(self._vf.input_names())
         total_t = torch.tensor([float(self.steps)], dtype=torch.float32, device=self.device)
         step_t  = torch.tensor([float(step)],       dtype=torch.float32, device=self.device)
-
         feed: Dict[str, torch.Tensor] = {"noisy_latent": noisy}
-
         if "text_emb"     in vf_in: feed["text_emb"]     = text_emb
-        if "text_context" in vf_in: feed["text_context"] = text_emb
+        if "text_context" in vf_in: feed["text_context"]  = text_emb
         if "style_ttl"    in vf_in: feed["style_ttl"]    = ref_values
         if "ref_values"   in vf_in: feed["ref_values"]   = ref_values
         if "latent_mask"  in vf_in: feed["latent_mask"]  = latent_mask
         if "text_mask"    in vf_in: feed["text_mask"]    = text_mask
-        if "style_mask"   in vf_in:
-            feed["style_mask"] = torch.ones(
-                1, 1, ref_values.shape[1], dtype=torch.float32, device=self.device
-            )
+        if "style_mask"   in vf_in: feed["style_mask"]   = torch.ones(1, 1, ref_values.shape[1], dtype=torch.float32, device=self.device)
         if "current_step" in vf_in: feed["current_step"] = step_t
         if "total_step"   in vf_in: feed["total_step"]   = total_t
-
         return feed
 
     def _flow_matching(
@@ -394,6 +430,7 @@ class BlueTRT:
         x = torch.randn(1, self.compressed_channels, T_lat, dtype=torch.float32, device=self.device)
         latent_mask = torch.ones(1, 1, T_lat, dtype=torch.float32, device=self.device)
         total_t = torch.tensor([float(self.steps)], dtype=torch.float32, device=self.device)
+
         use_cfg = self.cfg_scale != 1.0 and self._u_text is not None
         if use_cfg:
             u_text_mask = torch.ones(1, 1, 1, dtype=torch.float32, device=self.device)
@@ -430,7 +467,10 @@ class BlueTRT:
         return wav
 
     def _decode(self, latent: torch.Tensor) -> np.ndarray:
+        # Denormalize
         z = (latent / float(self.normalizer_scale)) * self.std + self.mean
+
+        # Decompress: [1, C*ccf, T] → [1, C, T*ccf]
         B, _, T = z.shape
         z_dec = (
             z.view(B, self.latent_dim, self.chunk_compress_factor, T)
@@ -439,7 +479,9 @@ class BlueTRT:
         )
 
         voc_out = self._vocoder.run({"latent": z_dec})
-        wav = voc_out["waveform"] if "waveform" in voc_out else next(iter(voc_out.values()))
+        wav = voc_out.get("waveform") or next(iter(voc_out.values()))
+
+        # Trim boundary artifacts
         frame_len = self.hop_length * self.chunk_compress_factor
         if wav.shape[-1] > 2 * frame_len:
             wav = wav[..., frame_len:-frame_len]
@@ -448,8 +490,10 @@ class BlueTRT:
         return self._apply_fade(wav)
 
 
+# ─── Module-level loaders ─────────────────────────────────────────────────────
 
 def load_voice_style(style_paths: List[str], device: str = "cuda") -> Style:
+    """Load pre-extracted style vectors from one or more style JSON files."""
     B = len(style_paths)
     with open(style_paths[0]) as f:
         first = json.load(f)
@@ -470,6 +514,3 @@ def load_voice_style(style_paths: List[str], device: str = "cuda") -> Style:
             dp[i] = torch.tensor(d["style_dp"]["data"], dtype=torch.float32).view(dp_dims[1], dp_dims[2])
 
     return Style(ttl=ttl, dp=dp)
-
-
-LightBlueTRT = BlueTRT  # alias matching ONNX entrypoint name
