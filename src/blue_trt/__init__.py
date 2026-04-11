@@ -1,5 +1,6 @@
-import os
 import json
+import os
+import re
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -11,7 +12,7 @@ _src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _src not in sys.path:
     sys.path.insert(0, _src)
 from _common import Style, TextProcessor, chunk_text  # noqa: E402
-from _blue_vocab import text_to_indices  # noqa: E402
+from _blue_vocab import text_to_indices, text_to_indices_multilang  # noqa: E402
 del _src
 
 
@@ -272,9 +273,13 @@ class LightBlueTRT:
         if z_ref is None and style_ttl is None:
             raise ValueError("Provide style_json with z_ref or style_ttl content.")
 
-        indices  = text_to_indices(phonemes, lang=lang)
-        text_ids = torch.tensor([indices], dtype=torch.int64, device=self.device)
-        text_mask = torch.ones(1, 1, len(indices), dtype=torch.float32, device=self.device)
+        text_plain = re.sub(r"</?[a-z]{2,8}>", "", phonemes)
+        indices_dp = text_to_indices(text_plain, lang=lang)
+        indices_full = text_to_indices_multilang(phonemes, base_lang=lang)
+        text_ids_dp = torch.tensor([indices_dp], dtype=torch.int64, device=self.device)
+        text_mask_dp = torch.ones(1, 1, len(indices_dp), dtype=torch.float32, device=self.device)
+        text_ids = torch.tensor([indices_full], dtype=torch.int64, device=self.device)
+        text_mask = torch.ones(1, 1, len(indices_full), dtype=torch.float32, device=self.device)
 
         z_ref_norm = None
         if z_ref is not None:
@@ -307,7 +312,7 @@ class LightBlueTRT:
         te_out   = self._text_enc.run(te_feed)
         text_emb = te_out.get("text_emb") or next(iter(te_out.values()))
 
-        T_lat = self._predict_duration(text_ids, text_mask, z_ref_norm, style_dp)
+        T_lat = self._predict_duration(text_ids_dp, text_mask_dp, z_ref_norm, style_dp)
         latent = self._flow_matching(text_emb, ref_values, text_mask, T_lat)
         return self._decode(latent)
 

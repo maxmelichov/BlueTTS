@@ -7,8 +7,7 @@ import argparse
 import numpy as np
 import tensorrt as trt
 
-sys.path.append(os.path.abspath(os.path.dirname(__file__)))
-from models.utils import load_ttl_config
+from utils import load_ttl_config
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("EngineBuilder")
