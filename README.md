@@ -64,11 +64,15 @@ sf.write("mixed_output.wav", samples, sr)
 You can run the provided example scripts to test the model. Outputs will be saved in the `examples/out/` directory.
 
 ```bash
-# Generate samples for all supported languages (he, en, es, it, ge) + mixed
-uv run python examples/basic.py
+# Generate samples for individual languages
+uv run python examples/hebrew.py
+uv run python examples/english.py
+uv run python examples/spanish.py
+uv run python examples/italian.py
+uv run python examples/german.py
 
-# Generate all languages and save a manifest JSON
-uv run python examples/all_langs_and_mix.py
+# Generate a mixed-language sample
+uv run python examples/mixed.py
 
 # Run the CLI app
 uv run python examples/app.py --lang en --text "Hello world."
