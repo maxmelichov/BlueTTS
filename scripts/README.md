@@ -75,7 +75,7 @@ uv sync --extra tensorrt
 **Batch mode (one `.trt` per `.onnx` in a folder):**
 
 ```bash
-PYTHONPATH=training uv run python scripts/create_tensorrt.py \
+uv run python scripts/create_tensorrt.py \
   --onnx_dir onnx_models \
   --engine_dir trt_engines \
   --precision fp16 \
@@ -85,7 +85,7 @@ PYTHONPATH=training uv run python scripts/create_tensorrt.py \
 **Single model:**
 
 ```bash
-PYTHONPATH=training uv run python scripts/create_tensorrt.py \
+uv run python scripts/create_tensorrt.py \
   -o onnx_models/some_model.onnx \
   -e trt_engines/some_model.trt \
   --precision fp16
@@ -95,4 +95,4 @@ Other flags: `--workspace` (GPU workspace size in GB, default `24`), `-v` / `--v
 
 **Note:** `create_tensorrt.py` sets `CUDA_VISIBLE_DEVICES=1` at import time so the builder uses the second GPU by default. On a single-GPU machine, change that line in the script to `0` or remove it.
 
-See the project [README](../README.md) for running benchmarks after engines are built.
+After engines are built, run inference with your usual ONNX or TensorRT runtime workflow; this repository does not ship a separate TensorRT benchmark CLI.

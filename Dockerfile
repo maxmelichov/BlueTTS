@@ -1,7 +1,7 @@
 # Before building:
 #
 #   1. Download model weights:
-#      https://huggingface.co/notmax123/LightBlue       -> onnx_models/, voices/, tts.json
+#      https://huggingface.co/notmax123/Blue            -> onnx_models/, voices/, tts.json
 #      https://huggingface.co/thewh1teagle/renikud -> model.onnx
 #
 #   2. Build and run:
