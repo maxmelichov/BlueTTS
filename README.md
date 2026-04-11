@@ -11,73 +11,78 @@ uv sync --extra gpu        # + CUDA support
 
 ## Model Weights
 
-Download the TTS weights from [notmax123/LightBlue](https://huggingface.co/notmax123/LightBlue) and the G2P model from [thewh1teagle/renikud-onnx](https://huggingface.co/thewh1teagle/renikud-onnx).
+Download the TTS weights from [notmax123/Blue](https://huggingface.co/notmax123/Blue) and the G2P ONNX model from [thewh1teagle/renikud](https://huggingface.co/thewh1teagle/renikud) (same file as in the `wget` line below).
 
 ```bash
-uv run hf download notmax123/LightBlue --repo-type model --local-dir ./onnx_models
-wget https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
+uv run hf download notmax123/Blue --repo-type model --local-dir ./onnx_models
+wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
 ```
+
+(`huggingface-hub` is included in the default dependencies so `uv run hf` works without a separate global install.)
+
+## New voice JSON (reference clip)
+
+Install export deps. Weights come from [notmax123/Blue](https://huggingface.co/notmax123/Blue). New voices need **`stats_multilingual.pt`** for latent mean/std (you can fetch just that file if the `.safetensors` checkpoints are already in `pt_weights/`):
+
+```bash
+uv sync --extra export
+uv run hf download notmax123/Blue stats_multilingual.pt --local-dir ./pt_weights
+```
+
+If `pt_weights/` is empty, download the codec and head weights from the same repo once (`blue_codec.safetensors`, `vf_estimator.safetensors`, `duration_predictor.safetensors`).
+
+From the **repo root** (so `scripts/…` resolves; `PYTHONPATH` must include `training` for `models.*`):
+
+```bash
+PYTHONPATH=training uv run python scripts/export_new_voice.py \
+  --ref_wav path/to/reference.wav \
+  --out voices/my_voice.json \
+  --config config/tts.json \
+  --ae_ckpt pt_weights/blue_codec.safetensors \
+  --ttl_ckpt pt_weights/vf_estimator.safetensors \
+  --dp_ckpt pt_weights/duration_predictor.safetensors \
+  --stats pt_weights/stats_multilingual.pt
+```
+
+Use the JSON as `style_json` when creating `LightBlueTTS`. Details: `scripts/export_new_voice.py` (optional `--verify_hf_sizes`, `--out_pt`).
 
 ## Usage & Examples
 
-You can use the `src.blue_onnx` module directly to run inference. The model supports 5 languages (`he`, `en`, `es`, `it`, `ge`) and you can even mix them in a single sentence using `<lan></lan>` tags!
-
-### Basic Example
+Import `BlueTTS` from `src.blue_onnx`. Supported `lang` codes are `he`, `en`, `es`, `it`, and `ge`. For mixed text, wrap each segment in tags like `<en>...</en>` (same idea for `es`, `it`, `ge`, `he`). Pass `renikud_path` when you use Hebrew.
 
 ```python
 import soundfile as sf
 from src.blue_onnx import LightBlueTTS
 
-# Initialize the TTS engine with the ONNX models and a voice style
 tts = LightBlueTTS(
-    onnx_dir="onnx_models", 
+    onnx_dir="onnx_models",
     style_json="voices/female1.json",
-    renikud_path="model.onnx" # Required for Hebrew text
+    renikud_path="model.onnx",
 )
 
-# Synthesize speech
-text = "שלום, זהו מודל דיבור בעברית."
-samples, sr = tts.synthesize(text, lang="he")
-
-# Save to file
+samples, sr = tts.synthesize("שלום, זהו מודל דיבור בעברית.", lang="he")
 sf.write("output.wav", samples, sr)
-print("Saved output.wav")
-```
 
-### Multi-Language Example
-
-You can combine multiple languages in a single prompt by using `<lan></lan>` tags (e.g., `<en></en>`, `<es></es>`, `<it></it>`, `<ge></ge>`, `<he></he>`). 
-
-```python
-import soundfile as sf
-from src.blue_onnx import LightBlueTTS
-
-tts = LightBlueTTS(
-    onnx_dir="onnx_models", 
-    style_json="voices/female1.json",
-    renikud_path="model.onnx"
-)
-
-# Mix Hebrew, English, and Spanish in one sentence!
-mixed_text = "שלום לכולם, <en>welcome to the presentation</en>, <es>espero que lo disfruten</es>."
-
-# Synthesize the mixed text (default base language is Hebrew)
-samples, sr = tts.synthesize(mixed_text, lang="he")
-
+mixed = "שלום לכולם, <en>welcome to the presentation</en>, <es>espero que lo disfruten</es>."
+samples, sr = tts.synthesize(mixed, lang="he")
 sf.write("mixed_output.wav", samples, sr)
-print("Saved mixed_output.wav")
 ```
 
-See the [examples](examples/) folder for more scripts.
+More scripts: [examples](examples/).
 
 ## TensorRT
 
 ONLY FOR NVIDIA GPUS!
 
+Install TensorRT-related packages, then run the builder (see [scripts/README.md](scripts/README.md) for export and other script layout notes).
+
 ```bash
-uv run scripts/create_tensorrt.py --onnx_dir onnx_models --engine_dir trt_engines --precision fp16
-uv run scripts/benchmark_trt.py --style_json voices/female1.json --steps 32
+uv sync --extra tensorrt
+uv run python scripts/create_tensorrt.py \
+  --onnx_dir onnx_models --engine_dir trt_engines --precision fp16 --config config/tts.json
 ```
+
+Adjust `--config` if your `tts.json` lives elsewhere. The script defaults to GPU index `1` via `CUDA_VISIBLE_DEVICES`; on a single-GPU machine, edit `scripts/create_tensorrt.py` or set the variable before running.
 
 ## Papers
 

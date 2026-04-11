@@ -10,6 +10,7 @@ dependencies = [
     "onnxruntime",
     "soundfile",
     "phonemizer",
+    "huggingface-hub>=0.26.0",
 ]
 
 [project.optional-dependencies]
@@ -17,15 +18,20 @@ gpu = [
     "onnxruntime-gpu",
 ]
 
+# PyPI `tensorrt` defaults to CUDA 13 wheels; most driver stacks still report CUDA 12.x.
+# Use `tensorrt-cu13` instead if your driver/toolkit is CUDA 13+.
 tensorrt = [
-    "tensorrt",
+    "tensorrt-cu12",
     "torch>=2.1.0",
 ]
 export = [
     "bluecodec",
+    "librosa",
     "onnx>=1.17.0",
     "onnxslim>=0.1.0",
+    "safetensors>=0.4.0",
     "torch>=2.1.0",
+    "torchaudio>=2.1.0",
 ]
 
 [tool.uv]
