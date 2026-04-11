@@ -25,10 +25,13 @@ absent.
 
 **Weights**
 
-Defaults match Hugging Face ``notmax123/Blue`` (``.safetensors`` + stats).
-Download from the repo root::
+Latent normalization uses ``stats_multilingual.pt`` from Hugging Face
+``notmax123/Blue``. The codec and style heads need
+``blue_codec.safetensors``, ``vf_estimator.safetensors``, and
+``duration_predictor.safetensors`` from the same repo (or any matching paths
+on disk). To refresh stats only::
 
-    hf download notmax123/Blue --local-dir ./pt_weights
+    hf download notmax123/Blue stats_multilingual.pt --local-dir ./pt_weights
 
 Run this script from the repo root and pass paths, e.g.::
 

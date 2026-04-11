@@ -71,6 +71,7 @@ LANG_ID: dict[str, int] = {
     "en": LANG_REGION_START + 1,
     "es": LANG_REGION_START + 2,
     "de": LANG_REGION_START + 8,
+    "ge": LANG_REGION_START + 8,  # alias for German (same token as ``de``)
     "it": LANG_REGION_START + 9,
 }
 

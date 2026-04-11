@@ -1,5 +1,6 @@
-import os
 import json
+import os
+import re
 import sys
 from typing import List, Optional, Tuple
 
@@ -10,7 +11,7 @@ _src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _src not in sys.path:
     sys.path.insert(0, _src)
 from _common import Style, TextProcessor, chunk_text  # noqa: E402
-from _blue_vocab import text_to_indices  # noqa: E402
+from _blue_vocab import text_to_indices, text_to_indices_multilang  # noqa: E402
 del _src
 
 
@@ -228,9 +229,14 @@ class LightBlueTTS:
         if z_ref is None and style_ttl is None:
             raise ValueError("Provide style_json with z_ref or style_ttl content.")
 
-        indices = text_to_indices(phonemes, lang=lang)
-        text_ids = np.array([indices], dtype=np.int64)
-        text_mask = np.ones((1, 1, len(indices)), dtype=np.float32)
+        # Duration models see tag-stripped IPA; text encoder + VF use inline <lang> tokens.
+        text_plain = re.sub(r"</?[a-z]{2,8}>", "", phonemes)
+        indices_dp = text_to_indices(text_plain, lang=lang)
+        indices_full = text_to_indices_multilang(phonemes, base_lang=lang)
+        text_ids_dp = np.array([indices_dp], dtype=np.int64)
+        text_mask_dp = np.ones((1, 1, len(indices_dp)), dtype=np.float32)
+        text_ids = np.array([indices_full], dtype=np.int64)
+        text_mask = np.ones((1, 1, len(indices_full)), dtype=np.float32)
 
         z_ref_norm = None
         if z_ref is not None:
@@ -270,7 +276,7 @@ class LightBlueTTS:
 
         text_emb = self._run(self._text_enc, te_feed, "text_encoder")[0]
 
-        T_lat = self._predict_duration(text_ids, text_mask, z_ref_norm, style_dp)
+        T_lat = self._predict_duration(text_ids_dp, text_mask_dp, z_ref_norm, style_dp)
         x = self._flow_matching(text_emb, ref_values, text_mask, T_lat)
         return self._decode(x)
 
