@@ -16,7 +16,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from data.text2latent_dataset import Text2LatentDataset, collate_text2latent
 from data.text_vocab import CHAR_TO_ID, VOCAB_SIZE
 from models.utils import LinearMelSpectrogram, compress_latents
-from bluecodec.src.bluecodec.autoencoder import LatentEncoder
+from bluecodec import LatentEncoder
 from models.text2latent.dp_network import DPNetwork
 
 def set_seed(seed: int = 42):
@@ -122,13 +122,25 @@ def train_duration_predictor(
     ae_encoder = LatentEncoder(cfg=ae_enc_arch).to(device)
     if os.path.exists(ae_checkpoint):
         print(f"Loading AE checkpoint from {ae_checkpoint}")
-        ckpt = torch.load(ae_checkpoint, map_location="cpu")
+        if ae_checkpoint.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            ckpt = load_file(ae_checkpoint)
+        else:
+            ckpt = torch.load(ae_checkpoint, map_location="cpu")
+        
         if "encoder" in ckpt:
             ae_encoder.load_state_dict(ckpt["encoder"])
         elif "state_dict" in ckpt:
             ae_encoder.load_state_dict(ckpt["state_dict"], strict=False)
         else:
-            ae_encoder.load_state_dict(ckpt)
+            if any(k.startswith("encoder.") for k in ckpt.keys()):
+                enc_dict = {k.replace("encoder.", ""): v for k, v in ckpt.items() if k.startswith("encoder.")}
+                ae_encoder.load_state_dict(enc_dict)
+            else:
+                try:
+                    ae_encoder.load_state_dict(ckpt)
+                except Exception as e:
+                    print(f"Could not load AE encoder: {e}")
     else:
         print("Warning: AE checkpoint not found. Latent quality may be poor.")
     ae_encoder.eval()
@@ -143,7 +155,8 @@ def train_duration_predictor(
         predictor_cfg=predictor_cfg,
     ).to(device)
     optimizer = AdamW(model.parameters(), lr=lr)
-    metadata_path = "generated_audio/combined_dataset_cleaned_real_data.csv"
+    metadata_candidates = ["combined_dataset_cleaned.csv", "generated_audio/combined_dataset_cleaned_real_data.csv"]
+    metadata_path = next((p for p in metadata_candidates if os.path.exists(p)), "combined_dataset_cleaned.csv")
     dataset = Text2LatentDataset(
         metadata_path,
         sample_rate=44100,

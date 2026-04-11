@@ -14,6 +14,13 @@ uv sync --extra cu132   # PyTorch + CUDA 13.2 (nightly wheels; experimental)
 
 *Pretrained weights for all stages (Codec, Text-to-Latent, Duration Predictor, and Latent Stats) are available at: [`notmax123/Blue`](https://huggingface.co/notmax123/Blue).*
 
+You can download them directly into the `pt_weights` directory using the Hugging Face CLI:
+
+```bash
+cd training
+uv run hf download notmax123/Blue --repo-type model --local-dir ./pt_weights
+```
+
 Training scripts live under `training/src/`. Run dataset and stats commands from `training/` unless you adjust paths. Defaults inside some scripts still mention `combined_dataset_cleaned_real_data.csv`, `checkpoints/ae/`, or `stats_real_data.pt` — align filenames with your layout or edit those constants / `configs/tts.json` (`ae_ckpt_path`).
 
 ---
@@ -50,7 +57,7 @@ The text vocabulary has a fixed size built to accommodate many languages without
 
 ```bash
 cd training
-python combine_datasets.py --config datasets.json
+uv run python combine_datasets.py --config datasets.json
 ```
 
 - **Input:** CSVs and audio paths defined in the config (see `datasets.example.json`).
@@ -67,7 +74,7 @@ After your training datasets are set up and the autoencoder weights are ready (o
 
 ```bash
 cd training
-python compute_latent_stats.py --tts-json configs/tts.json
+uv run python compute_latent_stats.py --tts-json configs/tts.json --ae-ckpt pt_weights/blue_codec.safetensors
 ```
 
 - **Input:** AE checkpoint from `ae_ckpt_path` in `configs/tts.json` (fallback in script: `checkpoints/ae/blue_codec.safetensors`), and a metadata CSV the script can find (see `compute_latent_stats.py` for the candidate list — point your data at one of those paths or extend the script).
@@ -81,10 +88,10 @@ The duration predictor learns utterance length from text (and reference audio in
 
 ```bash
 cd training
-python src/train_duration_predictor.py --config configs/tts.json \
-    --ae_checkpoint ../pt_weights/blue_codec.safetensors \
-    --stats_path ../pt_weights/stats_multilingual.pt \
-    --checkpoint_dir ../pt_weights
+uv run python src/train_duration_predictor.py --config configs/tts.json \
+    --ae_checkpoint pt_weights/blue_codec.safetensors \
+    --stats_path pt_weights/stats_multilingual.pt \
+    --checkpoint_dir pt_weights
 ```
 
 Optional flags include `--max_steps`, `--batch_size`, `--lr`, `--device`.
@@ -103,14 +110,20 @@ Core TTS model: text (+ reference) → audio latents via flow matching and class
 
 ```bash
 cd training
-python src/train_text_to_latent.py --config configs/tts.json
+uv run python src/train_text_to_latent.py --config configs/tts.json \
+    --ae_checkpoint pt_weights/blue_codec.safetensors \
+    --stats_path pt_weights/stats_multilingual.pt \
+    --checkpoint_dir pt_weights
 ```
 
 **Multi-GPU (example: 2 GPUs):**
 
 ```bash
 cd training
-torchrun --nproc_per_node=2 src/train_text_to_latent.py --config configs/tts.json
+uv run torchrun --nproc_per_node=2 src/train_text_to_latent.py --config configs/tts.json \
+    --ae_checkpoint pt_weights/blue_codec.safetensors \
+    --stats_path pt_weights/stats_multilingual.pt \
+    --checkpoint_dir pt_weights
 ```
 
 **Finetune mode:**
@@ -118,11 +131,11 @@ To fine-tune from our pretrained Text-to-Latent weights (`vf_estimator.safetenso
 
 ```bash
 cd training
-python src/train_text_to_latent.py --config configs/tts.json --finetune \
+uv run python src/train_text_to_latent.py --config configs/tts.json --finetune \
     --lr 5e-4 --spfm_warmup 40000 \
-    --ae_checkpoint ../pt_weights/blue_codec.safetensors \
-    --stats_path ../pt_weights/stats_multilingual.pt \
-    --checkpoint_dir ../pt_weights
+    --ae_checkpoint pt_weights/blue_codec.safetensors \
+    --stats_path pt_weights/stats_multilingual.pt \
+    --checkpoint_dir pt_weights
 ```
 
 - **Method:** Flow matching with classifier-free guidance.

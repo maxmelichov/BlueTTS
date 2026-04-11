@@ -18,7 +18,7 @@ from torch.optim import AdamW
 from tqdm import tqdm
 
 from data.text2latent_dataset import Text2LatentDataset, collate_text2latent
-from data.audio_utils import ensure_sr
+from bluecodec.audio_utils import ensure_sr
 from data.text_vocab import text_to_indices, VOCAB_SIZE, normalize_text
 from bluecodec import LatentEncoder, LatentDecoder1D
 from bluecodec.utils import LinearMelSpectrogram, compress_latents
@@ -313,20 +313,34 @@ def build_ae_models(ae_cfg_json, ae_checkpoint, device):
 
     if os.path.exists(ae_checkpoint):
         print(f"Loading AE checkpoint from {ae_checkpoint}")
-        ckpt = torch.load(ae_checkpoint, map_location='cpu')
+        if ae_checkpoint.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            ckpt = load_file(ae_checkpoint)
+        else:
+            ckpt = torch.load(ae_checkpoint, map_location='cpu')
+            
         if 'encoder' in ckpt:
             ae_encoder.load_state_dict(ckpt['encoder'])
         elif 'state_dict' in ckpt:
             ae_encoder.load_state_dict(ckpt['state_dict'], strict=False)
         else:
-            try:
-                ae_encoder.load_state_dict(ckpt)
-            except Exception:
-                print("Warning: Could not load AE Encoder weights cleanly.")
+            if any(k.startswith("encoder.") for k in ckpt.keys()):
+                enc_dict = {k.replace("encoder.", ""): v for k, v in ckpt.items() if k.startswith("encoder.")}
+                ae_encoder.load_state_dict(enc_dict)
+            else:
+                try:
+                    ae_encoder.load_state_dict(ckpt)
+                except Exception:
+                    print("Warning: Could not load AE Encoder weights cleanly.")
+                    
         if 'decoder' in ckpt:
             ae_decoder.load_state_dict(ckpt['decoder'])
         else:
-            print("Warning: 'decoder' key not found in AE checkpoint.")
+            if any(k.startswith("decoder.") for k in ckpt.keys()):
+                dec_dict = {k.replace("decoder.", ""): v for k, v in ckpt.items() if k.startswith("decoder.")}
+                ae_decoder.load_state_dict(dec_dict)
+            else:
+                print("Warning: 'decoder' key not found in AE checkpoint.")
     else:
         print("Warning: AE Checkpoint not found!")
 
@@ -416,7 +430,8 @@ def build_ttl_models(cfg, lr, device):
 
 def build_dataloader(ae_sample_rate, batch_size, rank):
     """Create dataset, sampler, and dataloader. Returns dataloader, sampler, dataset."""
-    metadata_path = "generated_audio/combined_dataset_cleaned_real_data.csv"
+    metadata_candidates = ["combined_dataset_cleaned.csv", "generated_audio/combined_dataset_cleaned_real_data.csv"]
+    metadata_path = next((p for p in metadata_candidates if os.path.exists(p)), "combined_dataset_cleaned.csv")
     dataset = Text2LatentDataset(
         metadata_path,
         sample_rate=ae_sample_rate,
