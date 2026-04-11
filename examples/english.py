@@ -14,7 +14,7 @@ def main():
     print("Loading BlueTTS...")
     tts = BlueTTS(
         onnx_dir=str(repo_root / "onnx_models"),
-        style_json=str(repo_root / "voices" / "female1_new.json"),
+        style_json=str(repo_root / "voices" / "female1.json"),
         renikud_path=str(repo_root / "model.onnx"),
     )
 
