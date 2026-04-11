@@ -1,11 +1,11 @@
 """
 Usage:
-    wget https://huggingface.co/thewh1teagle/phonikud-onnx/resolve/main/phonikud-1.0.int8.onnx
+    wget https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
     wget https://github.com/maxmelichov/Light-BlueTTS/releases/download/model-files-v1.0/onnx_models.tar.gz
     wget https://github.com/maxmelichov/Light-BlueTTS/releases/download/model-files-v1.0/voices.tar.gz
     tar -xf onnx_models.tar.gz
     tar -xf voices.tar.gz
-    uv pip install phonikud phonikud-onnx
+    uv pip install renikud-onnx
     uv run examples/app.py --text "שלום עולם" --style_json voices/female1.json
 """
 import os
@@ -19,28 +19,20 @@ import soundfile as sf
 from lightblue_onnx import LightBlueTTS
 
 try:
-    from phonikud_onnx import Phonikud
-    from phonikud import phonemize
+    from renikud_onnx import G2P
 except ImportError:
-    Phonikud = None
-    phonemize = None
+    G2P = None
 
 
-def _phonemize(text: str, phonikud: object) -> str:
+def _phonemize(text: str, renikud: object) -> str:
     is_hebrew = any('\u0590' <= c <= '\u05ff' for c in text)
-    has_nikud = any('\u05b0' <= c <= '\u05c7' for c in text)
 
     if not is_hebrew:
         return text
-    elif has_nikud:
-        if phonemize is None:
-            raise RuntimeError("phonikud not installed")
-        return phonemize(text)
     else:
-        if phonikud is None or phonemize is None:
-            raise RuntimeError("phonikud not available for raw Hebrew text")
-        vocalized = phonikud.add_diacritics(text)
-        return phonemize(vocalized)
+        if renikud is None:
+            raise RuntimeError("renikud not available for Hebrew text")
+        return renikud.phonemize(text)
 
 
 def _chunk_text(text: str, max_len: int) -> list:
@@ -94,7 +86,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--onnx_dir", default="onnx_models")
     parser.add_argument("--config", default="tts.json")
-    parser.add_argument("--phonikud_path", default="phonikud-1.0.onnx")
+    parser.add_argument("--renikud_path", default="model.onnx")
     parser.add_argument("--z_ref", default=None)
     parser.add_argument("--style_json", default="voices/female1.json")
     parser.add_argument("--out", default="audio.wav")
@@ -107,9 +99,9 @@ def main():
     parser.add_argument("--text", type=str, default="שלום עולם")
     args = parser.parse_args()
 
-    phonikud = None
-    if Phonikud is not None and os.path.exists(args.phonikud_path):
-        phonikud = Phonikud(args.phonikud_path)
+    renikud = None
+    if G2P is not None and os.path.exists(args.renikud_path):
+        renikud = G2P(args.renikud_path)
 
     tts = LightBlueTTS(
         onnx_dir=args.onnx_dir,
@@ -130,7 +122,7 @@ def main():
     t0 = time.time()
     parts = []
     for i, chunk in enumerate(chunks):
-        phonemes = _phonemize(chunk, phonikud)
+        phonemes = _phonemize(chunk, renikud)
         wav, _ = tts.create(phonemes)
         parts.append(wav)
         if i < len(chunks) - 1:
