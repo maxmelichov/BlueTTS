@@ -1,7 +1,7 @@
-import json
 import os
-import re
+import json
 import sys
+import re
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -10,8 +10,9 @@ import onnxruntime as ort
 _src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _src not in sys.path:
     sys.path.insert(0, _src)
+
+from _blue_vocab import text_to_indices, text_to_indices_multilang
 from _common import Style, TextProcessor, chunk_text  # noqa: E402
-from _blue_vocab import text_to_indices, text_to_indices_multilang  # noqa: E402
 del _src
 
 
@@ -29,7 +30,7 @@ class BlueTTS:
         chunk_len: int = 150,
         silence_sec: float = 0.15,
         fade_duration: float = 0.02,
-        renikud_path: Optional[str] = None,
+        phonikud_path: Optional[str] = None,
     ):
         self.onnx_dir = onnx_dir
         self.style_json = style_json
@@ -46,7 +47,11 @@ class BlueTTS:
         self._load_stats()
         self._load_uncond()
         self._load_shuffle_keys()
-        self._text_proc = TextProcessor(renikud_path)
+        self._text_proc = TextProcessor(phonikud_path)
+
+    # ------------------------------------------------------------------
+    # Setup
+    # ------------------------------------------------------------------
 
     def _load_config(self, config_path: str):
         self.normalizer_scale = 1.0
@@ -86,24 +91,14 @@ class BlueTTS:
         self._text_enc = self._load_session("text_encoder.onnx")
         self._ref_enc = self._load_session("reference_encoder.onnx", required=False)
 
-        vf_name = None
-        for cand in ("backbone_keys.onnx", "backbone.onnx", "vector_estimator.onnx"):
-            base = os.path.join(self.onnx_dir, cand)
-            slim = base.replace(".onnx", ".slim.onnx")
-            if os.path.exists(slim) or os.path.exists(base):
-                vf_name = cand
-                break
-        if vf_name is None:
-            raise FileNotFoundError(
-                f"Vector-field ONNX not found under {self.onnx_dir!r} "
-                "(expected backbone_keys.onnx, backbone.onnx, or vector_estimator.onnx)."
-            )
+        vf_name = "backbone_keys.onnx" if os.path.exists(os.path.join(self.onnx_dir, "backbone_keys.onnx")) else "backbone.onnx"
+        if not os.path.exists(os.path.join(self.onnx_dir, vf_name)):
+            vf_name = "vector_estimator.onnx"
         self._vf_model_name = vf_name.replace(".onnx", "")
         self._vf = self._load_session(vf_name)
         self._vocoder = self._load_session("vocoder.onnx")
-        self._dp = self._load_session("length_pred.onnx", required=False)
-        if self._dp is None:
-            self._dp = self._load_session("duration_predictor.onnx", required=False)
+        dp_name = "duration_predictor.onnx" if os.path.exists(os.path.join(self.onnx_dir, "duration_predictor.onnx")) else "length_pred.onnx"
+        self._dp = self._load_session(dp_name, required=False)
         self._dp_style = self._load_session("length_pred_style.onnx", required=False)
 
         vf_inputs = {i.name for i in self._vf.get_inputs()}
@@ -158,6 +153,10 @@ class BlueTTS:
                 model, inp = parts
                 self._model_keys.setdefault(model, {})[inp] = data[k]
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def create(self, phonemes: str, lang: str = "he") -> Tuple[np.ndarray, int]:
         """Synthesize speech from a pre-phonemized (IPA) string.
 
@@ -175,13 +174,17 @@ class BlueTTS:
         return wav, self.sample_rate
 
     def synthesize(self, text: str, lang: str = "he") -> Tuple[np.ndarray, int]:
-        """Phonemize raw text (renikud for Hebrew, espeak for others) then synthesize.
+        """Phonemize raw text (phonikud for Hebrew, espeak for others) then synthesize.
 
         Returns:
             (samples, sample_rate) — float32 numpy array and int sample rate.
         """
         phonemes = self._text_proc.phonemize(text, lang=lang)
         return self.create(phonemes, lang=lang)
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
 
     def _run(self, sess: ort.InferenceSession, feed: dict, model_name: str):
         keys = self._model_keys.get(model_name)
@@ -242,15 +245,17 @@ class BlueTTS:
         if z_ref is None and style_ttl is None:
             raise ValueError("Provide style_json with z_ref or style_ttl content.")
 
-        # Duration models see tag-stripped IPA; text encoder + VF use inline <lang> tokens.
+        # Text encoding
         text_plain = re.sub(r"</?[a-z]{2,8}>", "", phonemes)
         indices_dp = text_to_indices(text_plain, lang=lang)
+        ids_dp = np.array([indices_dp], dtype=np.int64)
+        mask_dp = np.ones((1, 1, len(indices_dp)), dtype=np.float32)
+
         indices_full = text_to_indices_multilang(phonemes, base_lang=lang)
-        text_ids_dp = np.array([indices_dp], dtype=np.int64)
-        text_mask_dp = np.ones((1, 1, len(indices_dp)), dtype=np.float32)
         text_ids = np.array([indices_full], dtype=np.int64)
         text_mask = np.ones((1, 1, len(indices_full)), dtype=np.float32)
 
+        # Style
         z_ref_norm = None
         if z_ref is not None:
             z_ref_norm = ((z_ref - self.mean) / self.std) * float(self.normalizer_scale)
@@ -272,6 +277,7 @@ class BlueTTS:
 
         ref_keys = style_keys if style_keys is not None else ref_values
 
+        # Text encoder
         te_names = {i.name for i in self._text_enc.get_inputs()}
         te_feed = {"text_ids": text_ids}
         if "text_mask" in te_names:
@@ -289,8 +295,13 @@ class BlueTTS:
 
         text_emb = self._run(self._text_enc, te_feed, "text_encoder")[0]
 
-        T_lat = self._predict_duration(text_ids_dp, text_mask_dp, z_ref_norm, style_dp)
+        # Duration
+        T_lat = self._predict_duration(ids_dp, mask_dp, z_ref_norm, style_dp)
+
+        # Flow matching
         x = self._flow_matching(text_emb, ref_values, text_mask, T_lat)
+
+        # Decode
         return self._decode(x)
 
     def _predict_duration(self, text_ids, text_mask, z_ref_norm, style_dp) -> int:
@@ -425,6 +436,7 @@ class BlueTTS:
         return self._apply_fade(wav)
 
 
+# ─── Module-level loaders ─────────────────────────────────────────────────────
 
 def load_voice_style(style_paths: List[str]) -> Style:
     """Load pre-extracted style vectors from one or more style JSON files."""
