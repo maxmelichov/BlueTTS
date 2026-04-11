@@ -4,39 +4,40 @@ Hebrew Text-to-Speech inference using ONNX Runtime with optional TensorRT accele
 
 ## Installation
 
+Install the core dependencies:
+
 ```bash
-uv sync                    # core deps
-uv sync --extra gpu        # + CUDA support
+uv sync
 ```
 
-## Model Weights
-
-Download the TTS weights from [notmax123/Blue](https://huggingface.co/notmax123/Blue) and the Hebrew G2P ONNX model from **[thewh1teagle/renikud](https://huggingface.co/thewh1teagle/renikud)** (Renikud: grapheme → IPA, ONNX Runtime, ~20 MB — weights are not bundled with the Python wheel).
-
-The **`renikud-onnx`** package is included in the default dependencies; you only need the ONNX file:
+For CUDA (GPU) support:
 
 ```bash
-uv run hf download notmax123/Blue --repo-type model --local-dir ./pt_models
+uv sync --extra gpu
+```
+
+## Download Models
+
+You need to download the ONNX models and the Hebrew G2P model (`renikud`). We use the `hf` CLI (included in dependencies) to download from Hugging Face.
+
+```bash
+# 1. Download Blue ONNX models
+uv run hf download notmax123/BlueOnnx --repo-type model --local-dir ./onnx_models
+
+# 2. Download Hebrew G2P ONNX model
 wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
 ```
 
-For Blue onnx file run this:
-```bash
-uv run hf download notmax123/BlueOnnx --repo-type model --local-dir ./onnx_models
-```
-
-(`huggingface-hub` is included in the default dependencies so `uv run hf` works without a separate global install.)
-
-## New voice JSON (reference clip)
-
-Install export deps. Weights come from [notmax123/Blue](https://huggingface.co/notmax123/Blue). New voices need **`stats_multilingual.pt`** for latent mean/std (you can fetch just that file if the `.safetensors` checkpoints are already in `pt_weights/`):
+*(Optional)* If you want to create new voices (extract latent mean/std), download the PyTorch weights and the multilingual stats:
 
 ```bash
 uv sync --extra export
-uv run hf download notmax123/Blue stats_multilingual.pt --local-dir ./pt_weights
+uv run hf download notmax123/Blue --repo-type model --local-dir ./pt_models
 ```
 
-## Usage & Examples
+## Usage
+
+Here is a basic example of how to use `BlueTTS` in Python:
 
 ```python
 import soundfile as sf
@@ -48,36 +49,49 @@ tts = BlueTTS(
     renikud_path="model.onnx",
 )
 
+# Single language
 samples, sr = tts.synthesize("שלום, זהו מודל דיבור בעברית.", lang="he")
 sf.write("output.wav", samples, sr)
 
+# Mixed languages
 mixed = "שלום לכולם, <en>welcome to the presentation</en>, <es>espero que lo disfruten</es>."
 samples, sr = tts.synthesize(mixed, lang="he")
 sf.write("mixed_output.wav", samples, sr)
 ```
 
-**Examples** (from repo root):
+### Running Examples
+
+You can run the provided example scripts to test the model. Outputs will be saved in the `examples/out/` directory.
 
 ```bash
-uv run python examples/basic.py               # he / en / es / it / ge + mixed → examples/out/
-uv run python examples/all_langs_and_mix.py   # all LANG_ID langs + mixed + langs_manifest.json → examples/out/
-# TensorRT batch (after `uv sync --extra tensorrt` and engine build):
-uv run python examples/all_langs_and_mix.py --tensorrt # BUGGED 
+# Generate samples for all supported languages (he, en, es, it, ge) + mixed
+uv run python examples/basic.py
+
+# Generate all languages and save a manifest JSON
+uv run python examples/all_langs_and_mix.py
+
+# Run the CLI app
 uv run python examples/app.py --lang en --text "Hello world."
 ```
 
-## TensorRT
+## TensorRT (NVIDIA GPUs Only)
 
-ONLY FOR NVIDIA GPUS!
+For faster inference on NVIDIA GPUs, you can build TensorRT engines.
 
-Install TensorRT-related packages, then run the builder (see [scripts/README.md](scripts/README.md) for export and other script layout notes).
+1. Install TensorRT dependencies:
 
 ```bash
 uv sync --extra tensorrt
+```
+
+2. Build the engines (see `scripts/README.md` for details):
+
+```bash
 uv run python scripts/create_tensorrt.py \
   --onnx_dir onnx_models --engine_dir trt_engines --precision fp16 --config config/tts.json
 ```
 
+*(Note: The `examples/all_langs_and_mix.py --tensorrt` flag is currently bugged).*
 
 ## Papers
 
