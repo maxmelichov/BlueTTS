@@ -21,9 +21,22 @@ tensorrt = [
     "torch>=2.1.0",
 ]
 export = [
+    "bluecodec",
     "onnx>=1.17.0",
+    "onnxslim>=0.1.0",
     "torch>=2.1.0",
 ]
+
+[tool.uv]
+# Repo is scripts + src packages, not a single importable `lightblue_onnx` tree (avoids uv_build errors).
+package = false
+
+[tool.uv.sources]
+bluecodec = { git = "https://github.com/maxmelichov/blue-codec.git" }
+
+[tool.pyright]
+# `models.*` lives under training/; same layout as PYTHONPATH=training for scripts/export_onnx.py
+extraPaths = ["training"]
 
 [build-system]
 requires = ["uv_build>=0.9.13,<0.10.0"]
