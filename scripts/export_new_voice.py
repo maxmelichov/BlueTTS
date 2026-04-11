@@ -1,39 +1,64 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Export voice style JSON from a reference WAV using weights from Hugging Face
-``notmax123/Blue`` (see https://huggingface.co/notmax123/Blue).
+Build a *voice style* JSON for Light-BlueTTS from one reference WAV.
 
-Download weights into the repo (from the **repository root**, not inside ``pt_weights``)::
+The JSON is consumed by ONNX inference (``src.blue_onnx``): it expects
+``style_ttl`` (reference-encoder outputs) and optionally ``style_dp``
+(duration-predictor style tokens). We do **not** embed ``style_keys``; the
+runtime uses ``style_ttl`` for both value and key conditioning when keys are
+absent.
+
+**Pipeline (high level)**
+
+1. Load ``tts.json``-style config and per-channel mean/std stats (same
+   normalization as training: compressed latents are scaled by
+   ``normalizer_scale`` after ``(z - mean) / std``).
+2. Run the Blue codec **encoder** on the waveform: mel → latent → **compress**
+   adjacent frames by ``chunk_compress_factor`` → ``z_ref_raw`` / ``z_ref_norm``.
+3. Optionally run the TTL **ReferenceEncoder** on ``z_ref_norm`` to get
+   ``style_ttl`` (shape ``[1, n_style, d_model]``).
+4. Optionally run the duration model’s **ref_encoder** on the same trimmed
+   latents to get ``style_dp`` (shape ``[1, n_tokens, dim]``).
+5. Write JSON plus optional ``.pt`` with raw compressed latents for PyTorch
+   tooling.
+
+**Weights**
+
+Defaults match Hugging Face ``notmax123/Blue`` (``.safetensors`` + stats).
+Download from the repo root::
 
     hf download notmax123/Blue --local-dir ./pt_weights
 
-Run the script from the **same repository root** so ``scripts/export_new_voice.py``
-resolves. Pass weight paths if they are not in the current directory, e.g.::
+Run this script from the repo root and pass paths, e.g.::
 
     PYTHONPATH=training uv run python scripts/export_new_voice.py \\
         --ref_wav /path/to/ref.wav \\
-        --out voice.json \\
+        --out voices/mine.json \\
         --config config/tts.json \\
         --ae_ckpt pt_weights/blue_codec.safetensors \\
         --ttl_ckpt pt_weights/vf_estimator.safetensors \\
         --dp_ckpt pt_weights/duration_predictor.safetensors \\
         --stats pt_weights/stats_multilingual.pt \\
         --verify_hf_sizes
-
-(If you ``cd pt_weights`` first, you must use absolute paths to the script and
-``PYTHONPATH`` must still point at this repo's ``training`` directory.)
 """
 
-import os
-import sys
-import argparse
-import numpy as np
-import torch
-import soundfile as sf
-import librosa
+from __future__ import annotations
 
-# Repo layout: ``training/`` holds ``models.*`` (same as scripts/README.md).
+import argparse
+import glob
+import json
+import os
+import re
+import sys
+from typing import Any
+
+import librosa
+import numpy as np
+import soundfile as sf
+import torch
+
+# ``models.*`` lives under ``training/`` (see scripts/README.md).
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _TRAINING = os.path.join(_ROOT, "training")
 if _TRAINING not in sys.path:
@@ -42,9 +67,9 @@ if _TRAINING not in sys.path:
 from bluecodec.autoencoder.latent_encoder import LatentEncoder
 from models.utils import LinearMelSpectrogram, compress_latents, load_ttl_config
 
-# Hugging Face model repo (byte sizes from repo tree API, notmax123/Blue main).
+# Expected file sizes (bytes) for ``notmax123/Blue`` main branch — sanity check only.
 HF_REPO_ID = "notmax123/Blue"
-HF_WEIGHT_SIZES = {
+HF_WEIGHT_SIZES: dict[str, int] = {
     "blue_codec.safetensors": 245_114_104,
     "duration_predictor.safetensors": 2_040_512,
     "stats_multilingual.pt": 3_133,
@@ -52,7 +77,8 @@ HF_WEIGHT_SIZES = {
 }
 
 
-def load_torch_or_safetensors(path: str, map_location="cpu"):
+def load_torch_or_safetensors(path: str, map_location: str | torch.device = "cpu") -> dict[str, Any]:
+    """Load a flat PyTorch state dict from ``.safetensors`` or pickled ``.pt``."""
     if path.endswith(".safetensors"):
         from safetensors.torch import load_file
 
@@ -60,8 +86,8 @@ def load_torch_or_safetensors(path: str, map_location="cpu"):
     return torch.load(path, map_location=map_location, weights_only=False)
 
 
-def state_dict_with_prefix(flat_sd: dict, prefix: str) -> dict:
-    """Extract ``prefix`` + '.' keys into a sub state_dict (strip prefix)."""
+def state_dict_with_prefix(flat_sd: dict[str, Any], prefix: str) -> dict[str, Any]:
+    """Keep keys ``prefix.*`` and strip the prefix (HF exports use flat names)."""
     p = prefix + "."
     out = {k[len(p) :]: v for k, v in flat_sd.items() if k.startswith(p)}
     if not out:
@@ -69,18 +95,26 @@ def state_dict_with_prefix(flat_sd: dict, prefix: str) -> dict:
     return out
 
 
-def load_ae_encoder_state(raw: dict) -> dict:
-    if "encoder" in raw and isinstance(raw["encoder"], dict):
-        return raw["encoder"]
-    enc_keys = [k for k in raw if k.startswith("encoder.") or k == "encoder"]
-    if enc_keys:
+def load_ae_encoder_state(raw: dict[str, Any]) -> dict[str, Any]:
+    """
+    ``blue_codec.safetensors`` may store weights as:
+
+    - nested ``{"encoder": {...}}`` (training checkpoints), or
+    - flat ``encoder.*`` tensors (HF), or
+    - a bare encoder state dict.
+    """
+    enc = raw.get("encoder")
+    if isinstance(enc, dict):
+        return enc
+    if any(k.startswith("encoder.") for k in raw):
         return state_dict_with_prefix(raw, "encoder")
     return raw
 
 
 def verify_hf_file_sizes(paths: list[str]) -> None:
+    """Fail fast if a known HF filename has an unexpected size (corrupt/partial download)."""
     for p in paths:
-        if not p or not os.path.isfile(p):
+        if not os.path.isfile(p):
             continue
         base = os.path.basename(p)
         expected = HF_WEIGHT_SIZES.get(base)
@@ -89,75 +123,92 @@ def verify_hf_file_sizes(paths: list[str]) -> None:
         got = os.path.getsize(p)
         if got != expected:
             raise ValueError(
-                f"Size mismatch for {base}: local file is {got} bytes, "
-                f"expected {expected} for {HF_REPO_ID} (re-download if needed)."
+                f"Size mismatch for {base}: got {got} bytes, expected {expected} for {HF_REPO_ID}."
             )
         print(f"[OK] Size check {base}: {got} bytes")
 
 
-def load_stats(device: str, preferred="stats_multilingual.pt", fallback="stats.pt"):
+def load_stats(device: str, preferred: str, fallback: str = "stats.pt") -> tuple[torch.Tensor, torch.Tensor, str]:
     stats_path = preferred if os.path.exists(preferred) else fallback
     if not os.path.exists(stats_path):
         raise FileNotFoundError(f"Missing stats file: tried {preferred} and {fallback}")
-    stats = torch.load(stats_path, map_location=device)
+    stats = torch.load(stats_path, map_location=device, weights_only=False)
     mean = stats["mean"].to(device).view(1, -1, 1)
     std = stats["std"].to(device).view(1, -1, 1)
     return mean, std, stats_path
 
 
-def read_wav_mono(path: str, target_sr: int = 44100):
+def read_wav_mono(path: str, target_sr: int = 44100) -> tuple[np.ndarray, int]:
+    """Load WAV, downmix to mono, resample to ``target_sr`` if needed."""
     wav, sr = sf.read(path)
     if wav.ndim == 2:
         wav = wav.mean(axis=1)
     wav = wav.astype(np.float32)
-
     if sr != target_sr:
-        wav = librosa.resample(wav.astype(np.float32), orig_sr=sr, target_sr=target_sr)
+        wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
         sr = target_sr
-
     return wav, sr
 
 
-import json
-import re
+def resolve_ttl_checkpoint(path: str) -> str:
+    """
+    ``path`` may be a single ``vf_estimator.safetensors`` file or a training
+    directory containing ``ckpt_step_*.pt`` (we take the highest step).
+    """
+    if not os.path.isdir(path):
+        return path
+    ckpt_files = glob.glob(os.path.join(path, "ckpt_step_*.pt"))
+    if not ckpt_files:
+        raise FileNotFoundError(f"No ckpt_step_*.pt under {path}")
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--ref_wav", type=str, required=True, help="Reference WAV path (44.1kHz mono/stereo)")
-    ap.add_argument("--out", type=str, default="yoav.json", help="Output style .json file (default: male1.json)")
+    def step_key(p: str) -> int:
+        m = re.search(r"ckpt_step_(\d+)", p)
+        return int(m.group(1)) if m else -1
+
+    ckpt_files.sort(key=step_key)
+    return ckpt_files[-1]
+
+
+def trim_reference_latents(z: torch.Tensor, label: str, *, max_frames: int = 150) -> torch.Tensor:
+    """
+    Match inference preprocessing: drop ~5% of trailing frames (transient tail),
+    then cap length so reference encoders see the same span as at runtime.
+    """
+    z = z.clone()
+    t = z.shape[2]
+    tail = max(2, int(t * 0.05))
+    t_trim = max(1, t - tail)
+    if t_trim < t:
+        print(f"[INFO] {label}: trim tail {t - t_trim} frames ({t} -> {t_trim})")
+        z = z[:, :, :t_trim]
+    if z.shape[2] > max_frames:
+        print(f"[INFO] {label}: cap {z.shape[2]} -> {max_frames} frames")
+        z = z[:, :, :max_frames]
+    return z
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Export style_ttl / style_dp JSON from a reference WAV.")
+    ap.add_argument("--ref_wav", type=str, required=True, help="Reference WAV (ideally 44.1 kHz; resampled if not).")
+    ap.add_argument("--out", type=str, default="voice.json", help="Output JSON path.")
     ap.add_argument(
         "--out_pt",
         type=str,
         default=None,
-        help="Optional output .pt path for z_ref_raw (compressed AE latents before normalization). "
-             "Compatible with inference_tts.py --z_ref.",
+        help="If set, save compressed pre-norm latents for PyTorch ``--z_ref`` tooling.",
     )
-    ap.add_argument(
-        "--ae_ckpt",
-        type=str,
-        default="blue_codec.safetensors",
-        help="Audio codec checkpoint (.safetensors or .pt with 'encoder' key). Default matches notmax123/Blue.",
-    )
-    ap.add_argument("--stats", type=str, default="stats_multilingual.pt", help="Preferred stats file (fallback to stats.pt)")
+    ap.add_argument("--ae_ckpt", type=str, default="blue_codec.safetensors", help="Codec checkpoint (HF name or .pt).")
+    ap.add_argument("--stats", type=str, default="stats_multilingual.pt", help="Stats .pt (fallback: stats.pt).")
     ap.add_argument(
         "--ttl_ckpt",
         type=str,
         default="vf_estimator.safetensors",
-        help="Text2latent bundle: vf_estimator.safetensors from HF, or a dir with ckpt_step_*.pt for training ckpts.",
+        help="VF bundle .safetensors or directory of ckpt_step_*.pt.",
     )
-    ap.add_argument(
-        "--dp_ckpt",
-        type=str,
-        default="duration_predictor.safetensors",
-        help="Duration predictor (.safetensors or .pt). Default matches notmax123/Blue.",
-    )
-    ap.add_argument(
-        "--verify_hf_sizes",
-        action="store_true",
-        help=f"Assert local weight files match expected byte sizes for {HF_REPO_ID} (when filenames match).",
-    )
+    ap.add_argument("--dp_ckpt", type=str, default="duration_predictor.safetensors", help="Duration model weights.")
+    ap.add_argument("--verify_hf_sizes", action="store_true", help="Check sizes for known HF filenames.")
     ap.add_argument("--device", type=str, default="cpu")
-    ap.add_argument("--config", type=str, default="configs/tts.json", help="Path to tts.json config")
+    ap.add_argument("--config", type=str, default="configs/tts.json", help="tts.json (dims, mel, normalizer).")
     args = ap.parse_args()
 
     device = args.device
@@ -165,116 +216,94 @@ def main():
     if args.verify_hf_sizes:
         verify_hf_file_sizes([args.ae_ckpt, args.ttl_ckpt, args.dp_ckpt, args.stats])
 
-    # Load config
-    cfg = None
-    if os.path.exists(args.config):
+    cfg: dict[str, Any] | None = None
+    if os.path.isfile(args.config):
         cfg = load_ttl_config(args.config)
-        print(f"[INFO] Loaded config: {args.config} (v{cfg['full_config'].get('tts_version', '?')})")
+        ver = cfg["full_config"].get("tts_version", "?")
+        print(f"[INFO] config {args.config} (v{ver})")
     else:
-        print(f"[WARN] Config {args.config} not found, using hardcoded defaults.")
+        print(f"[WARN] missing {args.config}, using built-in defaults")
 
-    # Config-derived dimensions
     chunk_compress_factor = cfg["chunk_compress_factor"] if cfg else 6
     compressed_channels = cfg["compressed_channels"] if cfg else 144
     normalizer_scale = cfg["normalizer_scale"] if cfg else 1.0
 
     mean, std, stats_path = load_stats(device, preferred=args.stats)
-    print(f"[INFO] Loaded stats: {stats_path}")
+    print(f"[INFO] stats {stats_path}")
 
-    if not os.path.exists(args.ae_ckpt):
+    if not os.path.isfile(args.ae_ckpt):
         raise FileNotFoundError(f"Missing AE checkpoint: {args.ae_ckpt}")
+
     ae_raw = load_torch_or_safetensors(args.ae_ckpt, map_location="cpu")
     enc_sd = load_ae_encoder_state(ae_raw)
 
-    # AE encoder config from tts.json
     ae_enc_cfg = cfg["ae_enc_cfg"] if cfg else {
-        "ksz": 7, "hdim": 512, "intermediate_dim": 2048,
-        "dilation_lst": [1] * 10, "odim": 24, "idim": 228,
+        "ksz": 7,
+        "hdim": 512,
+        "intermediate_dim": 2048,
+        "dilation_lst": [1] * 10,
+        "odim": 24,
+        "idim": 228,
     }
-    ae_sample_rate = cfg["ae_sample_rate"] if cfg else 44100
-    ae_n_fft = cfg["ae_n_fft"] if cfg else 2048
-    ae_hop_length = cfg["ae_hop_length"] if cfg else 512
-    ae_n_mels = cfg["ae_n_mels"] if cfg else 228
+    sr = cfg["ae_sample_rate"] if cfg else 44100
+    n_fft = cfg["ae_n_fft"] if cfg else 2048
+    hop = cfg["ae_hop_length"] if cfg else 512
+    n_mels = cfg["ae_n_mels"] if cfg else 228
 
-    mel_spec = LinearMelSpectrogram(sample_rate=ae_sample_rate, n_fft=ae_n_fft, hop_length=ae_hop_length, n_mels=ae_n_mels).to(device)
+    mel_spec = LinearMelSpectrogram(sample_rate=sr, n_fft=n_fft, hop_length=hop, n_mels=n_mels).to(device)
     ae_encoder = LatentEncoder(cfg=ae_enc_cfg).to(device).eval()
     ae_encoder.load_state_dict(enc_sd, strict=True)
 
-    wav, _ = read_wav_mono(args.ref_wav, target_sr=ae_sample_rate)
-    wav_t = torch.from_numpy(wav).to(device)[None, None, :]  # [1,1,T]
+    wav, _ = read_wav_mono(args.ref_wav, target_sr=sr)
+    wav_t = torch.from_numpy(wav).to(device).unsqueeze(0).unsqueeze(0)
 
     with torch.inference_mode():
-        mel = mel_spec(wav_t.squeeze(1))             # [1, n_mels, Tm]
-        
-        # Crop to multiple of chunk_compress_factor for compression
-        Tm = mel.shape[-1]
-        Tm_aligned = (Tm // chunk_compress_factor) * chunk_compress_factor
-        if Tm_aligned != Tm:
-            mel = mel[..., :Tm_aligned]
+        mel = mel_spec(wav_t.squeeze(1))
+        tm = mel.shape[-1]
+        aligned = (tm // chunk_compress_factor) * chunk_compress_factor
+        if aligned < tm:
+            mel = mel[..., :aligned]
 
-        z = ae_encoder(mel)                          # [1, latent_dim, Tm_aligned]
-        zc = compress_latents(z, factor=chunk_compress_factor)  # [1, compressed_channels, Tm_aligned/ccf]
-        
+        z = ae_encoder(mel)
+        zc = compress_latents(z, factor=chunk_compress_factor)
         z_ref_raw = zc.clone()
-
-        # Normalization (matches training: z_1 = ((z_enc - mean) / std) * normalizer_scale)
         z_ref_norm = ((zc - mean) / std) * normalizer_scale
 
-        # Sanity Checks
-        assert z_ref_norm.ndim == 3 and z_ref_norm.shape[1] == compressed_channels, \
-            f"Bad zc shape: {z_ref_norm.shape}, expected C={compressed_channels}"
-        assert mean.shape[1] == compressed_channels and std.shape[1] == compressed_channels, \
-            f"Bad stats shape: mean {mean.shape}, std {std.shape}"
-        assert torch.isfinite(z_ref_norm).all(), "zc has NaN/Inf (stats mismatch or bad audio)"
+        if z_ref_norm.shape[1] != compressed_channels:
+            raise ValueError(f"latent C={z_ref_norm.shape[1]}, expected {compressed_channels}")
+        if mean.shape[1] != compressed_channels or std.shape[1] != compressed_channels:
+            raise ValueError(f"stats C mismatch: mean {mean.shape}, std {std.shape}")
+        if not torch.isfinite(z_ref_norm).all():
+            raise RuntimeError("non-finite latents (bad audio or stats mismatch)")
 
-    # Optional: Save z_ref_raw to .pt for inference_tts.py --z_ref
     if args.out_pt:
-        out_pt = args.out_pt if args.out_pt.endswith(".pt") else (args.out_pt + ".pt")
+        out_pt = args.out_pt if args.out_pt.endswith(".pt") else args.out_pt + ".pt"
         os.makedirs(os.path.dirname(out_pt) or ".", exist_ok=True)
         torch.save(
             {
-                "z_ref_raw": z_ref_raw.detach().cpu(),
+                "z_ref_raw": z_ref_raw.cpu(),
                 "is_normalized": False,
                 "metadata": {
                     "ref_wav": os.path.abspath(args.ref_wav),
                     "stats_path": stats_path,
-                    "sr": ae_sample_rate,
+                    "sr": sr,
                     "z_ref_raw_shape": list(z_ref_raw.shape),
                 },
             },
             out_pt,
         )
-        print(f"[OK] Saved z_ref_raw: {out_pt}")
+        print(f"[OK] z_ref_raw -> {out_pt}")
 
-    # Save as JSON (voice style JSON: style_ttl + style_dp; ONNX uses style_ttl only
-    # and sets ref_keys = style_ttl when style_keys is omitted.)
-    json_path = args.out if args.out.endswith(".json") else args.out + ".json"
-
-    # 1) style_ttl via PyTorch ReferenceEncoder
-    style_ttl = None
+    # --- style_ttl (TTL reference encoder) ---
+    style_ttl: np.ndarray | None = None
     try:
         from models.text2latent.reference_encoder import ReferenceEncoder
-        
-        # Find TTL checkpoint
-        ttl_ckpt_path = args.ttl_ckpt
-        if os.path.isdir(ttl_ckpt_path):
-            # Find latest ckpt_step_*.pt in the directory
-            import glob
-            ckpt_files = glob.glob(os.path.join(ttl_ckpt_path, "ckpt_step_*.pt"))
-            if ckpt_files:
-                # Sort by step number and get the latest
-                def _ckpt_step(path: str) -> int:
-                    m = re.search(r"ckpt_step_(\d+)", path)
-                    return int(m.group(1)) if m else -1
 
-                ckpt_files.sort(key=_ckpt_step)
-                ttl_ckpt_path = ckpt_files[-1]
-            else:
-                raise FileNotFoundError(f"No ckpt_step_*.pt files found in {ttl_ckpt_path}")
-        
-        if os.path.exists(ttl_ckpt_path):
-            # Load ReferenceEncoder from config
-            reference_encoder = ReferenceEncoder(
+        ttl_path = resolve_ttl_checkpoint(args.ttl_ckpt)
+        if not os.path.exists(ttl_path):
+            print(f"[WARN] no TTL checkpoint at {ttl_path}; skip style_ttl")
+        else:
+            ref_enc = ReferenceEncoder(
                 in_channels=compressed_channels,
                 d_model=cfg["se_d_model"] if cfg else 256,
                 hidden_dim=cfg["se_hidden_dim"] if cfg else 1024,
@@ -283,114 +312,70 @@ def main():
                 num_heads=cfg["se_n_heads"] if cfg else 2,
             ).to(device).eval()
 
-            ttl_ckpt = load_torch_or_safetensors(ttl_ckpt_path, map_location=device)
-            if "reference_encoder" in ttl_ckpt:
-                reference_encoder.load_state_dict(ttl_ckpt["reference_encoder"], strict=True)
-            elif any(k.startswith("reference_encoder.") for k in ttl_ckpt):
-                reference_encoder.load_state_dict(
-                    state_dict_with_prefix(ttl_ckpt, "reference_encoder"), strict=True
-                )
+            ckpt = load_torch_or_safetensors(ttl_path, map_location=device)
+            if "reference_encoder" in ckpt:
+                ref_enc.load_state_dict(ckpt["reference_encoder"], strict=True)
+            elif any(k.startswith("reference_encoder.") for k in ckpt):
+                ref_enc.load_state_dict(state_dict_with_prefix(ckpt, "reference_encoder"), strict=True)
             else:
-                raise KeyError(
-                    f"TTL checkpoint missing 'reference_encoder' or 'reference_encoder.*' keys: {ttl_ckpt_path}"
-                )
-            
-            # Trim tail + cap to match build_reference_runtime in inference_tts.py
-            z_ref_trimmed = z_ref_norm.clone()
-            T_ref = z_ref_trimmed.shape[2]
-            tail_trim = max(2, int(T_ref * 0.05))
-            T_trimmed = max(1, T_ref - tail_trim)
-            if T_trimmed < T_ref:
-                print(f"[INFO] RefEnc: Trimming {T_ref - T_trimmed} tail frames ({T_ref} -> {T_trimmed})")
-                z_ref_trimmed = z_ref_trimmed[:, :, :T_trimmed]
-            target_frames = 150
-            if z_ref_trimmed.shape[2] > target_frames:
-                print(f"[INFO] RefEnc: Capping reference from {z_ref_trimmed.shape[2]} to {target_frames} frames")
-                z_ref_trimmed = z_ref_trimmed[:, :, :target_frames]
+                raise KeyError(f"no reference_encoder weights in {ttl_path}")
 
-            # Run inference
-            ref_mask_t = torch.ones(1, 1, z_ref_trimmed.shape[2], device=device, dtype=torch.float32)
+            z_tr = trim_reference_latents(z_ref_norm, "RefEnc")
+            mask = torch.ones(1, 1, z_tr.shape[2], device=device, dtype=torch.float32)
             with torch.inference_mode():
-                ref_values = reference_encoder(z_ref_trimmed, mask=ref_mask_t)
-
-            style_ttl = ref_values.detach().cpu().numpy().astype(np.float32)
-            print(f"[OK] Extracted style_ttl from {ttl_ckpt_path}")
-        else:
-            print(f"[WARN] Missing TTL checkpoint at {ttl_ckpt_path}; skipping style_ttl export")
+                style_ttl = ref_enc(z_tr, mask=mask).cpu().numpy().astype(np.float32)
+            print(f"[OK] style_ttl <- {ttl_path}")
     except Exception as e:
-        print(f"[WARN] Failed to export style_ttl via PyTorch ReferenceEncoder: {e}")
+        print(f"[WARN] style_ttl: {e}")
 
-    # 2) style_dp tokens via DP checkpoint (optional)
-    #    IMPORTANT: Apply the same preprocessing as inference_tts.py's
-    #    build_reference_runtime (trim tail 5%, cap to target_frames) so the
-    #    style_dp tokens match what the DP ref_encoder sees at inference time.
-    style_dp = None
+    # --- style_dp (duration model reference path) ---
+    style_dp: np.ndarray | None = None
     try:
-        if args.dp_ckpt and os.path.exists(args.dp_ckpt):
+        if args.dp_ckpt and os.path.isfile(args.dp_ckpt):
             from models.text2latent.dp_network import DPNetwork
 
-            dp_style_tokens = cfg["dp_style_tokens"] if cfg else 8
-            dp_style_dim = cfg["dp_style_dim"] if cfg else 16
+            tok = cfg["dp_style_tokens"] if cfg else 8
+            dim = cfg["dp_style_dim"] if cfg else 16
             state = load_torch_or_safetensors(args.dp_ckpt, map_location=device)
             if isinstance(state, dict) and "state_dict" in state:
                 state = state["state_dict"]
-            dp_emb_key = "sentence_encoder.text_embedder.char_embedder.weight"
-            dp_vocab_size = cfg["dp_vocab_size"] if cfg else 37
-            if isinstance(state, dict) and dp_emb_key in state:
-                dp_vocab_size = int(state[dp_emb_key].shape[0])
-            dp = DPNetwork(
-                vocab_size=dp_vocab_size,
-                style_tokens=dp_style_tokens,
-                style_dim=dp_style_dim,
-            ).to(device).eval()
+
+            emb = "sentence_encoder.text_embedder.char_embedder.weight"
+            vs = cfg["dp_vocab_size"] if cfg else 37
+            if isinstance(state, dict) and emb in state:
+                vs = int(state[emb].shape[0])
+
+            dp = DPNetwork(vocab_size=vs, style_tokens=tok, style_dim=dim).to(device).eval()
             dp.load_state_dict(state, strict=True)
 
-            # Apply same trimming as build_reference_runtime in inference_tts.py
-            z_dp = z_ref_norm.clone()
-            T_dp = z_dp.shape[2]
-            tail_trim = max(2, int(T_dp * 0.05))
-            T_trimmed = max(1, T_dp - tail_trim)
-            if T_trimmed < T_dp:
-                print(f"[INFO] DP: Trimming {T_dp - T_trimmed} tail frames ({T_dp} -> {T_trimmed})")
-                z_dp = z_dp[:, :, :T_trimmed]
-            target_frames = 150
-            if z_dp.shape[2] > target_frames:
-                print(f"[INFO] DP: Capping reference from {z_dp.shape[2]} to {target_frames} frames")
-                z_dp = z_dp[:, :, :target_frames]
-
-            ref_mask_t = torch.ones(1, 1, z_dp.shape[2], device=device, dtype=torch.float32)
+            z_dp = trim_reference_latents(z_ref_norm, "DP")
+            mask = torch.ones(1, 1, z_dp.shape[2], device=device, dtype=torch.float32)
             with torch.inference_mode():
-                # DPReferenceEncoder returns [B, n*d] where n*d = style_tokens * style_dim
-                # dp is a DPNetwork(TTSDurationModel), so access ref_encoder directly
-                style_dp_flat = dp.ref_encoder(z_dp, mask=ref_mask_t)  # [B, n*d]
-                style_dp_t = style_dp_flat.reshape(style_dp_flat.shape[0], dp_style_tokens, dp_style_dim)
-            style_dp = style_dp_t.detach().cpu().numpy().astype(np.float32)
-            print(f"[OK] Extracted style_dp tokens from {args.dp_ckpt}")
+                flat = dp.ref_encoder(z_dp, mask=mask)
+                shaped = flat.reshape(flat.shape[0], tok, dim)
+            style_dp = shaped.cpu().numpy().astype(np.float32)
+            print(f"[OK] style_dp <- {args.dp_ckpt}")
         else:
-            print(f"[INFO] DP checkpoint missing or not provided; skipping style_dp export: {args.dp_ckpt}")
+            print(f"[INFO] skip style_dp ({args.dp_ckpt})")
     except Exception as e:
-        print(f"[WARN] Failed to export style_dp tokens: {e}")
+        print(f"[WARN] style_dp: {e}")
 
-    # 3) Build JSON payload (style_ttl + optional style_dp; no style_keys — runtime uses style_ttl for keys too.)
-    json_payload = {}
-
+    payload: dict[str, Any] = {}
     if style_ttl is not None:
-        json_payload["style_ttl"] = {"data": style_ttl.tolist(), "dims": list(style_ttl.shape)}
+        payload["style_ttl"] = {"data": style_ttl.tolist(), "dims": list(style_ttl.shape)}
     if style_dp is not None:
-        json_payload["style_dp"] = {"data": style_dp.tolist(), "dims": list(style_dp.shape)}
-
-    # Always include metadata and (optionally) the normalized z_ref for debugging/fallback DP
-    json_payload["metadata"] = {
-        "sr": ae_sample_rate,
+        payload["style_dp"] = {"data": style_dp.tolist(), "dims": list(style_dp.shape)}
+    payload["metadata"] = {
+        "sr": sr,
         "ref_wav": os.path.abspath(args.ref_wav),
         "stats_path": stats_path,
         "z_ref_norm_shape": list(z_ref_norm.shape),
     }
-    
-    with open(json_path, 'w') as f:
-        json.dump(json_payload, f)
-    print(f"[OK] Saved {json_path}")
 
+    out_json = args.out if args.out.endswith(".json") else args.out + ".json"
+    with open(out_json, "w") as f:
+        json.dump(payload, f)
+    print(f"[OK] wrote {out_json}")
 
 
 if __name__ == "__main__":
