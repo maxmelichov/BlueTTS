@@ -6,8 +6,9 @@ Run from the repo root (paths resolve relative to the repository)::
 
     uv run python examples/basic.py
 
-Needs ``onnx_models/``, ``voices/*.json``, ``config/tts.json`` (or cwd ``tts.json``),
-and ``model.onnx`` for Hebrew G2P — see the main README.
+Needs ``onnx_models/`` (including ``stats.npz``), a voice ``style_json``, and
+preferably ``config/tts.json``. For Hebrew, download Renikud ``model.onnx``
+(see README); ``renikud-onnx`` is installed with ``uv sync``.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ def _ensure_repo_import_path() -> None:
 
 def main() -> int:
     _ensure_repo_import_path()
-    from src.blue_onnx import LightBlueTTS
+    from src.blue_onnx import BlueTTS
 
     ap = argparse.ArgumentParser(description="Write per-language and mixed sample WAVs.")
     ap.add_argument("--onnx_dir", type=Path, default=_REPO_ROOT / "onnx_models")
@@ -50,9 +51,12 @@ def main() -> int:
 
     renikud = str(args.renikud_path) if args.renikud_path.is_file() else None
     if renikud is None:
-        print("[WARN] renikud model.onnx not found; Hebrew lines may be wrong or fail.")
+        print(
+            f"[WARN] model.onnx not found at {args.renikud_path}; Hebrew lines will fail. "
+            "See README: wget Renikud weights from thewh1teagle/renikud."
+        )
 
-    tts = LightBlueTTS(
+    tts = BlueTTS(
         onnx_dir=str(args.onnx_dir),
         config_path=config_path,
         style_json=str(args.style_json),

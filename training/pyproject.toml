@@ -1,7 +1,7 @@
 [project]
-name = "lightblue-training"
+name = "blue-training"
 version = "0.1.0"
-description = "LightBlue TTS training"
+description = "Blue TTS training"
 requires-python = ">=3.13, <3.14"
 dependencies = [
     "numpy",
