@@ -45,7 +45,7 @@ from src.blue_onnx import BlueTTS
 
 tts = BlueTTS(
     onnx_dir="onnx_models",
-    style_json="voices/female1_new.json",
+    style_json="voices/female1.json",
     renikud_path="model.onnx",
 )
 
