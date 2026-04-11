@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import string
 
 from data.text_vocab import text_to_indices, VOCAB_LIST, normalize_text, LANG_ID
-from data.audio_utils import ensure_sr
+from bluecodec.audio_utils import ensure_sr
 
 _ESPEAK_LANG = {
     "en": "en-us",
