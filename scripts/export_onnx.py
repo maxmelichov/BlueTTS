@@ -17,6 +17,7 @@ from bluecodec import LatentDecoder1D
 from models.text2latent.dp_network import DPNetwork
 from models.text2latent.text_encoder import TextEncoder
 from models.text2latent.vf_estimator import VectorFieldEstimator
+from models.text2latent.reference_encoder import ReferenceEncoder
 from models.utils import load_ttl_config
 
 
@@ -359,6 +360,19 @@ def main():
     if "text_encoder" in t2l_state:
         text_enc.load_state_dict(t2l_state["text_encoder"], strict=True)
 
+    ref_enc = ReferenceEncoder(
+        in_channels=compressed_channels,
+        d_model=se_d_model,
+        hidden_dim=cfg.get("re_hidden_dim", 1024),
+        num_blocks=cfg.get("re_n_blocks", 6),
+        num_tokens=se_n_style,
+        num_heads=cfg.get("re_n_heads", 2),
+        kernel_size=cfg.get("re_kernel_size", 5),
+    ).to(device).eval()
+    if "reference_encoder" in t2l_state:
+        ref_enc.load_state_dict(t2l_state["reference_encoder"], strict=True)
+    _replace_mha_with_safe(ref_enc)
+
     vf = VectorFieldEstimator(
         in_channels=compressed_channels,
         out_channels=compressed_channels,
@@ -527,6 +541,38 @@ def main():
     )
     if do_verify:
         all_pass = verify_onnx(dp, dp_path, dp_inputs, dp_input_names, "duration_predictor") and all_pass
+
+    # Export duration predictor with style_tokens
+    style_dp = torch.randn(B, cfg["dp_style_tokens"], cfg["dp_style_dim"], dtype=torch.float32, device=device)
+    dp_style_path = os.path.join(onnx_dir, "length_pred_style.onnx")
+    
+    # We need a wrapper to pass style_tokens as a positional argument because ONNX export 
+    # doesn't handle keyword arguments well if they are mixed with None positional arguments.
+    class DPStyleWrapper(nn.Module):
+        def __init__(self, model):
+            super().__init__()
+            self.model = model
+            
+        def forward(self, text_ids, style_dp, text_mask):
+            return self.model(text_ids=text_ids, style_tokens=style_dp, text_mask=text_mask)
+            
+    dp_style_wrapper = DPStyleWrapper(dp)
+    dp_style_inputs = (text_ids, style_dp, text_mask)
+    dp_style_input_names = ["text_ids", "style_dp", "text_mask"]
+    
+    export(
+        dp_style_wrapper,
+        dp_style_path,
+        dp_style_inputs,
+        input_names=dp_style_input_names,
+        output_names=["duration"],
+        dynamic_axes={
+            "text_ids": {1: "T_text"},
+            "text_mask": {2: "T_text"},
+        },
+    )
+    if do_verify:
+        all_pass = verify_onnx(dp_style_wrapper, dp_style_path, dp_style_inputs, dp_style_input_names, "duration_predictor_style") and all_pass
 
     if do_verify:
         print("\n" + "=" * 60)
