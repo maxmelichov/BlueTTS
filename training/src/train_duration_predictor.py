@@ -16,7 +16,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from data.text2latent_dataset import Text2LatentDataset, collate_text2latent
 from data.text_vocab import CHAR_TO_ID, VOCAB_SIZE
 from models.utils import LinearMelSpectrogram, compress_latents
-from models.autoencoder.latent_encoder import LatentEncoder
+from bluecodec.src.bluecodec.autoencoder import LatentEncoder
 from models.text2latent.dp_network import DPNetwork
 
 def set_seed(seed: int = 42):

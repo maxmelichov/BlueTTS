@@ -1,4 +1,4 @@
-# Light-BlueTTS
+# BlueTTS
 
 Hebrew Text-to-Speech inference using ONNX Runtime with optional TensorRT acceleration.
 
