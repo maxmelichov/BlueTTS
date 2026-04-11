@@ -10,10 +10,12 @@ import torch
 _src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _src not in sys.path:
     sys.path.insert(0, _src)
+
+from _blue_vocab import text_to_indices, text_to_indices_multilang
 from _common import Style, TextProcessor, chunk_text  # noqa: E402
-from _blue_vocab import text_to_indices, text_to_indices_multilang  # noqa: E402
 del _src
 
+# Resolve training models relative to repo root
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _TRAINING = os.path.join(os.path.dirname(os.path.dirname(_HERE)), "training")
 if _TRAINING not in sys.path:
@@ -44,7 +46,7 @@ class BlueTTS:
         text2latent_ckpt: Optional[str] = None,
         ae_ckpt: Optional[str] = None,
         dp_ckpt: Optional[str] = None,
-        renikud_path: Optional[str] = None,
+        phonikud_path: Optional[str] = None,
     ):
         self.weights_dir = weights_dir
         self.style_json = style_json
@@ -60,7 +62,11 @@ class BlueTTS:
         self._load_config(config_path)
         self._load_models(text2latent_ckpt, ae_ckpt, dp_ckpt)
         self._load_stats()
-        self._text_proc = TextProcessor(renikud_path)
+        self._text_proc = TextProcessor(phonikud_path)
+
+    # ------------------------------------------------------------------
+    # Setup
+    # ------------------------------------------------------------------
 
     def _load_config(self, config_path: str):
         self.normalizer_scale = 1.0
@@ -87,6 +93,7 @@ class BlueTTS:
         dp_style_tokens   = cfg.get("dp_style_tokens", 8)
         dp_style_dim      = cfg.get("dp_style_dim", 16)
 
+        # ---- Resolve state dicts ----
         u_text = u_ref = None
         if text2latent_ckpt:
             combined = torch.load(text2latent_ckpt, map_location="cpu", weights_only=False)
@@ -119,6 +126,7 @@ class BlueTTS:
         dp_raw = torch.load(dp_path, map_location="cpu", weights_only=False)
         dp_sd = dp_raw.get("state_dict", dp_raw) if isinstance(dp_raw, dict) and "state_dict" in dp_raw else dp_raw
 
+        # ---- Auto-detect vocab sizes ----
         emb_key = "text_embedder.char_embedder.weight"
         if emb_key in te_sd and te_sd[emb_key].shape[0] != vocab_size:
             vocab_size = te_sd[emb_key].shape[0]
@@ -128,6 +136,7 @@ class BlueTTS:
         if dp_emb_key in dp_sd and dp_sd[dp_emb_key].shape[0] != dp_vocab_size:
             dp_vocab_size = dp_sd[dp_emb_key].shape[0]
 
+        # ---- Build models ----
         self._text_encoder = TextEncoder(
             vocab_size=vocab_size,
             d_model=cfg.get("te_d_model", 256),
@@ -184,6 +193,10 @@ class BlueTTS:
                 self.std  = std.to(self.device)
                 break
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def create(self, phonemes: str, lang: str = "he") -> Tuple[np.ndarray, int]:
         """Synthesize speech from pre-phonemized (IPA) text.
 
@@ -205,13 +218,17 @@ class BlueTTS:
         return wav, self.sample_rate
 
     def synthesize(self, text: str, lang: str = "he") -> Tuple[np.ndarray, int]:
-        """Phonemize raw text (renikud for Hebrew, espeak for others) then synthesize.
+        """Phonemize raw text (phonikud for Hebrew, espeak for others) then synthesize.
 
         Returns:
             (samples, sample_rate) — float32 numpy array and int sample rate.
         """
         phonemes = self._text_proc.phonemize(text, lang=lang)
         return self.create(phonemes, lang=lang)
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
 
     def _load_style_json(self, path: str):
         with open(path) as f:
@@ -239,6 +256,7 @@ class BlueTTS:
 
         dev = self.device
 
+        # ---- Tokenise ----
         text_plain = re.sub(r"</?[a-z]{2,8}>", "", phonemes)
         ids_dp   = torch.tensor(text_to_indices(text_plain, lang=lang), dtype=torch.long, device=dev).unsqueeze(0)
         mask_dp  = torch.ones(1, 1, ids_dp.shape[1], device=dev)
@@ -246,12 +264,16 @@ class BlueTTS:
         ids_full  = torch.tensor(text_to_indices_multilang(phonemes, base_lang=lang), dtype=torch.long, device=dev).unsqueeze(0)
         text_mask = torch.ones(1, 1, ids_full.shape[1], device=dev)
 
+        # ---- Duration ----
         T_lat = self._predict_duration(ids_dp, mask_dp, style_dp)
 
+        # ---- Text encoding ----
         h_text = self._text_encoder(ids_full, style_ttl, text_mask=text_mask)
 
+        # ---- Flow matching ----
         x = self._flow_matching(h_text, style_ttl, text_mask, T_lat)
 
+        # ---- Decode ----
         return self._decode(x)
 
     def _predict_duration(self, ids_dp, mask_dp, style_dp) -> int:

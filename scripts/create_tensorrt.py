@@ -8,7 +8,7 @@ import argparse
 import numpy as np
 import tensorrt as trt
 
-from utils import load_ttl_config
+from scripts.utils import load_ttl_config
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("EngineBuilder")
