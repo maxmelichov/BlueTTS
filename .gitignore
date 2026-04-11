@@ -8,8 +8,10 @@ build/
 venv/
 *.pyc
 
+
 # ONNX models (large binaries)
 onnx_models/
+pt_weights/
 *.onnx
 
 # TensorRT engines

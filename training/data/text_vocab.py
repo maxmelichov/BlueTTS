@@ -22,6 +22,8 @@ Adding a new language:
 import re
 from unicodedata import normalize as uni_normalize
 
+# Piper phoneme map (exact IDs from rhasspy/piper-checkpoints)
+# Source: en/en_US/ljspeech/medium/config.json  phoneme_id_map
 _PIPER_MAP: dict[str, int] = {
     "_": 0,   # PAD
     "^": 1,   # BOS
@@ -63,73 +65,215 @@ _PIPER_MAP: dict[str, int] = {
     "g": 154, "ʦ": 155, "X": 156,
 }
 
+# Extended symbol map (indices 157..243)
+# Covers uppercase letters, additional IPA symbols, and punctuation
+# from: _letters, _letters_ipa, _punctuation
 _EXTENDED_MAP: dict[str, int] = {
     "A": 157, "B": 158, "C": 159, "D": 160, "E": 161, "F": 162, "G": 163,
     "H": 164, "I": 165, "J": 166, "K": 167, "L": 168, "M": 169, "N": 170,
     "O": 171, "P": 172, "Q": 173, "R": 174, "S": 175, "T": 176, "U": 177,
     "V": 178, "W": 179, "Y": 180, "Z": 181,
-    "ʤ": 182, "ɝ": 183, "ʧ": 184, "ʼ": 185, "ʴ": 186, "ʱ": 187, "ʷ": 188,
-    "ˠ": 189, "→": 190, "↗": 191, "↘": 192, "¡": 193, "¿": 194, "…": 195,
-    "«": 196, "»": 197, "*": 198, "~": 199, "/": 200, "\\": 201, "&": 202,
-    "\u0361": 203, "\u035C": 204, "\u0325": 205, "\u032C": 206, "\u0339": 207,
-    "\u031C": 208, "\u031D": 209, "\u031E": 210, "\u031F": 211, "\u0320": 212,
-    "\u0330": 213, "\u0334": 214, "\u031A": 215, "\u0318": 216, "\u0319": 217,
-    "\u0348": 218, "\u0306": 219, "\u0308": 220, "\u031B": 221, "\u0324": 222,
-    "\u033C": 223, "\u02C0": 224, "\u02C1": 225, "\u02BE": 226, "\u02BF": 227,
-    "\u02BB": 228, "\u02C9": 229, "\u02CA": 230, "\u02CB": 231, "\u02C6": 232,
-    "\u02E5": 233, "\u02E6": 234, "\u02E7": 235, "\u02E8": 236, "\u02E9": 237,
-    "\u0300": 238, "\u0301": 239, "\u0302": 240, "\u0304": 241, "\u030C": 242,
-    "\u0307": 243,
+    "ʤ": 182,  # voiced postalveolar affricate (dʒ digraph)
+    "ɝ": 183,  # open-mid central rhotic vowel
+    "ʧ": 184,  # voiceless postalveolar affricate (tʃ digraph)
+    "ʼ": 185,  # ejective marker (modifier letter apostrophe)
+    "ʴ": 186,  # modifier letter small turned r
+    "ʱ": 187,  # modifier letter small h with hook
+    "ʷ": 188,  # modifier letter small w (labialization diacritic)
+    "ˠ": 189,  # modifier letter small gamma (velarization diacritic)
+    "→": 190,  # rightwards arrow (level tone)
+    "↗": 191,  # north east arrow (rising tone)
+    "↘": 192,  # south east arrow (falling tone)
+    "¡": 193,  # inverted exclamation mark
+    "¿": 194,  # inverted question mark
+    "…": 195,  # horizontal ellipsis
+    "«": 196,  # left-pointing double angle quotation mark
+    "»": 197,  # right-pointing double angle quotation mark
+    "*": 198,  # asterisk
+    "~": 199,  # tilde
+    "/": 200,  # solidus
+    "\\": 201, # reverse solidus
+    "&": 202,  # ampersand
+    "\u0361": 203,  # ͡  combining double inverted breve (affricate tie, e.g. t͡ʃ)
+    "\u035C": 204,  # ͜  combining double breve below (alternative tie bar)
+    "\u0325": 205,  # ̥  combining ring below (devoiced)
+    "\u032C": 206,  # ̬  combining caron below (voiced)
+    "\u0339": 207,  # ̹  combining right half ring below (more rounded)
+    "\u031C": 208,  # ̜  combining left half ring below (less rounded)
+    "\u031D": 209,  # ̝  combining up tack below (raised)
+    "\u031E": 210,  # ̞  combining down tack below (lowered)
+    "\u031F": 211,  # ̟  combining plus sign below (advanced)
+    "\u0320": 212,  # ̠  combining minus sign below (retracted)
+    "\u0330": 213,  # ̰  combining tilde below (creaky voice)
+    "\u0334": 214,  # ̴  combining tilde overlay (nasalization)
+    "\u031A": 215,  # ̚  combining left angle above (no audible release)
+    "\u0318": 216,  # ̘  combining left tack below (advanced tongue root)
+    "\u0319": 217,  # ̙  combining right tack below (retracted tongue root)
+    "\u0348": 218,  # ͈  combining double vertical line below (fortis)
+    "\u0306": 219,  # ̆  combining breve (extra short)
+    "\u0308": 220,  # ̈  combining diaeresis above (centralized)
+    "\u031B": 221,  # ̛  combining horn
+    "\u0324": 222,  # ̤  combining diaeresis below (breathy voice)
+    "\u033C": 223,  # ̼  combining seagull below (linguolabial)
+    "\u02C0": 224,  # ˀ  modifier letter glottal stop
+    "\u02C1": 225,  # ˁ  modifier letter reversed glottal stop
+    "\u02BE": 226,  # ʾ  modifier letter right half ring
+    "\u02BF": 227,  # ʿ  modifier letter left half ring
+    "\u02BB": 228,  # ʻ  modifier letter turned comma
+    "\u02C9": 229,  # ˉ  modifier letter macron (level tone)
+    "\u02CA": 230,  # ˊ  modifier letter acute accent (rising tone)
+    "\u02CB": 231,  # ˋ  modifier letter grave accent (falling tone)
+    "\u02C6": 232,  # ˆ  modifier letter circumflex accent
+    "\u02E5": 233,  # ˥  extra-high tone bar
+    "\u02E6": 234,  # ˦  high tone bar
+    "\u02E7": 235,  # ˧  mid tone bar
+    "\u02E8": 236,  # ˨  low tone bar
+    "\u02E9": 237,  # ˩  extra-low tone bar
+    "\u0300": 238,  # ̀  combining grave accent
+    "\u0301": 239,  # ́  combining acute accent
+    "\u0302": 240,  # ̂  combining circumflex accent
+    "\u0304": 241,  # ̄  combining macron (mid tone)
+    "\u030C": 242,  # ̌  combining caron
+    "\u0307": 243,  # ̇  combining dot above
 }
 
-PIPER_REGION_END  = 156
-LANG_REGION_START = 244
-LANG_REGION_SIZE  = 140
-VOCAB_SIZE        = LANG_REGION_START + LANG_REGION_SIZE
+# Region constants
+PIPER_REGION_END  = 156   # last piper index
+LANG_REGION_START = 244   # first language token index
+LANG_REGION_SIZE  = 140   # slots for 140 languages
+VOCAB_SIZE        = LANG_REGION_START + LANG_REGION_SIZE  # 384
 
-PAD_ID  = 0
-BOS_ID  = 1
-EOS_ID  = 2
+# Special token IDs
+PAD_ID  = 0   # "_"
+BOS_ID  = 1   # "^"
+EOS_ID  = 2   # "$"
 
+# Language tokens  (indices 244..383)
+# To add a language: add one line here, nothing else changes.
 LANG_ID: dict[str, int] = {
-    "he": LANG_REGION_START + 0,
-    "en": LANG_REGION_START + 1,
-    "es": LANG_REGION_START + 2,
-    "de": LANG_REGION_START + 8,
-    "it": LANG_REGION_START + 9,
+    "he": LANG_REGION_START + 0,   # 244 — Hebrew
+    "en": LANG_REGION_START + 1,   # 245 — English
+    "es": LANG_REGION_START + 2,   # 246 — Spanish
+    "de": LANG_REGION_START + 8,   # 252 — German
+    "it": LANG_REGION_START + 9,   # 253 — Italian
 }
 
 LANG_NAMES: dict[int, str] = {v: k for k, v in LANG_ID.items()}
 
+# Lookup tables
 CHAR_TO_ID: dict[str, int] = {**_PIPER_MAP, **_EXTENDED_MAP}
+
 ID_TO_CHAR: dict[int, str] = {v: k for k, v in CHAR_TO_ID.items()}
 for _lang_name, _lang_idx in LANG_ID.items():
     ID_TO_CHAR[_lang_idx] = f"<{_lang_name}>"
 
+# All characters that have a valid mapping (used for coverage reporting in dataset)
 VOCAB_LIST: list[str] = list(CHAR_TO_ID.keys())
 
+# Safety assertions
 assert VOCAB_SIZE == 384
-assert len(_PIPER_MAP) == 157
-assert max(_PIPER_MAP.values()) == PIPER_REGION_END
-assert all(v < LANG_REGION_START for v in _PIPER_MAP.values())
-assert all(PIPER_REGION_END < v < LANG_REGION_START for v in _EXTENDED_MAP.values())
-assert len(set(_EXTENDED_MAP.values())) == len(_EXTENDED_MAP)
-assert not (set(_PIPER_MAP.values()) & set(_EXTENDED_MAP.values()))
+assert len(_PIPER_MAP) == 157, f"Piper map must have 157 entries, got {len(_PIPER_MAP)}"
+assert max(_PIPER_MAP.values()) == PIPER_REGION_END, \
+    f"Piper max ID should be {PIPER_REGION_END}"
+assert all(v < LANG_REGION_START for v in _PIPER_MAP.values()), \
+    "Piper IDs must not overlap language region"
+assert all(PIPER_REGION_END < v < LANG_REGION_START for v in _EXTENDED_MAP.values()), \
+    "Extended IDs must be in range 157..243"
+assert len(set(_EXTENDED_MAP.values())) == len(_EXTENDED_MAP), \
+    "Extended map has duplicate IDs"
+assert not (set(_PIPER_MAP.values()) & set(_EXTENDED_MAP.values())), \
+    "Piper and extended maps share IDs"
+
+
+# Public API
 
 def text_to_indices(text: str, lang: str = "he") -> list[int]:
+    """
+    Convert an IPA phoneme string to vocab indices with a language token prepended.
+
+    Args:
+        text: IPA string (output of a G2P / phonemizer tool)
+        lang: language code ("he", "en", "es", ...)
+    Returns:
+        list of ints — first element is the language token (244+),
+        followed by per-character IDs. Unknown chars map to PAD_ID (0).
+    Raises:
+        ValueError: if lang is not registered in LANG_ID
+    """
     if lang not in LANG_ID:
-        raise ValueError(f"Unknown language '{lang}'. Available: {list(LANG_ID.keys())}.")
+        raise ValueError(
+            f"Unknown language '{lang}'. Available: {list(LANG_ID.keys())}. "
+            f"Add it to LANG_ID in text_vocab.py"
+        )
     lang_token = LANG_ID[lang]
     return [lang_token] + [CHAR_TO_ID.get(ch, PAD_ID) for ch in text]
 
 
+def text_to_indices_multilang(text: str, base_lang: str = "he") -> list[int]:
+    """
+    Convert an IPA string with inline <lang> tags to vocab indices.
+
+    Inline tags like ``<english>klˈɔːd<english>`` insert the corresponding
+    language token mid-sequence and revert to base_lang afterwards.  The same
+    tag name is used for both opening and closing (toggle style).
+
+    Example:
+        "שלום <english>world<english> שוב"
+        → [he_token, ...שלום chars..., en_token, ...world chars..., he_token, ...שוב chars...]
+
+    Falls back to ``text_to_indices`` when no inline tags are present.
+    """
+    if base_lang not in LANG_ID:
+        raise ValueError(
+            f"Unknown language '{base_lang}'. Available: {list(LANG_ID.keys())}."
+        )
+
+    # Fast path: no tags
+    if "<" not in text:
+        return text_to_indices(text, lang=base_lang)
+
+    # Parse segments: alternating base-lang and tagged sections
+    segments: list[tuple[str, str]] = []  # [(lang, ipa_text), ...]
+    last_end = 0
+    for m in re.finditer(r"<(\w+)>(.*?)(?:</\1>|<\1>)", text, flags=re.DOTALL):
+        if m.start() > last_end:
+            segments.append((base_lang, text[last_end:m.start()]))
+        tag_lang = m.group(1)
+        segments.append((tag_lang if tag_lang in LANG_ID else base_lang, m.group(2)))
+        last_end = m.end()
+    if last_end < len(text):
+        segments.append((base_lang, text[last_end:]))
+
+    # Build token sequence: start with base language token, insert switch tokens
+    ids: list[int] = [LANG_ID[base_lang]]
+    current_lang = base_lang
+    for lang, seg in segments:
+        if lang != current_lang:
+            ids.append(LANG_ID.get(lang, LANG_ID[base_lang]))
+            current_lang = lang
+        ids.extend(CHAR_TO_ID.get(ch, PAD_ID) for ch in seg)
+    return ids
+
+
 def indices_to_text(indices: list[int]) -> str:
+    """Convert indices back to a readable string (for debugging)."""
     return "".join(ID_TO_CHAR.get(i, "?") for i in indices)
 
 
 def normalize_text(text: str, lang: str = "he") -> str:
+    """
+    Normalize text before tokenization.
+    Applies Unicode normalization and common phoneme substitutions.
+
+    Args:
+        text: IPA or raw-text string to normalize.
+        lang: language code — Hebrew-specific substitutions (r→ʁ, g→ɡ)
+              are only applied when lang == "he".
+    """
     text = text.strip()
     text = uni_normalize("NFD", text)
+
+    # Universal replacements (fancy quotes/dashes → ASCII equivalents)
     replacements = {
         "\u201c": '"', "\u201d": '"',
         "\u2018": "'", "\u2019": "'",
@@ -138,14 +282,19 @@ def normalize_text(text: str, lang: str = "he") -> str:
     }
     for k, v in replacements.items():
         text = text.replace(k, v)
+
+    # Hebrew phonemizer output normalization
+    # (phonikud sometimes emits ASCII r/g instead of IPA ʁ/ɡ)
     if lang == "he":
         text = text.replace("r", "ʁ")
         text = text.replace("g", "ɡ")
+
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
 def check_coverage(text: str) -> dict:
+    """Debug: report which chars in text are missing from vocab."""
     known, unknown = [], []
     for ch in text:
         (known if ch in CHAR_TO_ID else unknown).append(ch)
@@ -161,10 +310,12 @@ def check_coverage(text: str) -> dict:
 def get_supported_languages() -> list[str]:
     return list(LANG_ID.keys())
 
+
+# Import diagnostics
 print(
     f"[Vocab] VOCAB_SIZE={VOCAB_SIZE} | "
-    f"piper={len(_PIPER_MAP)} | "
-    f"extended={len(_EXTENDED_MAP)} | "
-    f"lang_slots={LANG_REGION_SIZE} | "
+    f"piper={len(_PIPER_MAP)} (0..{PIPER_REGION_END}) | "
+    f"extended={len(_EXTENDED_MAP)} (157..{max(_EXTENDED_MAP.values())}) | "
+    f"lang_slots={LANG_REGION_SIZE} ({LANG_REGION_START}..{VOCAB_SIZE - 1}) | "
     f"active_langs={list(LANG_ID.keys())}"
 )

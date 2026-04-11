@@ -19,38 +19,35 @@ class Style:
 
 
 class TextProcessor:
-    """Multilingual phonemization — phonikud for Hebrew, espeak for others."""
+    """Multilingual phonemization — renikud for Hebrew, espeak for others."""
 
     _ESPEAK_MAP = {
-        "en": "en-us", "de": "de", "it": "it",
+        "en": "en-us", "en-us": "en-us", "de": "de", "ge": "de", "it": "it",
         "es": "es",    "fr": "fr-fr", "pt": "pt",
     }
 
-    def __init__(self, phonikud_path: Optional[str] = None):
-        self.phonikud = None
-        if phonikud_path and os.path.exists(phonikud_path):
+    def __init__(self, renikud_path: Optional[str] = None):
+        self.renikud = None
+        if renikud_path and os.path.exists(renikud_path):
             try:
-                from phonikud_onnx import Phonikud
-                self.phonikud = Phonikud(phonikud_path)
-                print(f"[INFO] Loaded Phonikud from {phonikud_path}")
+                from renikud_onnx import G2P
+                self.renikud = G2P(renikud_path)
+                print(f"[INFO] Loaded G2P from {renikud_path}")
             except ImportError:
-                print("[WARN] phonikud_onnx not installed; Hebrew raw-text G2P disabled.")
+                print("[WARN] renikud_onnx not installed; Hebrew raw-text G2P disabled.")
 
     def phonemize(self, text: str, lang: str = "he") -> str:
         is_hebrew = any('\u0590' <= c <= '\u05ff' for c in text)
-        has_nikud = any('\u05b0' <= c <= '\u05c7' for c in text)
 
         if lang == "he" or is_hebrew:
             if not is_hebrew:
                 return text  # already IPA
-            try:
-                from phonikud import phonemize as _ph
-            except ImportError:
-                return text
-            if has_nikud:
-                return _ph(text)
-            if self.phonikud is not None:
-                return _ph(self.phonikud.add_diacritics(text))
+            
+            if self.renikud is not None:
+                return self.renikud.phonemize(text)
+            
+            # fallback if renikud not loaded (e.g. not installed)
+            print("[WARN] renikud not loaded, Hebrew text will not be phonemized properly.")
             return text
 
         espeak_lang = self._ESPEAK_MAP.get(lang)
