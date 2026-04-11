@@ -100,7 +100,7 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
-def init_distributed(device, checkpoint_dir, finetune):
+def init_distributed(device, checkpoint_dir, finetune, lr=5e-4, spfm_warmup=40000):
     """Initialise DDP, create log dir, apply finetune overrides.
     Returns rank, local_rank, device, log_dir, spfm_start_override."""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
@@ -126,8 +126,7 @@ def init_distributed(device, checkpoint_dir, finetune):
 
     spfm_start_override = None
     if finetune:
-        lr = 5e-4
-        spfm_start_override = 40_000
+        spfm_start_override = spfm_warmup
         if rank == 0:
             print(f"[Finetune Mode] lr={lr}, SPFM warm-up={spfm_start_override} steps")
 
@@ -662,7 +661,7 @@ def run_inference(
 
 def train(
     checkpoint_dir="checkpoints/text2latent",
-    ae_checkpoint="checkpoints/ae/ae_latest.pt",
+    ae_checkpoint="checkpoints/ae/blue_codec.safetensors",
     stats_path="stats_multilingual.pt",
     config_path="configs/tts.json",
     epochs=1000,
@@ -673,10 +672,11 @@ def train(
     device="cuda:1" if torch.cuda.is_available() else "cpu",
     finetune=False,
     accumulation_steps=1,
+    spfm_warmup=40000,
 ):
     # ---- Distributed setup ----
     rank, local_rank, device, log_dir, spfm_start_override = init_distributed(
-        device, checkpoint_dir, finetune,
+        device, checkpoint_dir, finetune, lr, spfm_warmup
     )
 
     # ---- Config & stats ----
@@ -1211,7 +1211,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--finetune",
         action="store_true",
-        help="Finetune mode: lr=5e-4, SPFM starts after warm-up",
+        help="Finetune mode: uses provided lr, SPFM starts after warm-up",
     )
     parser.add_argument(
         "--config",
@@ -1229,7 +1229,43 @@ if __name__ == "__main__":
         "--accumulation_steps",
         type=int,
         default=1,
-        help="Gradient accumulation steps (default: 2)",
+        help="Gradient accumulation steps (default: 1)",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=5e-4,
+        help="Learning rate (default: 5e-4)",
+    )
+    parser.add_argument(
+        "--spfm_warmup",
+        type=int,
+        default=40000,
+        help="SPFM warm-up steps in finetune mode (default: 40000)",
+    )
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default="checkpoints/text2latent",
+        help="Directory to save and load checkpoints",
+    )
+    parser.add_argument(
+        "--ae_checkpoint",
+        type=str,
+        default="checkpoints/ae/blue_codec.safetensors",
+        help="Path to AE checkpoint",
+    )
+    parser.add_argument(
+        "--stats_path",
+        type=str,
+        default="stats_multilingual.pt",
+        help="Path to latent stats file",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=14,
+        help="Batch size (default: 14)",
     )
     args = parser.parse_args()
     set_seed(42)
@@ -1238,4 +1274,10 @@ if __name__ == "__main__":
         config_path=args.config,
         Ke=args.Ke,
         accumulation_steps=args.accumulation_steps,
+        lr=args.lr,
+        spfm_warmup=args.spfm_warmup,
+        checkpoint_dir=args.checkpoint_dir,
+        ae_checkpoint=args.ae_checkpoint,
+        stats_path=args.stats_path,
+        batch_size=args.batch_size,
     )

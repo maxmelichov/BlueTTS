@@ -11,11 +11,11 @@ uv sync --extra gpu        # + CUDA support
 
 ## Model Weights
 
-Download the TTS weights from [notmax123/LightBlue](https://huggingface.co/notmax123/LightBlue) and the Phonikud model from [thewh1teagle/phonikud-onnx](https://huggingface.co/thewh1teagle/phonikud-onnx).
+Download the TTS weights from [notmax123/LightBlue](https://huggingface.co/notmax123/LightBlue) and the G2P model from [thewh1teagle/renikud-onnx](https://huggingface.co/thewh1teagle/renikud-onnx).
 
 ```bash
 uv run hf download notmax123/LightBlue --repo-type model --local-dir ./onnx_models
-wget https://huggingface.co/thewh1teagle/phonikud-onnx/resolve/main/phonikud-1.0.int8.onnx
+wget https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
 ```
 
 ## Usage & Examples
@@ -32,7 +32,7 @@ from src.blue_onnx import LightBlueTTS
 tts = LightBlueTTS(
     onnx_dir="onnx_models", 
     style_json="voices/female1.json",
-    phonikud_path="phonikud-1.0.int8.onnx" # Required for Hebrew text
+    renikud_path="model.onnx" # Required for Hebrew text
 )
 
 # Synthesize speech
@@ -55,7 +55,7 @@ from src.blue_onnx import LightBlueTTS
 tts = LightBlueTTS(
     onnx_dir="onnx_models", 
     style_json="voices/female1.json",
-    phonikud_path="phonikud-1.0.int8.onnx"
+    renikud_path="model.onnx"
 )
 
 # Mix Hebrew, English, and Spanish in one sentence!

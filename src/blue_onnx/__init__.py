@@ -28,7 +28,7 @@ class LightBlueTTS:
         chunk_len: int = 150,
         silence_sec: float = 0.15,
         fade_duration: float = 0.02,
-        phonikud_path: Optional[str] = None,
+        renikud_path: Optional[str] = None,
     ):
         self.onnx_dir = onnx_dir
         self.style_json = style_json
@@ -45,7 +45,7 @@ class LightBlueTTS:
         self._load_stats()
         self._load_uncond()
         self._load_shuffle_keys()
-        self._text_proc = TextProcessor(phonikud_path)
+        self._text_proc = TextProcessor(renikud_path)
 
     def _load_config(self, config_path: str):
         self.normalizer_scale = 1.0
@@ -161,7 +161,7 @@ class LightBlueTTS:
         return wav, self.sample_rate
 
     def synthesize(self, text: str, lang: str = "he") -> Tuple[np.ndarray, int]:
-        """Phonemize raw text (phonikud for Hebrew, espeak for others) then synthesize.
+        """Phonemize raw text (renikud for Hebrew, espeak for others) then synthesize.
 
         Returns:
             (samples, sample_rate) — float32 numpy array and int sample rate.

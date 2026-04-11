@@ -79,7 +79,7 @@ def collate_dp(batch, spk2idx=None, unknown_spk=0):
 
 def train_duration_predictor(
     checkpoint_dir: str = "checkpoints/duration_predictor",
-    ae_checkpoint: str = "checkpoints/ae/ae_latest.pt",
+    ae_checkpoint: str = "checkpoints/ae/blue_codec.safetensors",
     stats_path: str = "stats_multilingual.pt",
     config_path: str = "configs/tts.json",
     max_steps: int = 1000,
@@ -287,6 +287,9 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/duration_predictor")
+    parser.add_argument("--ae_checkpoint", type=str, default="checkpoints/ae/blue_codec.safetensors")
+    parser.add_argument("--stats_path", type=str, default="stats_multilingual.pt")
     args = parser.parse_args()
     train_duration_predictor(
         config_path=args.config,
@@ -294,4 +297,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         lr=args.lr,
         device=(args.device if args.device is not None else ("cuda:1" if torch.cuda.is_available() else "cpu")),
+        checkpoint_dir=args.checkpoint_dir,
+        ae_checkpoint=args.ae_checkpoint,
+        stats_path=args.stats_path,
     )

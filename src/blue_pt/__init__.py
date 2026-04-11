@@ -44,7 +44,7 @@ class LightBlueTTS:
         text2latent_ckpt: Optional[str] = None,
         ae_ckpt: Optional[str] = None,
         dp_ckpt: Optional[str] = None,
-        phonikud_path: Optional[str] = None,
+        renikud_path: Optional[str] = None,
     ):
         self.weights_dir = weights_dir
         self.style_json = style_json
@@ -60,7 +60,7 @@ class LightBlueTTS:
         self._load_config(config_path)
         self._load_models(text2latent_ckpt, ae_ckpt, dp_ckpt)
         self._load_stats()
-        self._text_proc = TextProcessor(phonikud_path)
+        self._text_proc = TextProcessor(renikud_path)
 
     def _load_config(self, config_path: str):
         self.normalizer_scale = 1.0
@@ -205,7 +205,7 @@ class LightBlueTTS:
         return wav, self.sample_rate
 
     def synthesize(self, text: str, lang: str = "he") -> Tuple[np.ndarray, int]:
-        """Phonemize raw text (phonikud for Hebrew, espeak for others) then synthesize.
+        """Phonemize raw text (renikud for Hebrew, espeak for others) then synthesize.
 
         Returns:
             (samples, sample_rate) — float32 numpy array and int sample rate.
