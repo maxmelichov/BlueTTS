@@ -1,4 +1,4 @@
-# Light-BlueTTS training overview
+# Blue training overview
 
 Hebrew TTS based on [SupertonicTTS](https://arxiv.org/abs/2503.23108). Stages run **in order**: autoencoder → latent statistics → text-to-latent (TTL) and duration predictor (DP).
 

@@ -15,7 +15,7 @@ from _blue_vocab import text_to_indices, text_to_indices_multilang  # noqa: E402
 del _src
 
 
-class LightBlueTTS:
+class BlueTTS:
     def __init__(
         self,
         onnx_dir: str,
@@ -86,11 +86,24 @@ class LightBlueTTS:
         self._text_enc = self._load_session("text_encoder.onnx")
         self._ref_enc = self._load_session("reference_encoder.onnx", required=False)
 
-        vf_name = "backbone_keys.onnx" if os.path.exists(os.path.join(self.onnx_dir, "backbone_keys.onnx")) else "backbone.onnx"
+        vf_name = None
+        for cand in ("backbone_keys.onnx", "backbone.onnx", "vector_estimator.onnx"):
+            base = os.path.join(self.onnx_dir, cand)
+            slim = base.replace(".onnx", ".slim.onnx")
+            if os.path.exists(slim) or os.path.exists(base):
+                vf_name = cand
+                break
+        if vf_name is None:
+            raise FileNotFoundError(
+                f"Vector-field ONNX not found under {self.onnx_dir!r} "
+                "(expected backbone_keys.onnx, backbone.onnx, or vector_estimator.onnx)."
+            )
         self._vf_model_name = vf_name.replace(".onnx", "")
         self._vf = self._load_session(vf_name)
         self._vocoder = self._load_session("vocoder.onnx")
         self._dp = self._load_session("length_pred.onnx", required=False)
+        if self._dp is None:
+            self._dp = self._load_session("duration_predictor.onnx", required=False)
         self._dp_style = self._load_session("length_pred_style.onnx", required=False)
 
         vf_inputs = {i.name for i in self._vf.get_inputs()}

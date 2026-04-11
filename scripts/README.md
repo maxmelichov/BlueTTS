@@ -3,10 +3,10 @@
 These utilities live next to the **training** code: they import `models.*` from the `training/` tree. From the repository root, set `PYTHONPATH` so Python can resolve that package:
 
 ```bash
-export PYTHONPATH="/path/to/Light-BlueTTS/training${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="/path/to/blue/training${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-(Replace `/path/to/Light-BlueTTS` with your clone path.)
+(Replace `/path/to/blue` with your clone path.)
 
 All paths below are relative to your **current working directory** unless you pass absolute paths. Checkpoint defaults (`checkpoints/...`) match a typical layout where you run from `training/` with checkpoints under `training/checkpoints/`. If you run from the repo root, pass `--ckpt_dir`, `--ae_ckpt`, and `--dp_ckpt` explicitly.
 
@@ -19,7 +19,7 @@ The TTS config (`tts.json`) is required for correct tensor shapes and `normalize
 **Dependencies (repository root):**
 
 ```bash
-cd /path/to/Light-BlueTTS
+cd /path/to/blue
 uv sync --extra export
 ```
 
@@ -45,7 +45,7 @@ The script writes multiple `.onnx` files under `--onnx_dir` (text encoder, vecto
 
 ## Convert `stats.pt` to `stats.npz` (Docker and ONNX inference)
 
-`LightBlueTTS` ONNX inference (`src.blue_onnx`) loads normalization statistics from `onnx_models/stats.npz` via NumPy only. A Torch `.pt` stats file is fine for training or PyTorch workflows, but for **inference images and faster, simpler Docker builds** you should ship `stats.npz` next to the ONNX models: no PyTorch is needed to read it, and the runtime already expects that format.
+`BlueTTS` ONNX inference (`src.blue_onnx`) loads normalization statistics from `onnx_models/stats.npz` via NumPy only. A Torch `.pt` stats file is fine for training or PyTorch workflows, but for **inference images and faster, simpler Docker builds** you should ship `stats.npz` next to the ONNX models: no PyTorch is needed to read it, and the runtime already expects that format.
 
 **Dependencies:** same training layout as above; you need `torch` and NumPy (e.g. `uv sync --extra export` from the repo root, or your training environment).
 
@@ -60,7 +60,7 @@ PYTHONPATH=training uv run python scripts/convert_stats.py \
 
 The script reads `mean` and `std` from the checkpoint, reshapes them to `[1, C, 1]`, embeds `normalizer_scale` from the config into the `.npz`, clamps tiny standard deviations for safety, and runs a small round-trip self-check.
 
-Place the resulting `stats.npz` inside the directory you pass as `onnx_dir` to `LightBlueTTS` (or copy it into the `onnx_models` tree before `docker build`).
+Place the resulting `stats.npz` inside the directory you pass as `onnx_dir` to `BlueTTS` (or copy it into the `onnx_models` tree before `docker build`).
 
 ---
 
