@@ -40,4 +40,6 @@ Thumbs.db
 *.log
 *.onnx
 voices/
+pt_models/
+onnx_models/
 *.tar.gz
