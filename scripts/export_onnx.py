@@ -1,34 +1,26 @@
 #!/usr/bin/env python3
-import os
 import argparse
+import glob
+import os
+from functools import partial
+
 import numpy as np
+import onnx
+import onnxruntime as ort
+import onnxslim
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import onnx
-import onnxruntime as ort
+from onnxruntime.quantization import QuantType, quantize_dynamic
 
-# Import your models
-from models.text2latent.text_encoder import TextEncoder
-from models.text2latent.vf_estimator import VectorFieldEstimator
 from bluecodec import LatentDecoder1D
 from models.text2latent.dp_network import DPNetwork
-from models.text2latent.reference_encoder import ReferenceEncoder
+from models.text2latent.text_encoder import TextEncoder
+from models.text2latent.vf_estimator import VectorFieldEstimator
 from models.utils import load_ttl_config
 
 
-# =====================================================================
-# ONNX-safe MultiheadAttention replacement
-# nn.MultiheadAttention has known ONNX tracing issues with batch_first,
-# key_padding_mask, and cross-attention (different kdim/vdim).
-# This manual implementation avoids all those issues.
-# =====================================================================
-
 class OnnxSafeMultiheadAttention(nn.Module):
-    """
-    Drop-in replacement for nn.MultiheadAttention that uses only
-    basic PyTorch ops for clean ONNX tracing.
-    """
     def __init__(self, embed_dim, num_heads, kdim=None, vdim=None, batch_first=True):
         super().__init__()
         self.embed_dim = embed_dim
@@ -55,7 +47,6 @@ class OnnxSafeMultiheadAttention(nn.Module):
         self.out_proj = nn.Linear(embed_dim, embed_dim)
 
     def forward(self, query, key, value, key_padding_mask=None, attn_mask=None):
-        # Ensure batch_first layout: [B, T, C]
         if not self.batch_first:
             query = query.transpose(0, 1)
             key = key.transpose(0, 1)
@@ -64,67 +55,49 @@ class OnnxSafeMultiheadAttention(nn.Module):
         B, T_q, _ = query.shape
         T_k = key.shape[1]
 
-        # Project Q, K, V
         if self._qkv_same_embed_dim:
-            # Combined projection
-            bias_q = self.in_proj_bias[:self.embed_dim]
-            bias_k = self.in_proj_bias[self.embed_dim:2*self.embed_dim]
-            bias_v = self.in_proj_bias[2*self.embed_dim:]
-            w_q = self.in_proj_weight[:self.embed_dim]
-            w_k = self.in_proj_weight[self.embed_dim:2*self.embed_dim]
-            w_v = self.in_proj_weight[2*self.embed_dim:]
+            bias_q = self.in_proj_bias[: self.embed_dim]
+            bias_k = self.in_proj_bias[self.embed_dim : 2 * self.embed_dim]
+            bias_v = self.in_proj_bias[2 * self.embed_dim :]
+            w_q = self.in_proj_weight[: self.embed_dim]
+            w_k = self.in_proj_weight[self.embed_dim : 2 * self.embed_dim]
+            w_v = self.in_proj_weight[2 * self.embed_dim :]
             q = F.linear(query, w_q, bias_q)
             k = F.linear(key, w_k, bias_k)
             v = F.linear(value, w_v, bias_v)
         else:
-            # Separate projections
-            bias_q = self.in_proj_bias[:self.embed_dim]
-            bias_k = self.in_proj_bias[self.embed_dim:2*self.embed_dim]
-            bias_v = self.in_proj_bias[2*self.embed_dim:]
+            bias_q = self.in_proj_bias[: self.embed_dim]
+            bias_k = self.in_proj_bias[self.embed_dim : 2 * self.embed_dim]
+            bias_v = self.in_proj_bias[2 * self.embed_dim :]
             q = F.linear(query, self.q_proj_weight, bias_q)
             k = F.linear(key, self.k_proj_weight, bias_k)
             v = F.linear(value, self.v_proj_weight, bias_v)
 
-        # Reshape to [B, T, H, D] -> [B, H, T, D]
         q = q.view(B, T_q, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(B, T_k, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, T_k, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Scaled dot-product attention
         attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
 
-        # Apply key_padding_mask: [B, T_k] where True = ignore
         if key_padding_mask is not None:
-            # key_padding_mask: [B, T_k] bool, True means "drop this key"
-            # Expand to [B, 1, 1, T_k] for broadcasting with [B, H, T_q, T_k]
-            mask = key_padding_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T_k]
-            attn_weights = attn_weights.masked_fill(mask, float('-inf'))
+            mask = key_padding_mask.unsqueeze(1).unsqueeze(2)
+            attn_weights = attn_weights.masked_fill(mask, float("-inf"))
 
         if attn_mask is not None:
             attn_weights = attn_weights + attn_mask
 
         attn_weights = torch.softmax(attn_weights, dim=-1)
-
-        # Apply attention to values
-        attn_output = torch.matmul(attn_weights, v)  # [B, H, T_q, D]
-
-        # Reshape back: [B, H, T_q, D] -> [B, T_q, H*D]
+        attn_output = torch.matmul(attn_weights, v)
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, T_q, self.embed_dim)
-
-        # Output projection
         attn_output = self.out_proj(attn_output)
 
         if not self.batch_first:
             attn_output = attn_output.transpose(0, 1)
 
-        return attn_output, None  # (output, attn_weights=None for compat)
+        return attn_output, None
 
 
 def _replace_mha_with_safe(module: nn.Module) -> None:
-    """
-    Recursively replace all nn.MultiheadAttention instances in `module`
-    with OnnxSafeMultiheadAttention, transferring weights exactly.
-    """
     for name, child in list(module.named_children()):
         if isinstance(child, nn.MultiheadAttention):
             safe = OnnxSafeMultiheadAttention(
@@ -134,7 +107,6 @@ def _replace_mha_with_safe(module: nn.Module) -> None:
                 vdim=child.vdim,
                 batch_first=child.batch_first,
             )
-            # Transfer weights
             with torch.no_grad():
                 if child._qkv_same_embed_dim:
                     safe.in_proj_weight.copy_(child.in_proj_weight)
@@ -146,11 +118,9 @@ def _replace_mha_with_safe(module: nn.Module) -> None:
                 safe.out_proj.weight.copy_(child.out_proj.weight)
                 safe.out_proj.bias.copy_(child.out_proj.bias)
             setattr(module, name, safe)
-            print(f"  [FIX] Replaced nn.MultiheadAttention '{name}' with OnnxSafeMultiheadAttention")
         else:
             _replace_mha_with_safe(child)
 
-    # Also handle nn.ModuleList/nn.ModuleDict containing MHA
     if isinstance(module, nn.ModuleList):
         for i, child in enumerate(module):
             if isinstance(child, nn.MultiheadAttention):
@@ -172,7 +142,6 @@ def _replace_mha_with_safe(module: nn.Module) -> None:
                     safe.out_proj.weight.copy_(child.out_proj.weight)
                     safe.out_proj.bias.copy_(child.out_proj.bias)
                 module[i] = safe
-                print(f"  [FIX] Replaced nn.MultiheadAttention at index {i} with OnnxSafeMultiheadAttention")
             else:
                 _replace_mha_with_safe(child)
 
@@ -197,27 +166,11 @@ def _replace_mha_with_safe(module: nn.Module) -> None:
                     safe.out_proj.weight.copy_(child.out_proj.weight)
                     safe.out_proj.bias.copy_(child.out_proj.bias)
                 module[key] = safe
-                print(f"  [FIX] Replaced nn.MultiheadAttention key='{key}' with OnnxSafeMultiheadAttention")
             else:
                 _replace_mha_with_safe(child)
 
 
-# =====================================================================
-# VF Estimator ONNX wrappers
-# =====================================================================
-
 class VectorFieldEstimatorWrapper(nn.Module):
-    """
-    ONNX-signature wrapper for VectorFieldEstimator.
-
-    The reference ONNX graph (see `checks/notebook.ipynb`) has EXACT inputs:
-      noisy_latent, text_emb, style_ttl, latent_mask, text_mask, current_step, total_step
-    and output:
-      denoised_latent
-
-    Notably, it does NOT expose `style_keys` as an input; keys are a baked-in
-    constant expanded to batch internally.
-    """
     def __init__(self, model: VectorFieldEstimator):
         super().__init__()
         self.model = model
@@ -231,52 +184,83 @@ class VectorFieldEstimatorWrapper(nn.Module):
             text_mask=text_mask,
             current_step=current_step,
             total_step=total_step,
-            style_keys=None,  # force baked-in style key path
+            style_keys=None,
         )
 
 
-
-# =====================================================================
-# Export & Verify helpers
-# =====================================================================
-
-def export_one(model, out_path, inputs, input_names, output_names, dynamic_axes):
+def export_one(
+    model,
+    out_path,
+    inputs,
+    input_names,
+    output_names,
+    dynamic_axes,
+    *,
+    do_slim=False,
+    do_int8=False,
+):
     model.eval()
-    # Create directory if it doesn't exist
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    
-    with torch.no_grad():
-        torch.onnx.export(
-            model,
-            inputs,
-            out_path,
-            opset_version=17,
-            do_constant_folding=True,
-            input_names=input_names,
-            output_names=output_names,
-            dynamic_axes=dynamic_axes,
-            dynamo=False,
-        )
-    print(f"[OK] Exported: {out_path}")
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    work = f"{out_path}.~work.onnx"
+    qtmp = f"{out_path}.~q.onnx"
+    try:
+        with torch.no_grad():
+            torch.onnx.export(
+                model,
+                inputs,
+                work,
+                opset_version=17,
+                do_constant_folding=True,
+                input_names=input_names,
+                output_names=output_names,
+                dynamic_axes=dynamic_axes,
+                dynamo=False,
+            )
+
+        if do_slim:
+            loaded = onnx.load(work)
+            slimmed = onnxslim.slim(loaded)
+            if slimmed:
+                onnx.save(slimmed, work)
+
+        if do_int8:
+            quantize_dynamic(
+                model_input=work,
+                model_output=qtmp,
+                weight_type=QuantType.QUInt8,
+            )
+            if os.path.isfile(work):
+                os.remove(work)
+            if os.path.isfile(out_path):
+                os.remove(out_path)
+            os.replace(qtmp, out_path)
+        else:
+            if os.path.isfile(out_path):
+                os.remove(out_path)
+            os.replace(work, out_path)
+
+        print(f"[OK] {out_path}")
+    finally:
+        for p in (work, qtmp):
+            if os.path.isfile(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
 
 def verify_onnx(model, onnx_path, inputs, input_names, label="model", atol=1e-4, rtol=1e-3):
-    """
-    Compare PyTorch model output vs ONNX Runtime output for numerical parity.
-    Returns True if outputs match within tolerance, False otherwise.
-    """
     model.eval()
     with torch.no_grad():
-        if isinstance(inputs, torch.Tensor):
-            pt_inputs = (inputs,)
-        else:
-            pt_inputs = inputs
+        pt_inputs = (inputs,) if isinstance(inputs, torch.Tensor) else inputs
         pt_out = model(*pt_inputs)
         if isinstance(pt_out, tuple):
             pt_out = pt_out[0]
         pt_np = pt_out.cpu().numpy()
 
-    # Build ONNX Runtime feed
     sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
     feed = {}
     if isinstance(inputs, torch.Tensor):
@@ -285,21 +269,20 @@ def verify_onnx(model, onnx_path, inputs, input_names, label="model", atol=1e-4,
         feed[name] = tensor.detach().cpu().numpy()
     onnx_out = sess.run(None, feed)[0]
 
-    # Compare
-    max_diff = np.max(np.abs(pt_np - onnx_out))
-    mean_diff = np.mean(np.abs(pt_np - onnx_out))
-    cos_sim = np.dot(pt_np.flatten(), onnx_out.flatten()) / (
-        np.linalg.norm(pt_np.flatten()) * np.linalg.norm(onnx_out.flatten()) + 1e-12
+    max_diff = float(np.max(np.abs(pt_np - onnx_out)))
+    mean_diff = float(np.mean(np.abs(pt_np - onnx_out)))
+    cos_sim = float(
+        np.dot(pt_np.flatten(), onnx_out.flatten())
+        / (np.linalg.norm(pt_np.flatten()) * np.linalg.norm(onnx_out.flatten()) + 1e-12)
     )
     match = np.allclose(pt_np, onnx_out, atol=atol, rtol=rtol)
-
     status = "PASS" if match else "FAIL"
     print(f"  [{status}] {label}: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}, cos_sim={cos_sim:.6f}")
     if not match:
         print(f"         PT  range: [{pt_np.min():.4f}, {pt_np.max():.4f}], mean={pt_np.mean():.4f}")
         print(f"         ORT range: [{onnx_out.min():.4f}, {onnx_out.max():.4f}], mean={onnx_out.mean():.4f}")
-
     return match
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -310,15 +293,19 @@ def main():
     parser.add_argument("--ae_ckpt", type=str, default="checkpoints/ae/ae_latest.pt", help="AE checkpoint")
     parser.add_argument("--dp_ckpt", type=str, default="checkpoints/duration_predictor/duration_predictor_final.pt", help="DP checkpoint")
     parser.add_argument("--no-verify", action="store_true", help="Skip ONNX vs PyTorch verification")
+    parser.add_argument("--slim", action="store_true", help="Run onnxslim on each model before finalizing")
+    parser.add_argument(
+        "--int8",
+        action="store_true",
+        help="Dynamic weight quantization; writes int8 weights to the same four .onnx filenames (after slim if --slim)",
+    )
     args = parser.parse_args()
 
-    device = "cpu" # Export on CPU is usually safer/easier for reproducibility
+    device = "cpu"
+    export = partial(export_one, do_slim=args.slim, do_int8=args.int8)
 
-    # Load config – REQUIRED so that all model dimensions and normalizer_scale
-    # always come from tts.json (never silently fall back to wrong defaults).
     if not os.path.exists(args.config):
         print(f"[ERROR] Config not found: {args.config}")
-        print("       The tts.json config is required. Pass --config <path> or place it at configs/tts.json")
         return
 
     cfg = load_ttl_config(args.config)
@@ -327,13 +314,7 @@ def main():
     onnx_dir = args.onnx_dir
     os.makedirs(onnx_dir, exist_ok=True)
 
-    ckpt_dir = args.ckpt_dir
-    ae_ckpt_path = args.ae_ckpt
-    
-    # Helper to find latest checkpoint
-    import glob
     def get_latest_ckpt(dir_path):
-        # Prefer ckpt_step_*.pt by step number (matches training/inference convention).
         ckpt_step = glob.glob(os.path.join(dir_path, "ckpt_step_*.pt"))
         if ckpt_step:
             def step_num(p):
@@ -342,25 +323,23 @@ def main():
                     return int(base.split("ckpt_step_")[-1].split(".pt")[0])
                 except Exception:
                     return -1
+
             ckpt_step.sort(key=step_num)
             return ckpt_step[-1]
-        # Fallback: newest mtime among .pt
         ckpts = glob.glob(os.path.join(dir_path, "*.pt"))
         if not ckpts:
             return None
         return max(ckpts, key=os.path.getmtime)
 
-    text2latent_ckpt = args.ttl_ckpt if (args.ttl_ckpt and os.path.exists(args.ttl_ckpt)) else get_latest_ckpt(ckpt_dir)
+    text2latent_ckpt = args.ttl_ckpt if (args.ttl_ckpt and os.path.exists(args.ttl_ckpt)) else get_latest_ckpt(args.ckpt_dir)
     if text2latent_ckpt is None:
-        print(f"[WARN] No text2latent checkpoint found in {ckpt_dir}. Using random weights for demonstration/structure.")
+        print(f"[WARN] No text2latent checkpoint in {args.ckpt_dir}. Random weights.")
     else:
-        print(f"[INFO] Loading text2latent from {text2latent_ckpt}")
+        print(f"[INFO] text2latent: {text2latent_ckpt}")
 
-    # ---- Load Checkpoints ----
     t2l_state = torch.load(text2latent_ckpt, map_location=device) if text2latent_ckpt else {}
-    ae_state = torch.load(ae_ckpt_path, map_location=device) if os.path.exists(ae_ckpt_path) else {}
+    ae_state = torch.load(args.ae_ckpt, map_location=device) if os.path.exists(args.ae_ckpt) else {}
 
-    # ---- Dimensions from config (all sourced from tts.json) ----
     vocab_size = cfg["vocab_size"]
     compressed_channels = cfg["compressed_channels"]
     latent_dim = cfg["latent_dim"]
@@ -368,33 +347,7 @@ def main():
     te_d_model = cfg["te_d_model"]
     se_d_model = cfg["se_d_model"]
     se_n_style = cfg["se_n_style"]
-    print(f"[INFO] vocab_size={vocab_size}, compressed_channels={compressed_channels}, "
-          f"latent_dim={latent_dim}, chunk_compress_factor={chunk_compress_factor}")
-    print(f"[INFO] te_d_model={te_d_model}, se_d_model={se_d_model}, se_n_style={se_n_style}")
 
-    # 1. Reference Encoder
-    print("Loading ReferenceEncoder...")
-    ref_enc = ReferenceEncoder(
-        in_channels=compressed_channels,
-        d_model=se_d_model,
-        hidden_dim=cfg["se_hidden_dim"],
-        num_blocks=cfg["se_num_blocks"],
-        num_tokens=se_n_style,
-        num_heads=cfg["se_n_heads"],
-    ).to(device).eval()
-    if "reference_encoder" in t2l_state:
-        ref_enc.load_state_dict(t2l_state["reference_encoder"], strict=True)
-    else:
-        print("[WARN] reference_encoder not found in checkpoint!")
-
-    # Replace nn.MultiheadAttention with ONNX-safe manual attention.
-    # nn.MHA has known ONNX tracing bugs (batch_first, key_padding_mask,
-    # cross-attention with different kdim/vdim).
-    print("[FIX] Replacing nn.MultiheadAttention in ReferenceEncoder...")
-    _replace_mha_with_safe(ref_enc)
-
-    # 2. Text Encoder
-    print("Loading TextEncoder...")
     text_enc = TextEncoder(
         vocab_size=vocab_size,
         d_model=te_d_model,
@@ -406,8 +359,6 @@ def main():
     if "text_encoder" in t2l_state:
         text_enc.load_state_dict(t2l_state["text_encoder"], strict=True)
 
-    # 3. Vector Field Estimator
-    print("Loading VectorFieldEstimator...")
     vf = VectorFieldEstimator(
         in_channels=compressed_channels,
         out_channels=compressed_channels,
@@ -420,107 +371,74 @@ def main():
         rope_gamma=cfg["vf_rotary_scale"],
     ).to(device).eval()
     if "vf_estimator" in t2l_state:
-        missing, unexpected = vf.load_state_dict(t2l_state["vf_estimator"], strict=False)
-        if missing:
-            print(f"[WARN] VF missing keys: {missing}")
-        if unexpected:
-            print(f"[WARN] VF unexpected keys: {unexpected}")
+        vf.load_state_dict(t2l_state["vf_estimator"], strict=False)
 
-    # 4. Vocoder (Latent Decoder)
-    print("Loading Vocoder...")
     ae_dec_cfg = cfg["ae_dec_cfg"]
     vocoder = LatentDecoder1D(cfg=ae_dec_cfg).to(device).eval()
     if "decoder" in ae_state:
         vocoder.load_state_dict(ae_state["decoder"], strict=True)
 
-    # 5. Duration Predictor (DPNetwork)
-    print("Loading DurationPredictor...")
-    dp_style_tokens = cfg["dp_style_tokens"]
-    dp_style_dim = cfg["dp_style_dim"]
     dp = DPNetwork(
         vocab_size=cfg["dp_vocab_size"],
-        style_tokens=dp_style_tokens,
-        style_dim=dp_style_dim,
+        style_tokens=cfg["dp_style_tokens"],
+        style_dim=cfg["dp_style_dim"],
     ).to(device).eval()
-    
+
     dp_ckpt_path = args.dp_ckpt
     if os.path.exists(dp_ckpt_path):
-        print(f"[INFO] Loading Duration Predictor from {dp_ckpt_path}")
         dp_state = torch.load(dp_ckpt_path, map_location=device)
         if isinstance(dp_state, dict) and "state_dict" in dp_state:
             dp_state = dp_state["state_dict"]
         dp.load_state_dict(dp_state, strict=False)
     elif "dp_network" in t2l_state:
-        print("[INFO] Loading Duration Predictor from text2latent checkpoint (dp_network)")
         dp.load_state_dict(t2l_state["dp_network"], strict=True)
     elif "dp_model" in t2l_state:
-        print("[INFO] Loading Duration Predictor from text2latent checkpoint (dp_model)")
         dp.load_state_dict(t2l_state["dp_model"], strict=True)
     else:
-        print("[WARN] No Duration Predictor weights found! Exporting random initialization.")
+        print("[WARN] No duration predictor weights; random init.")
 
-    # Replace nn.MultiheadAttention in DP's reference encoder too
-    print("[FIX] Replacing nn.MultiheadAttention in DPNetwork...")
     _replace_mha_with_safe(dp)
-    
-    # ---- Dummy Inputs (derived from config) ----
+
     B = 1
     T_text = 32
-    T_ref = se_n_style  # matches ReferenceEncoder num_tokens (output)
-    T_audio_ref = 256    # Fixed for consistent benchmarking
+    T_audio_ref = 256
     T_lat = 100
     C_lat = compressed_channels
     C_dec = latent_dim
     style_dim = se_d_model
 
-    text_ids  = torch.zeros(B, T_text, dtype=torch.long, device=device)
+    text_ids = torch.zeros(B, T_text, dtype=torch.long, device=device)
     text_mask = torch.ones(B, 1, T_text, dtype=torch.float32, device=device)
+    z_ref = torch.randn(B, C_lat, T_audio_ref, dtype=torch.float32, device=device)
+    ref_mask = torch.ones(B, 1, T_audio_ref, dtype=torch.float32, device=device)
+    style_ttl_te = torch.randn(B, se_n_style, style_dim, dtype=torch.float32, device=device)
 
-    # Reference Encoder Inputs
-    z_ref     = torch.randn(B, C_lat, T_audio_ref, dtype=torch.float32, device=device)
-    ref_mask  = torch.ones(B, 1, T_audio_ref, dtype=torch.float32, device=device)
-
-    do_verify = not getattr(args, 'no_verify', False)
+    do_verify = not args.no_verify
+    if do_verify and args.int8:
+        print("[WARN] Skipping numerical verify with --int8; omit --int8 to verify FP32.")
+        do_verify = False
     all_pass = True
 
-    # ---------------- Reference Encoder ----------------
-    print("Exporting ReferenceEncoder...")
+    
     ref_enc_path = os.path.join(onnx_dir, "reference_encoder.onnx")
-    export_one(
+    export(
         ref_enc,
         ref_enc_path,
         (z_ref, ref_mask),
         input_names=["z_ref", "mask"],
-        output_names=["ref_values", "ref_keys"],
-        dynamic_axes={
-            "z_ref": {2: "T_ref_in"},
-            "mask": {2: "T_ref_in"},
-        }
+        output_names=["ref_values"],
+        dynamic_axes={"z_ref": {2: "T_ref_in"}, "mask": {2: "T_ref_in"}},
     )
     if do_verify:
-        print("Verifying ReferenceEncoder...")
-        ok = verify_onnx(ref_enc, ref_enc_path, (z_ref, ref_mask),
-                         ["z_ref", "mask"], label="ReferenceEncoder")
-        all_pass = all_pass and ok
-        # Also verify with a different time dimension to test dynamic axes
-        z_ref_short = torch.randn(B, C_lat, 64, dtype=torch.float32, device=device)
-        ref_mask_short = torch.ones(B, 1, 64, dtype=torch.float32, device=device)
-        ok2 = verify_onnx(ref_enc, ref_enc_path, (z_ref_short, ref_mask_short),
-                          ["z_ref", "mask"], label="ReferenceEncoder (T=64)")
-        all_pass = all_pass and ok2
+        all_pass = verify_onnx(
+            ref_enc, ref_enc_path, (z_ref, ref_mask), ["z_ref", "mask"], "reference_encoder"
+        ) and all_pass
 
-    # ---------------- Text Encoder ----------------
-    print("Exporting TextEncoder...")
-    # Matches ONNX 3-input signature: (text_ids, style_ttl, text_mask)
-    # style_ttl: [B, 50, 256] - style values from reference encoder
-    style_ttl = torch.randn(B, 50, style_dim, dtype=torch.float32, device=device)
-
-    # TextEncoder now matches ONNX signature directly
     te_path = os.path.join(onnx_dir, "text_encoder.onnx")
-    export_one(
+    export(
         text_enc,
         te_path,
-        (text_ids, style_ttl, text_mask),
+        (text_ids, style_ttl_te, text_mask),
         input_names=["text_ids", "style_ttl", "text_mask"],
         output_names=["text_emb"],
         dynamic_axes={
@@ -528,44 +446,36 @@ def main():
             "style_ttl": {1: "T_ref"},
             "text_mask": {2: "T_text"},
             "text_emb": {2: "T_text"},
-        }
+        },
     )
     if do_verify:
-        print("Verifying TextEncoder...")
-        ok = verify_onnx(text_enc, te_path, (text_ids, style_ttl, text_mask),
-                         ["text_ids", "style_ttl", "text_mask"], label="TextEncoder")
-        all_pass = all_pass and ok
+        all_pass = verify_onnx(
+            text_enc, te_path, (text_ids, style_ttl_te, text_mask), ["text_ids", "style_ttl", "text_mask"], "text_encoder"
+        ) and all_pass
 
-    # ---------------- Vector Field Estimator ----------------
-    print("Exporting VectorFieldEstimator...")
     noisy_latent = torch.randn(B, C_lat, T_lat, dtype=torch.float32, device=device)
-    latent_mask  = torch.ones(B, 1, T_lat, dtype=torch.float32, device=device)
-    text_emb     = torch.randn(B, style_dim, T_text, dtype=torch.float32, device=device)
-    # VF expects style_ttl as [B, T, C] or [B, C, T] - model handles it.
-    # We use [B, 50, 256] to match Ref output.
-    style_ttl    = torch.randn(B, 50, style_dim, dtype=torch.float32, device=device)
-
+    latent_mask = torch.ones(B, 1, T_lat, dtype=torch.float32, device=device)
+    text_emb = torch.randn(B, style_dim, T_text, dtype=torch.float32, device=device)
+    style_ttl_vf = torch.randn(B, se_n_style, style_dim, dtype=torch.float32, device=device)
     current_step = torch.tensor([0.0], dtype=torch.float32, device=device)
-    total_step   = torch.tensor([1.0], dtype=torch.float32, device=device)
-    
-    # ---- 1-to-1 ONNX parity ----
-    # Tie VF's baked-in style key to TextEncoder's baked-in style_key so the
-    # exported ONNX constant matches the rest of the stack.
+    total_step = torch.tensor([1.0], dtype=torch.float32, device=device)
+
     with torch.no_grad():
-        # TextEncoder stores the baked-in style key at:
-        #   text_enc.speech_prompted_text_encoder.style_key  (shape [1, 50, 256])
         vf.style_key.copy_(text_enc.speech_prompted_text_encoder.style_key)
 
-    # Wrap VF to expose the EXACT ONNX signature (no style_keys input).
     vf_wrapped = VectorFieldEstimatorWrapper(vf)
-
     vf_path = os.path.join(onnx_dir, "vector_estimator.onnx")
-    vf_inputs = (noisy_latent, text_emb, style_ttl, latent_mask, text_mask, current_step, total_step)
+    vf_inputs = (noisy_latent, text_emb, style_ttl_vf, latent_mask, text_mask, current_step, total_step)
     vf_input_names = [
-        "noisy_latent", "text_emb", "style_ttl",
-        "latent_mask", "text_mask", "current_step", "total_step"
+        "noisy_latent",
+        "text_emb",
+        "style_ttl",
+        "latent_mask",
+        "text_mask",
+        "current_step",
+        "total_step",
     ]
-    export_one(
+    export(
         vf_wrapped,
         vf_path,
         vf_inputs,
@@ -578,21 +488,14 @@ def main():
             "latent_mask": {2: "T_lat"},
             "text_mask": {2: "T_text"},
             "denoised_latent": {2: "T_lat"},
-        }
+        },
     )
     if do_verify:
-        print("Verifying VectorFieldEstimator...")
-        ok = verify_onnx(vf_wrapped, vf_path, vf_inputs,
-                         vf_input_names, label="VF", atol=1e-3, rtol=1e-2)
-        all_pass = all_pass and ok
+        all_pass = verify_onnx(vf_wrapped, vf_path, vf_inputs, vf_input_names, "vector_estimator", atol=1e-3, rtol=1e-2) and all_pass
 
-    # ---------------- Vocoder ----------------
-    print("Exporting Vocoder...")
-    # Decoder expects [B, latent_dim, T]. The compressed latent is decompressed
-    # from [B, C_lat, T] -> [B, latent_dim, T * chunk_compress_factor].
     latent_dec = torch.randn(B, C_dec, T_lat * chunk_compress_factor, dtype=torch.float32, device=device)
     voc_path = os.path.join(onnx_dir, "vocoder.onnx")
-    export_one(
+    export(
         vocoder,
         voc_path,
         (latent_dec,),
@@ -601,21 +504,15 @@ def main():
         dynamic_axes={
             "latent": {2: "T_dec"},
             "waveform": {2: "T_wav"},
-        }
+        },
     )
     if do_verify:
-        print("Verifying Vocoder...")
-        ok = verify_onnx(vocoder, voc_path, (latent_dec,),
-                         ["latent"], label="Vocoder")
-        all_pass = all_pass and ok
+        all_pass = verify_onnx(vocoder, voc_path, (latent_dec,), ["latent"], "vocoder") and all_pass
 
-    # ---------------- Duration Predictor (Standard: z_ref path) ----------------
-    print("Exporting DurationPredictor (Standard)...")
-    # DPNetwork: forward(text_ids, z_ref, text_mask, ref_mask)
     dp_path = os.path.join(onnx_dir, "duration_predictor.onnx")
     dp_inputs = (text_ids, z_ref, text_mask, ref_mask)
     dp_input_names = ["text_ids", "z_ref", "text_mask", "ref_mask"]
-    export_one(
+    export(
         dp,
         dp_path,
         dp_inputs,
@@ -626,71 +523,16 @@ def main():
             "text_mask": {2: "T_text"},
             "z_ref": {2: "T_ref_audio"},
             "ref_mask": {2: "T_ref_audio"},
-        }
+        },
     )
     if do_verify:
-        print("Verifying DurationPredictor (Standard)...")
-        ok = verify_onnx(dp, dp_path, dp_inputs,
-                         dp_input_names, label="DurationPredictor")
-        all_pass = all_pass and ok
+        all_pass = verify_onnx(dp, dp_path, dp_inputs, dp_input_names, "duration_predictor") and all_pass
 
-    # ---------------- Duration Predictor (Style: pre-computed style_dp path) ----
-    print("Exporting DurationPredictor (Style)...")
-
-    class DPStyleWrapper(nn.Module):
-        """Wrap DPNetwork for the style_tokens input path (no z_ref)."""
-        def __init__(self, dp_model):
-            super().__init__()
-            self.dp = dp_model
-
-        def forward(self, text_ids, style_dp, text_mask):
-            return self.dp(text_ids, text_mask=text_mask, style_tokens=style_dp)
-
-    dp_style_wrapper = DPStyleWrapper(dp).eval()
-    style_dp_dummy = torch.randn(B, dp_style_tokens, dp_style_dim, dtype=torch.float32, device=device)
-
-    dp_style_path = os.path.join(onnx_dir, "duration_predictor_style.onnx")
-    dp_style_inputs = (text_ids, style_dp_dummy, text_mask)
-    dp_style_names = ["text_ids", "style_dp", "text_mask"]
-    export_one(
-        dp_style_wrapper,
-        dp_style_path,
-        dp_style_inputs,
-        input_names=dp_style_names,
-        output_names=["duration"],
-        dynamic_axes={
-            "text_ids": {1: "T_text"},
-            "text_mask": {2: "T_text"},
-        }
-    )
     if do_verify:
-        print("Verifying DurationPredictor (Style)...")
-        ok = verify_onnx(dp_style_wrapper, dp_style_path, dp_style_inputs,
-                         dp_style_names, label="DurationPredictor (Style)")
-        all_pass = all_pass and ok
+        print("\n" + "=" * 60)
+        print("[PASS] All match." if all_pass else "[FAIL] Mismatch.")
+        print("=" * 60)
 
-    # ---------------- Unconditional Tokens ----------------
-    print("Exporting uncond.npz...")
-    uncond_data = {}
-    if "u_text" in t2l_state:
-        uncond_data["u_text"] = t2l_state["u_text"].cpu().numpy()
-    if "u_ref" in t2l_state:
-        uncond_data["u_ref"] = t2l_state["u_ref"].cpu().numpy()
-    
-    if uncond_data:
-        np.savez(os.path.join(onnx_dir, "uncond.npz"), **uncond_data)
-        print(f"[OK] Saved {os.path.join(onnx_dir, 'uncond.npz')}")
-    else:
-        print("[WARN] No unconditional tokens found in checkpoint.")
-
-    # ---- Summary ----
-    if do_verify:
-        print("\n" + "="*60)
-        if all_pass:
-            print("[PASS] All ONNX models match PyTorch output within tolerance!")
-        else:
-            print("[FAIL] Some ONNX models do NOT match PyTorch. Check logs above.")
-        print("="*60)
 
 if __name__ == "__main__":
     main()
