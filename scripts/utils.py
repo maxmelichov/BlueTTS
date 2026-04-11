@@ -1,4 +1,4 @@
-"""Shared utilities for Light-BlueTTS inference and tooling."""
+"""Shared utilities for Blue (BlueTTS) inference and tooling."""
 
 import json
 import os

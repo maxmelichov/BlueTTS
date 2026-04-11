@@ -1,5 +1,5 @@
 [project]
-name = "lightblue-onnx"
+name = "blue"
 version = "0.1.0"
 description = "Hebrew Text-to-Speech inference using ONNX and TensorRT"
 license = "MIT"
@@ -11,6 +11,7 @@ dependencies = [
     "soundfile",
     "phonemizer",
     "huggingface-hub>=0.26.0",
+    "renikud-onnx",
 ]
 
 [project.optional-dependencies]
@@ -35,7 +36,7 @@ export = [
 ]
 
 [tool.uv]
-# Repo is scripts + src packages, not a single importable `lightblue_onnx` tree (avoids uv_build errors).
+# Repo is scripts + src packages, not a single importable `blue` package tree (avoids uv_build errors).
 package = false
 
 [tool.uv.sources]

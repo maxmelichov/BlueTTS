@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = "==3.13.*"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -7,8 +7,8 @@ resolution-markers = [
     "sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 conflicts = [[
-    { package = "lightblue-training", extra = "cu128" },
-    { package = "lightblue-training", extra = "cu132" },
+    { package = "blue-training", extra = "cu128" },
+    { package = "blue-training", extra = "cu132" },
 ]]
 
 [options]
@@ -45,6 +45,49 @@ wheels = [
 ]
 
 [[package]]
+name = "blue-training"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "bluecodec" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "soundfile" },
+    { name = "tensorboard" },
+    { name = "tqdm" },
+]
+
+[package.optional-dependencies]
+cu128 = [
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
+    { name = "torchaudio", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
+    { name = "triton", version = "3.6.0", source = { registry = "https://download.pytorch.org/whl/cu128" } },
+]
+cu132 = [
+    { name = "torch", version = "2.12.0.dev20260410+cu132", source = { registry = "https://download.pytorch.org/whl/nightly/cu132" } },
+    { name = "torchaudio", version = "2.11.0.dev20260410+cu132", source = { registry = "https://download.pytorch.org/whl/nightly/cu132" } },
+    { name = "triton", version = "3.7.0+git282c8251", source = { registry = "https://download.pytorch.org/whl/nightly/cu132" }, marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-13-blue-training-cu132') or (sys_platform == 'emscripten' and extra == 'extra-13-blue-training-cu128' and extra == 'extra-13-blue-training-cu132') or (sys_platform == 'win32' and extra == 'extra-13-blue-training-cu128' and extra == 'extra-13-blue-training-cu132')" },
+    { name = "triton", version = "3.7.0+git9c288bc5", source = { registry = "https://download.pytorch.org/whl/nightly/cu132" }, marker = "(sys_platform == 'emscripten' and extra == 'extra-13-blue-training-cu132') or (sys_platform == 'win32' and extra == 'extra-13-blue-training-cu132') or (extra == 'extra-13-blue-training-cu128' and extra == 'extra-13-blue-training-cu132')" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "bluecodec", git = "https://github.com/maxmelichov/blue-codec.git" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "soundfile" },
+    { name = "tensorboard" },
+    { name = "torch", marker = "extra == 'cu128'", specifier = ">=2.1.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "blue-training", extra = "cu128" } },
+    { name = "torch", marker = "extra == 'cu132'", specifier = ">=2.1.0", index = "https://download.pytorch.org/whl/nightly/cu132", conflict = { package = "blue-training", extra = "cu132" } },
+    { name = "torchaudio", marker = "extra == 'cu128'", specifier = ">=2.1.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "blue-training", extra = "cu128" } },
+    { name = "torchaudio", marker = "extra == 'cu132'", specifier = ">=2.1.0", index = "https://download.pytorch.org/whl/nightly/cu132", conflict = { package = "blue-training", extra = "cu132" } },
+    { name = "tqdm" },
+    { name = "triton", marker = "extra == 'cu128'", specifier = ">=3.0.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "blue-training", extra = "cu128" } },
+    { name = "triton", marker = "extra == 'cu132'", specifier = ">=3.0.0", index = "https://download.pytorch.org/whl/nightly/cu132", conflict = { package = "blue-training", extra = "cu132" } },
+]
+provides-extras = ["cu128", "cu132"]
+
+[[package]]
 name = "bluecodec"
 version = "0.1.0"
 source = { git = "https://github.com/maxmelichov/blue-codec.git#da8d7609a690dfe1c554fa90b20df8c5b6d5f6bd" }
@@ -72,7 +115,7 @@ name = "cffi"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'extra-18-lightblue-training-cu128' and extra == 'extra-18-lightblue-training-cu132')" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'extra-13-blue-training-cu128' and extra == 'extra-13-blue-training-cu132')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz", hash = "sha256:44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529", size = 523588, upload-time = "2025-09-08T23:24:04.541Z" }
 wheels = [
@@ -95,7 +138,7 @@ name = "click"
 version = "8.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-18-lightblue-training-cu128' and extra == 'extra-18-lightblue-training-cu132')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-13-blue-training-cu128' and extra == 'extra-13-blue-training-cu132')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/57/75/31212c6bf2503fdf920d87fee5d7a86a2e3bcf444984126f13d8e4016804/click-8.3.2.tar.gz", hash = "sha256:14162b8b3b3550a7d479eafa77dfd3c38d9dc8951f6f69c78913a8f9a7540fd5", size = 302856, upload-time = "2026-04-03T19:14:45.118Z" }
 wheels = [
@@ -353,7 +396,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "filelock" },
     { name = "fsspec" },
-    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' or (extra == 'extra-18-lightblue-training-cu128' and extra == 'extra-18-lightblue-training-cu132')" },
+    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' or (extra == 'extra-13-blue-training-cu128' and extra == 'extra-13-blue-training-cu132')" },
     { name = "httpx" },
     { name = "packaging" },
     { name = "pyyaml" },
@@ -386,49 +429,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/df/bf/f7da0350254c0ed7c
 wheels = [
     { url = "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl", hash = "sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67", size = 134899, upload-time = "2025-03-05T20:05:00.369Z" },
 ]
-
-[[package]]
-name = "lightblue-training"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "bluecodec" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "soundfile" },
-    { name = "tensorboard" },
-    { name = "tqdm" },
-]
-
-[package.optional-dependencies]
-cu128 = [
-    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
-    { name = "torchaudio", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
-    { name = "triton", version = "3.6.0", source = { registry = "https://download.pytorch.org/whl/cu128" } },
-]
-cu132 = [
-    { name = "torch", version = "2.12.0.dev20260410+cu132", source = { registry = "https://download.pytorch.org/whl/nightly/cu132" } },
-    { name = "torchaudio", version = "2.11.0.dev20260410+cu132", source = { registry = "https://download.pytorch.org/whl/nightly/cu132" } },
-    { name = "triton", version = "3.7.0+git282c8251", source = { registry = "https://download.pytorch.org/whl/nightly/cu132" }, marker = "(sys_platform != 'emscripten' and sys_platform != 'win32' and extra == 'extra-18-lightblue-training-cu132') or (sys_platform == 'emscripten' and extra == 'extra-18-lightblue-training-cu128' and extra == 'extra-18-lightblue-training-cu132') or (sys_platform == 'win32' and extra == 'extra-18-lightblue-training-cu128' and extra == 'extra-18-lightblue-training-cu132')" },
-    { name = "triton", version = "3.7.0+git9c288bc5", source = { registry = "https://download.pytorch.org/whl/nightly/cu132" }, marker = "(sys_platform == 'emscripten' and extra == 'extra-18-lightblue-training-cu132') or (sys_platform == 'win32' and extra == 'extra-18-lightblue-training-cu132') or (extra == 'extra-18-lightblue-training-cu128' and extra == 'extra-18-lightblue-training-cu132')" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "bluecodec", git = "https://github.com/maxmelichov/blue-codec.git" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "soundfile" },
-    { name = "tensorboard" },
-    { name = "torch", marker = "extra == 'cu128'", specifier = ">=2.1.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "lightblue-training", extra = "cu128" } },
-    { name = "torch", marker = "extra == 'cu132'", specifier = ">=2.1.0", index = "https://download.pytorch.org/whl/nightly/cu132", conflict = { package = "lightblue-training", extra = "cu132" } },
-    { name = "torchaudio", marker = "extra == 'cu128'", specifier = ">=2.1.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "lightblue-training", extra = "cu128" } },
-    { name = "torchaudio", marker = "extra == 'cu132'", specifier = ">=2.1.0", index = "https://download.pytorch.org/whl/nightly/cu132", conflict = { package = "lightblue-training", extra = "cu132" } },
-    { name = "tqdm" },
-    { name = "triton", marker = "extra == 'cu128'", specifier = ">=3.0.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "lightblue-training", extra = "cu128" } },
-    { name = "triton", marker = "extra == 'cu132'", specifier = ">=3.0.0", index = "https://download.pytorch.org/whl/nightly/cu132", conflict = { package = "lightblue-training", extra = "cu132" } },
-]
-provides-extras = ["cu128", "cu132"]
 
 [[package]]
 name = "markdown"
@@ -875,7 +875,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "python-dateutil" },
-    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32' or (extra == 'extra-18-lightblue-training-cu128' and extra == 'extra-18-lightblue-training-cu132')" },
+    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32' or (extra == 'extra-13-blue-training-cu128' and extra == 'extra-13-blue-training-cu132')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/da/99/b342345300f13440fe9fe385c3c481e2d9a595ee3bab4d3219247ac94e9a/pandas-3.0.2.tar.gz", hash = "sha256:f4753e73e34c8d83221ba58f232433fca2748be8b18dbca02d242ed153945043", size = 4645855, upload-time = "2026-03-31T06:48:30.816Z" }
 wheels = [
@@ -1116,8 +1116,8 @@ dependencies = [
     { name = "packaging" },
     { name = "pillow" },
     { name = "protobuf" },
-    { name = "setuptools", version = "81.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-18-lightblue-training-cu128' or extra == 'extra-18-lightblue-training-cu132'" },
-    { name = "setuptools", version = "82.0.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-18-lightblue-training-cu128' and extra == 'extra-18-lightblue-training-cu132') or (extra != 'extra-18-lightblue-training-cu128' and extra != 'extra-18-lightblue-training-cu132')" },
+    { name = "setuptools", version = "81.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-13-blue-training-cu128' or extra == 'extra-13-blue-training-cu132'" },
+    { name = "setuptools", version = "82.0.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-13-blue-training-cu128' and extra == 'extra-13-blue-training-cu132') or (extra != 'extra-13-blue-training-cu128' and extra != 'extra-13-blue-training-cu132')" },
     { name = "tensorboard-data-server" },
     { name = "werkzeug" },
 ]
@@ -1146,7 +1146,7 @@ resolution-markers = [
 ]
 dependencies = [
     { name = "cuda-bindings", version = "12.9.6", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
-    { name = "cuda-toolkit", version = "12.8.1", source = { registry = "https://pypi.org/simple" }, extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform == 'linux' and extra == 'extra-18-lightblue-training-cu128') or (extra == 'extra-18-lightblue-training-cu128' and extra == 'extra-18-lightblue-training-cu132')" },
+    { name = "cuda-toolkit", version = "12.8.1", source = { registry = "https://pypi.org/simple" }, extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform == 'linux' and extra == 'extra-13-blue-training-cu128') or (extra == 'extra-13-blue-training-cu128' and extra == 'extra-13-blue-training-cu132')" },
     { name = "filelock" },
     { name = "fsspec" },
     { name = "jinja2" },
@@ -1180,7 +1180,7 @@ resolution-markers = [
 ]
 dependencies = [
     { name = "cuda-bindings", version = "13.2.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
-    { name = "cuda-toolkit", version = "13.2.0", source = { registry = "https://pypi.org/simple" }, extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform == 'linux' and extra == 'extra-18-lightblue-training-cu132') or (extra == 'extra-18-lightblue-training-cu128' and extra == 'extra-18-lightblue-training-cu132')" },
+    { name = "cuda-toolkit", version = "13.2.0", source = { registry = "https://pypi.org/simple" }, extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(sys_platform == 'linux' and extra == 'extra-13-blue-training-cu132') or (extra == 'extra-13-blue-training-cu128' and extra == 'extra-13-blue-training-cu132')" },
     { name = "filelock" },
     { name = "fsspec" },
     { name = "jinja2" },
@@ -1255,7 +1255,7 @@ name = "tqdm"
 version = "4.67.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-18-lightblue-training-cu128' and extra == 'extra-18-lightblue-training-cu132')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-13-blue-training-cu128' and extra == 'extra-13-blue-training-cu132')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/09/a9/6ba95a270c6f1fbcd8dac228323f2777d886cb206987444e4bce66338dd4/tqdm-4.67.3.tar.gz", hash = "sha256:7d825f03f89244ef73f1d4ce193cb1774a8179fd96f31d7e1dcde62092b960bb", size = 169598, upload-time = "2026-02-03T17:35:53.048Z" }
 wheels = [

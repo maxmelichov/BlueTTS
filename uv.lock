@@ -125,6 +125,58 @@ wheels = [
 ]
 
 [[package]]
+name = "blue"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
+    { name = "phonemizer" },
+    { name = "renikud-onnx" },
+    { name = "soundfile" },
+]
+
+[package.optional-dependencies]
+export = [
+    { name = "bluecodec" },
+    { name = "librosa" },
+    { name = "onnx" },
+    { name = "onnxslim" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "torchaudio" },
+]
+gpu = [
+    { name = "onnxruntime-gpu" },
+]
+tensorrt = [
+    { name = "tensorrt-cu12" },
+    { name = "torch" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "bluecodec", marker = "extra == 'export'", git = "https://github.com/maxmelichov/blue-codec.git" },
+    { name = "huggingface-hub", specifier = ">=0.26.0" },
+    { name = "librosa", marker = "extra == 'export'" },
+    { name = "numpy" },
+    { name = "onnx", marker = "extra == 'export'", specifier = ">=1.17.0" },
+    { name = "onnxruntime" },
+    { name = "onnxruntime-gpu", marker = "extra == 'gpu'" },
+    { name = "onnxslim", marker = "extra == 'export'", specifier = ">=0.1.0" },
+    { name = "phonemizer" },
+    { name = "renikud-onnx" },
+    { name = "safetensors", marker = "extra == 'export'", specifier = ">=0.4.0" },
+    { name = "soundfile" },
+    { name = "tensorrt-cu12", marker = "extra == 'tensorrt'" },
+    { name = "torch", marker = "extra == 'export'", specifier = ">=2.1.0" },
+    { name = "torch", marker = "extra == 'tensorrt'", specifier = ">=2.1.0" },
+    { name = "torchaudio", marker = "extra == 'export'", specifier = ">=2.1.0" },
+]
+provides-extras = ["gpu", "tensorrt", "export"]
+
+[[package]]
 name = "bluecodec"
 version = "0.1.0"
 source = { git = "https://github.com/maxmelichov/blue-codec.git#5bccc0abb28ef7782473b7ccabd80970e2728149" }
@@ -629,56 +681,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/64/36/360b5aafa0238e297
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b5/ba/c63c5786dfee4c3417094c4b00966e61e4a63efecee22cb7b4c0387dda83/librosa-0.11.0-py3-none-any.whl", hash = "sha256:0b6415c4fd68bff4c29288abe67c6d80b587e0e1e2cfb0aad23e4559504a7fa1", size = 260749, upload-time = "2025-03-11T15:09:52.982Z" },
 ]
-
-[[package]]
-name = "lightblue-onnx"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "huggingface-hub" },
-    { name = "numpy" },
-    { name = "onnxruntime" },
-    { name = "phonemizer" },
-    { name = "soundfile" },
-]
-
-[package.optional-dependencies]
-export = [
-    { name = "bluecodec" },
-    { name = "librosa" },
-    { name = "onnx" },
-    { name = "onnxslim" },
-    { name = "safetensors" },
-    { name = "torch" },
-    { name = "torchaudio" },
-]
-gpu = [
-    { name = "onnxruntime-gpu" },
-]
-tensorrt = [
-    { name = "tensorrt-cu12" },
-    { name = "torch" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "bluecodec", marker = "extra == 'export'", git = "https://github.com/maxmelichov/blue-codec.git" },
-    { name = "huggingface-hub", specifier = ">=0.26.0" },
-    { name = "librosa", marker = "extra == 'export'" },
-    { name = "numpy" },
-    { name = "onnx", marker = "extra == 'export'", specifier = ">=1.17.0" },
-    { name = "onnxruntime" },
-    { name = "onnxruntime-gpu", marker = "extra == 'gpu'" },
-    { name = "onnxslim", marker = "extra == 'export'", specifier = ">=0.1.0" },
-    { name = "phonemizer" },
-    { name = "safetensors", marker = "extra == 'export'", specifier = ">=0.4.0" },
-    { name = "soundfile" },
-    { name = "tensorrt-cu12", marker = "extra == 'tensorrt'" },
-    { name = "torch", marker = "extra == 'export'", specifier = ">=2.1.0" },
-    { name = "torch", marker = "extra == 'tensorrt'", specifier = ">=2.1.0" },
-    { name = "torchaudio", marker = "extra == 'export'", specifier = ">=2.1.0" },
-]
-provides-extras = ["gpu", "tensorrt", "export"]
 
 [[package]]
 name = "llvmlite"
@@ -1543,6 +1545,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/19/eb/ef32dcd2cb69b69bc0c3e55205bce94a7def48d495358946bc42186dcccc/regex-2026.4.4-cp314-cp314t-win32.whl", hash = "sha256:385edaebde5db5be103577afc8699fea73a0e36a734ba24870be7ffa61119d74", size = 275709, upload-time = "2026-04-03T20:56:20.996Z" },
     { url = "https://files.pythonhosted.org/packages/a0/86/c291bf740945acbf35ed7dbebf8e2eea2f3f78041f6bd7cdab80cb274dc0/regex-2026.4.4-cp314-cp314t-win_amd64.whl", hash = "sha256:5d354b18839328927832e2fa5f7c95b7a3ccc39e7a681529e1685898e6436d45", size = 285622, upload-time = "2026-04-03T20:56:23.641Z" },
     { url = "https://files.pythonhosted.org/packages/d5/e7/ec846d560ae6a597115153c02ca6138a7877a1748b2072d9521c10a93e58/regex-2026.4.4-cp314-cp314t-win_arm64.whl", hash = "sha256:af0384cb01a33600c49505c27c6c57ab0b27bf84a74e28524c92ca897ebdac9d", size = 275773, upload-time = "2026-04-03T20:56:26.07Z" },
+]
+
+[[package]]
+name = "renikud-onnx"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "onnxruntime" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/21/a8/1e7a558db1602be08febe87ff3d5df7b11b2efc19cd4d4c95699f582b5bd/renikud_onnx-0.1.0-py3-none-any.whl", hash = "sha256:9dd808ca3604a30fc4cea54050de8d228ca2f5c97cdd7ac0d06a3014af6da028", size = 3545, upload-time = "2026-04-10T22:06:55.012Z" },
 ]
 
 [[package]]

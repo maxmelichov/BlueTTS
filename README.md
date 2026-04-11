@@ -1,4 +1,4 @@
-# BlueTTS
+# Blue
 
 Hebrew Text-to-Speech inference using ONNX Runtime with optional TensorRT acceleration.
 
@@ -11,7 +11,9 @@ uv sync --extra gpu        # + CUDA support
 
 ## Model Weights
 
-Download the TTS weights from [notmax123/Blue](https://huggingface.co/notmax123/Blue) and the G2P ONNX model from [thewh1teagle/renikud](https://huggingface.co/thewh1teagle/renikud) (same file as in the `wget` line below).
+Download the TTS weights from [notmax123/Blue](https://huggingface.co/notmax123/Blue) and the Hebrew G2P ONNX model from **[thewh1teagle/renikud](https://huggingface.co/thewh1teagle/renikud)** (Renikud: grapheme → IPA, ONNX Runtime, ~20 MB — weights are not bundled with the Python wheel).
+
+The **`renikud-onnx`** package is included in the default dependencies; you only need the ONNX file:
 
 ```bash
 uv run hf download notmax123/Blue --repo-type model --local-dir ./onnx_models
@@ -29,8 +31,6 @@ uv sync --extra export
 uv run hf download notmax123/Blue stats_multilingual.pt --local-dir ./pt_weights
 ```
 
-If `pt_weights/` is empty, download the codec and head weights from the same repo once (`blue_codec.safetensors`, `vf_estimator.safetensors`, `duration_predictor.safetensors`).
-
 From the **repo root** (so `scripts/…` resolves; `PYTHONPATH` must include `training` for `models.*`):
 
 ```bash
@@ -44,17 +44,17 @@ PYTHONPATH=training uv run python scripts/export_new_voice.py \
   --stats pt_weights/stats_multilingual.pt
 ```
 
-Use the JSON as `style_json` when creating `LightBlueTTS`. Details: `scripts/export_new_voice.py` (optional `--verify_hf_sizes`, `--out_pt`).
+Use the JSON as `style_json` when creating `BlueTTS`. Details: `scripts/export_new_voice.py` (optional `--verify_hf_sizes`, `--out_pt`).
 
 ## Usage & Examples
 
-Import `BlueTTS` from `src.blue_onnx`. Supported `lang` codes are `he`, `en`, `es`, `it`, and `ge`. For mixed text, wrap each segment in tags like `<en>...</en>` (same idea for `es`, `it`, `ge`, `he`). Pass `renikud_path` when you use Hebrew.
+Import `BlueTTS` from `src.blue_onnx`. Supported `lang` codes are `he`, `en`, `es`, `it`, and `de` (alias `ge` for German). **Mixed-language raw text** must use explicit XML-style tags **`</lan>`** closers, e.g. `<en>English words here</en>`, `<es>…</es>`, `<he>…</he>`, `<ge>…</ge>` — the same form the tokenizer expects after phonemization. Hebrew outside tags uses Renikud; tagged Latin segments use espeak for that language. Pass `renikud_path` when any Hebrew letters appear.
 
 ```python
 import soundfile as sf
-from src.blue_onnx import LightBlueTTS
+from src.blue_onnx import BlueTTS
 
-tts = LightBlueTTS(
+tts = BlueTTS(
     onnx_dir="onnx_models",
     style_json="voices/female1.json",
     renikud_path="model.onnx",
@@ -68,7 +68,15 @@ samples, sr = tts.synthesize(mixed, lang="he")
 sf.write("mixed_output.wav", samples, sr)
 ```
 
-More scripts: [examples](examples/).
+**Examples** (from repo root):
+
+```bash
+uv run python examples/basic.py               # he / en / es / it / ge + mixed → examples/out/
+uv run python examples/all_langs_and_mix.py   # all LANG_ID langs + mixed + langs_manifest.json → examples/out/
+# TensorRT batch (after `uv sync --extra tensorrt` and engine build):
+uv run python examples/all_langs_and_mix.py --tensorrt
+uv run python examples/app.py --lang en --text "Hello world."
+```
 
 ## TensorRT
 
@@ -82,7 +90,9 @@ uv run python scripts/create_tensorrt.py \
   --onnx_dir onnx_models --engine_dir trt_engines --precision fp16 --config config/tts.json
 ```
 
-Adjust `--config` if your `tts.json` lives elsewhere. The script defaults to GPU index `1` via `CUDA_VISIBLE_DEVICES`; on a single-GPU machine, edit `scripts/create_tensorrt.py` or set the variable before running.
+Text-sequence engines allow up to **2048** tokens per profile axis (needed for long or mixed-language IPA). If mixed utterances fail or sound wrong with older `trt_engines/`, rebuild after updating `scripts/create_tensorrt.py` (previously capped at 512).
+
+Adjust `--config` if your `tts.json` lives elsewhere. The optional extra installs **`tensorrt-cu12`** (CUDA 12.x wheels). If the build fails with CUDA error 35, your driver stack likely needs **`tensorrt-cu13`** instead—install it into the same venv (see [NVIDIA pip install](https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/install-pip.html)). By default the script sets `CUDA_VISIBLE_DEVICES` to `1` only when that variable is unset; use `CUDA_VISIBLE_DEVICES=0` (or edit the script) on a single-GPU machine.
 
 ## Papers
 

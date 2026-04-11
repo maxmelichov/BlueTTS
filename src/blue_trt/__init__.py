@@ -94,7 +94,7 @@ class TRTEngine:
 
 # ─── Main class ───────────────────────────────────────────────────────────────
 
-class LightBlueTRT:
+class BlueTRT:
     def __init__(
         self,
         trt_dir: str,
@@ -258,8 +258,8 @@ class LightBlueTRT:
             feed[inp_names[1]] = mask
 
         out = self._ref_enc.run(feed)
-        ref_values = out.get("ref_values") or next(iter(out.values()))
-        ref_keys   = out.get("ref_keys")
+        ref_values = out["ref_values"] if "ref_values" in out else next(iter(out.values()))
+        ref_keys = out.get("ref_keys")
         return ref_values, ref_keys
 
     def _infer_chunk(self, phonemes: str, lang: str = "he") -> np.ndarray:
@@ -309,8 +309,8 @@ class LightBlueTRT:
         if "ref_values" in te_in: te_feed["ref_values"] = ref_values
         if "ref_keys"   in te_in: te_feed["ref_keys"]   = ref_keys
 
-        te_out   = self._text_enc.run(te_feed)
-        text_emb = te_out.get("text_emb") or next(iter(te_out.values()))
+        te_out = self._text_enc.run(te_feed)
+        text_emb = te_out["text_emb"] if "text_emb" in te_out else next(iter(te_out.values()))
 
         T_lat = self._predict_duration(text_ids_dp, text_mask_dp, z_ref_norm, style_dp)
         latent = self._flow_matching(text_emb, ref_values, text_mask, T_lat)
@@ -439,7 +439,7 @@ class LightBlueTRT:
         )
 
         voc_out = self._vocoder.run({"latent": z_dec})
-        wav = voc_out.get("waveform") or next(iter(voc_out.values()))
+        wav = voc_out["waveform"] if "waveform" in voc_out else next(iter(voc_out.values()))
         frame_len = self.hop_length * self.chunk_compress_factor
         if wav.shape[-1] > 2 * frame_len:
             wav = wav[..., frame_len:-frame_len]
@@ -470,3 +470,6 @@ def load_voice_style(style_paths: List[str], device: str = "cuda") -> Style:
             dp[i] = torch.tensor(d["style_dp"]["data"], dtype=torch.float32).view(dp_dims[1], dp_dims[2])
 
     return Style(ttl=ttl, dp=dp)
+
+
+LightBlueTRT = BlueTRT  # alias matching ONNX entrypoint name
