@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Build a *voice style* JSON for Light-BlueTTS from one reference WAV.
+Build a *voice style* JSON for Blue (BlueTTS) from one reference WAV.
 
 The JSON is consumed by ONNX inference (``src.blue_onnx``): it expects
 ``style_ttl`` (reference-encoder outputs) and optionally ``style_dp``

@@ -27,7 +27,7 @@ from bluecodec.utils import decompress_latents
 from models.utils import load_ttl_config
 
 
-class LightBlueTTS:
+class BlueTTS:
     def __init__(
         self,
         weights_dir: str,
