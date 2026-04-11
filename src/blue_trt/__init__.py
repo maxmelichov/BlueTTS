@@ -106,7 +106,7 @@ class LightBlueTRT:
         chunk_len: int = 150,
         silence_sec: float = 0.15,
         fade_duration: float = 0.02,
-        phonikud_path: Optional[str] = None,
+        renikud_path: Optional[str] = None,
         device: str = "cuda",
     ):
         self.trt_dir = trt_dir
@@ -124,7 +124,7 @@ class LightBlueTRT:
         self._init_engines()
         self._load_stats()
         self._load_uncond()
-        self._text_proc = TextProcessor(phonikud_path)
+        self._text_proc = TextProcessor(renikud_path)
 
     def _load_config(self, config_path: str):
         self.normalizer_scale = 1.0

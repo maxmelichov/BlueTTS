@@ -2,7 +2,7 @@
 #
 #   1. Download model weights:
 #      https://huggingface.co/notmax123/LightBlue       -> onnx_models/, voices/, tts.json
-#      https://huggingface.co/thewh1teagle/phonikud-onnx -> phonikud-1.0.onnx
+#      https://huggingface.co/thewh1teagle/renikud -> model.onnx
 #
 #   2. Build and run:
 #      docker build -t lightblue-tts .
@@ -14,7 +14,7 @@ WORKDIR /app
 
 # System deps required by soundfile
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsndfile1 curl \
+    libsndfile1 curl espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
@@ -23,13 +23,13 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Install python deps (package + app-level phonemization deps)
 COPY pyproject.toml uv.lock /app/
 RUN uv sync --frozen --no-dev --no-install-project
-RUN uv pip install phonikud phonikud-onnx
+RUN uv pip install renikud-onnx
 
 # Copy package + app + models + assets
 COPY src/ /app/src/
 COPY examples/ /app/examples/
 COPY onnx_models /app/onnx_models
-COPY phonikud-1.0.onnx /app/phonikud-1.0.onnx
+COPY model.onnx /app/model.onnx
 COPY voices /app/voices
 COPY tts.json /app/tts.json
 
