@@ -21,6 +21,11 @@ def main():
         default=os.path.join(os.path.dirname(__file__), "configs", "tts.json"),
         help="Path to the TTS config json",
     )
+    parser.add_argument(
+        "--ae-ckpt",
+        default=None,
+        help="Path to the AE checkpoint",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
@@ -50,7 +55,7 @@ def main():
     print(f"Using TTS config: {tts_json_path}")
 
     # ---- Locate metadata ----
-    metadata_candidates = ["generated_audio/combined_dataset_cleaned_real_data.csv"]
+    metadata_candidates = ["combined_dataset_cleaned.csv", "generated_audio/combined_dataset_cleaned_real_data.csv"]
     metadata_path = next((p for p in metadata_candidates if os.path.exists(p)), None)
     if metadata_path is None:
         print("ERROR: No metadata CSV found.")
@@ -58,9 +63,12 @@ def main():
     print(f"Using metadata: {metadata_path}")
 
     # ---- Resolve AE checkpoint ----
-    checkpoint_path = tts_cfg.get("ae_ckpt_path", "checkpoints/ae/ae_latest_newer.pt")
-    if not checkpoint_path or checkpoint_path == "unknown.pt":
-        checkpoint_path = "checkpoints/ae/ae_latest_newer.pt"
+    if args.ae_ckpt:
+        checkpoint_path = args.ae_ckpt
+    else:
+        checkpoint_path = tts_cfg.get("ae_ckpt_path", "checkpoints/ae/ae_latest_newer.pt")
+        if not checkpoint_path or checkpoint_path == "unknown.pt":
+            checkpoint_path = "checkpoints/ae/ae_latest_newer.pt"
 
     output_path = "stats_real_data.pt"
 
@@ -108,16 +116,26 @@ def main():
 
     if os.path.exists(checkpoint_path):
         print(f"Loading AE checkpoint from {checkpoint_path}")
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        if checkpoint_path.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            ckpt = load_file(checkpoint_path)
+        else:
+            ckpt = torch.load(checkpoint_path, map_location="cpu")
+        
         if "encoder" in ckpt:
             encoder.load_state_dict(ckpt["encoder"])
         elif "state_dict" in ckpt:
             encoder.load_state_dict(ckpt["state_dict"], strict=False)
         else:
-            try:
-                encoder.load_state_dict(ckpt)
-            except Exception as e:
-                print(f"Could not load AE encoder: {e}")
+            # Check if keys start with 'encoder.'
+            if any(k.startswith("encoder.") for k in ckpt.keys()):
+                enc_dict = {k.replace("encoder.", ""): v for k, v in ckpt.items() if k.startswith("encoder.")}
+                encoder.load_state_dict(enc_dict)
+            else:
+                try:
+                    encoder.load_state_dict(ckpt)
+                except Exception as e:
+                    print(f"Could not load AE encoder: {e}")
     else:
         print(f"WARNING: Checkpoint {checkpoint_path} not found.")
 
