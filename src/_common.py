@@ -23,7 +23,7 @@ class TextProcessor:
 
     _ESPEAK_MAP = {
         "en": "en-us", "en-us": "en-us", "de": "de", "ge": "de", "it": "it",
-        "es": "es",    "fr": "fr-fr", "pt": "pt",
+        "es": "es", 
     }
 
     # Same pairing as ``text_to_indices_multilang`` in ``_blue_vocab``: ``<lan>…</lan>`` or toggle ``<lan>…<lan>``.
@@ -49,7 +49,7 @@ class TextProcessor:
     def _hebrew_requires_renikud_error(self) -> ValueError:
         return ValueError(
             "Hebrew text requires the Renikud ONNX weights (not bundled with the wheel). "
-            f"Download: {_RENIKUD_MODEL_HINT}\n"
+            f"Download: https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx\n"
             "Then pass renikud_path='model.onnx' (or an absolute path) to the TTS class. "
             "The `renikud-onnx` PyPI package is a project dependency."
         )
