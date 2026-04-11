@@ -16,8 +16,13 @@ Download the TTS weights from [notmax123/Blue](https://huggingface.co/notmax123/
 The **`renikud-onnx`** package is included in the default dependencies; you only need the ONNX file:
 
 ```bash
-uv run hf download notmax123/Blue --repo-type model --local-dir ./onnx_models
+uv run hf download notmax123/Blue --repo-type model --local-dir ./pt_models
 wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
+```
+
+For Blue onnx file run this:
+```bash
+uv run hf download notmax123/BlueOnnx --repo-type model --local-dir ./onnx_models
 ```
 
 (`huggingface-hub` is included in the default dependencies so `uv run hf` works without a separate global install.)
@@ -31,24 +36,7 @@ uv sync --extra export
 uv run hf download notmax123/Blue stats_multilingual.pt --local-dir ./pt_weights
 ```
 
-From the **repo root** (so `scripts/…` resolves; `PYTHONPATH` must include `training` for `models.*`):
-
-```bash
-PYTHONPATH=training uv run python scripts/export_new_voice.py \
-  --ref_wav path/to/reference.wav \
-  --out voices/my_voice.json \
-  --config config/tts.json \
-  --ae_ckpt pt_weights/blue_codec.safetensors \
-  --ttl_ckpt pt_weights/vf_estimator.safetensors \
-  --dp_ckpt pt_weights/duration_predictor.safetensors \
-  --stats pt_weights/stats_multilingual.pt
-```
-
-Use the JSON as `style_json` when creating `BlueTTS`. Details: `scripts/export_new_voice.py` (optional `--verify_hf_sizes`, `--out_pt`).
-
 ## Usage & Examples
-
-Import `BlueTTS` from `src.blue_onnx`. Supported `lang` codes are `he`, `en`, `es`, `it`, and `de` (alias `ge` for German). **Mixed-language raw text** must use explicit XML-style tags **`</lan>`** closers, e.g. `<en>English words here</en>`, `<es>…</es>`, `<he>…</he>`, `<ge>…</ge>` — the same form the tokenizer expects after phonemization. Hebrew outside tags uses Renikud; tagged Latin segments use espeak for that language. Pass `renikud_path` when any Hebrew letters appear.
 
 ```python
 import soundfile as sf
@@ -56,7 +44,7 @@ from src.blue_onnx import BlueTTS
 
 tts = BlueTTS(
     onnx_dir="onnx_models",
-    style_json="voices/female1.json",
+    style_json="voices/female1_new.json",
     renikud_path="model.onnx",
 )
 
@@ -74,7 +62,7 @@ sf.write("mixed_output.wav", samples, sr)
 uv run python examples/basic.py               # he / en / es / it / ge + mixed → examples/out/
 uv run python examples/all_langs_and_mix.py   # all LANG_ID langs + mixed + langs_manifest.json → examples/out/
 # TensorRT batch (after `uv sync --extra tensorrt` and engine build):
-uv run python examples/all_langs_and_mix.py --tensorrt
+uv run python examples/all_langs_and_mix.py --tensorrt # BUGGED 
 uv run python examples/app.py --lang en --text "Hello world."
 ```
 
@@ -90,9 +78,6 @@ uv run python scripts/create_tensorrt.py \
   --onnx_dir onnx_models --engine_dir trt_engines --precision fp16 --config config/tts.json
 ```
 
-Text-sequence engines allow up to **2048** tokens per profile axis (needed for long or mixed-language IPA). If mixed utterances fail or sound wrong with older `trt_engines/`, rebuild after updating `scripts/create_tensorrt.py` (previously capped at 512).
-
-Adjust `--config` if your `tts.json` lives elsewhere. The optional extra installs **`tensorrt-cu12`** (CUDA 12.x wheels). If the build fails with CUDA error 35, your driver stack likely needs **`tensorrt-cu13`** instead—install it into the same venv (see [NVIDIA pip install](https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/install-pip.html)). By default the script sets `CUDA_VISIBLE_DEVICES` to `1` only when that variable is unset; use `CUDA_VISIBLE_DEVICES=0` (or edit the script) on a single-GPU machine.
 
 ## Papers
 
