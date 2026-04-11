@@ -5,8 +5,8 @@
 #      https://huggingface.co/thewh1teagle/renikud -> model.onnx
 #
 #   2. Build and run:
-#      docker build -t lightblue-tts .
-#      docker run --rm lightblue-tts --text "שלום עולם"
+#      docker build -t blue-tts .
+#      docker run --rm blue-tts --text "שלום עולם"
 
 FROM python:3.10-slim
 
@@ -23,7 +23,6 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Install python deps (package + app-level phonemization deps)
 COPY pyproject.toml uv.lock /app/
 RUN uv sync --frozen --no-dev --no-install-project
-RUN uv pip install renikud-onnx
 
 # Copy package + app + models + assets
 COPY src/ /app/src/

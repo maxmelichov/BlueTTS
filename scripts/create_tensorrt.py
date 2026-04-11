@@ -1,6 +1,7 @@
 import os
-# Set CUDA device to 1 as requested
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# Prefer GPU 1 when unset (many dev boxes use GPU 0 for display); respect a pre-set CUDA_VISIBLE_DEVICES.
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import sys
 import logging
 import argparse
@@ -105,14 +106,14 @@ class EngineBuilder:
                         max_shape.append(2048)
                         
                         # ---- Heuristics matching our ONNX exports ----
-                        # Text-related axes
-                        if "text" in name: 
-                            if dim_idx == 1 and len(shape) == 2: # text_ids [B, T]
-                                opt_shape[-1] = 128
-                                max_shape[-1] = 512
-                            elif dim_idx == 2: # text_mask/text_emb last dim
-                                opt_shape[-1] = 128
-                                max_shape[-1] = 512
+                        # Text-related axes (mixed-language IPA + <lang> tags can be >512 tokens)
+                        if "text" in name:
+                            if dim_idx == 1 and len(shape) == 2:  # text_ids [B, T]
+                                opt_shape[-1] = 256
+                                max_shape[-1] = 2048
+                            elif dim_idx == 2:  # text_mask / text_emb time axis
+                                opt_shape[-1] = 256
+                                max_shape[-1] = 2048
                         
                         # Reference / style axes
                         elif "ref" in name or "style" in name:

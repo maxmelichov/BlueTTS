@@ -1,4 +1,4 @@
-# Training — Light-BlueTTS
+# Training — Blue
 
 Install from the `training/` directory:
 
