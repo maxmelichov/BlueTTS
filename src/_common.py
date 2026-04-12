@@ -35,6 +35,9 @@ class TextProcessor:
 
     def __init__(self, renikud_path: Optional[str] = None):
         self.renikud = None
+        if renikud_path is None and os.path.exists("model.onnx"):
+            renikud_path = "model.onnx"
+            
         self._renikud_path = renikud_path
         if renikud_path and os.path.exists(renikud_path):
             try:

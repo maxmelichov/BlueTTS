@@ -1,34 +1,15 @@
-#!/usr/bin/env python3
-import soundfile as sf
 import sys
-from pathlib import Path
+import soundfile as sf
 
-# Ensure we can import from src
-repo_root = Path(__file__).resolve().parents[1]
-if str(repo_root) not in sys.path:
-    sys.path.insert(0, str(repo_root))
-
+sys.path.append(".")
 from src.blue_onnx import BlueTTS
 
-def main():
-    print("Loading BlueTTS...")
-    tts = BlueTTS(
-        onnx_dir=str(repo_root / "onnx_models"),
-        style_json=str(repo_root / "voices" / "female1.json"),
-        renikud_path=str(repo_root / "model.onnx"),
-    )
+tts = BlueTTS(
+    onnx_dir="onnx_models",
+    style_json="voices/female1.json"
+)
 
-    text = "Hola, esta es una prueba breve en español."
-    print(f"Synthesizing Spanish: {text}")
-    
-    audio, sr = tts.synthesize(text, lang="es")
-    
-    out_dir = repo_root / "examples" / "out"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "spanish_example.wav"
-    
-    sf.write(str(out_path), audio, sr)
-    print(f"Saved to {out_path}")
-
-if __name__ == "__main__":
-    main()
+text = "Hola, esta es una prueba breve en español."
+audio, sr = tts.synthesize(text, lang="es")
+sf.write("spanish_example.wav", audio, sr)
+print("Saved spanish_example.wav")

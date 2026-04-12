@@ -118,7 +118,7 @@ class BlueTRT:
         chunk_len: int = 150,
         silence_sec: float = 0.15,
         fade_duration: float = 0.02,
-        phonikud_path: Optional[str] = None,
+        renikud_path: Optional[str] = None,
         device: str = "cuda",
     ):
         self.trt_dir = trt_dir
@@ -132,11 +132,17 @@ class BlueTRT:
         self.fade_duration = fade_duration
         self.device = device
 
+        if renikud_path is None:
+            if os.path.exists("model.onnx"):
+                renikud_path = "model.onnx"
+            elif os.path.exists(os.path.join(trt_dir, "model.onnx")):
+                renikud_path = os.path.join(trt_dir, "model.onnx")
+
         self._load_config(config_path)
         self._init_engines()
         self._load_stats()
         self._load_uncond()
-        self._text_proc = TextProcessor(phonikud_path)
+        self._text_proc = TextProcessor(renikud_path)
 
     # ------------------------------------------------------------------
     # Setup

@@ -30,7 +30,7 @@ class BlueTTS:
         chunk_len: int = 150,
         silence_sec: float = 0.15,
         fade_duration: float = 0.02,
-        phonikud_path: Optional[str] = None,
+        renikud_path: Optional[str] = None,
     ):
         self.onnx_dir = onnx_dir
         self.style_json = style_json
@@ -42,12 +42,18 @@ class BlueTTS:
         self.silence_sec = silence_sec
         self.fade_duration = fade_duration
 
+        if renikud_path is None:
+            if os.path.exists("model.onnx"):
+                renikud_path = "model.onnx"
+            elif os.path.exists(os.path.join(onnx_dir, "model.onnx")):
+                renikud_path = os.path.join(onnx_dir, "model.onnx")
+
         self._load_config(config_path)
         self._init_sessions(use_gpu)
         self._load_stats()
         self._load_uncond()
         self._load_shuffle_keys()
-        self._text_proc = TextProcessor(phonikud_path)
+        self._text_proc = TextProcessor(renikud_path)
 
     # ------------------------------------------------------------------
     # Setup
