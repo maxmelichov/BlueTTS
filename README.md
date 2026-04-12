@@ -2,10 +2,21 @@
 
 Hebrew Text-to-Speech inference using ONNX Runtime with optional TensorRT acceleration.
 
-## Demo
+## ✨ Demo
 
-- **Hugging Face Space:** [try the demo](https://huggingface.co/spaces/notmax123/Blue)
-- **Website:** [lightbluetts.com](https://lightbluetts.com/)
+<p align="center">
+  <a href="https://huggingface.co/spaces/notmax123/Blue" title="Open in Hugging Face Spaces">
+    <img src="https://img.shields.io/badge/Hugging_Face-try_live_demo-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black" alt="Hugging Face Spaces demo" />
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://lightbluetts.com/" title="BlueTTS marketing site">
+    <img src="https://img.shields.io/badge/Website-lightbluetts.com-2563EB?style=for-the-badge&logo=googlechrome&logoColor=white" alt="lightbluetts.com" />
+  </a>
+</p>
+
+<p align="center">
+  <sub>🎙️ Human-sounding TTS in <strong>Hebrew</strong>, <strong>English</strong>, <strong>Spanish</strong>, <strong>Italian</strong> &amp; <strong>German</strong> — samples, live speak, and API info on the site.</sub>
+</p>
 
 ## Installation
 
