@@ -2,6 +2,9 @@
 
 Hebrew Text-to-Speech inference using ONNX Runtime with optional TensorRT acceleration.
 
+- **Demo:** [https://huggingface.co/spaces/notmax123/Blue](https://huggingface.co/spaces/notmax123/Blue)
+- **Website:** [https://lightbluetts.com/](https://lightbluetts.com/)
+
 ## Installation
 
 Install the core dependencies:
@@ -18,15 +21,17 @@ uv sync --extra gpu
 
 ## Download Models
 
-You need to download the ONNX models and the Hebrew G2P model (`renikud`). We use the `hf` CLI (included in dependencies) to download from Hugging Face.
+```bash
+uv run hf download notmax123/blue-onnx --repo-type model --local-dir ./onnx_models
+```
+
+For Hebrew only, also download [renikud](https://huggingface.co/thewh1teagle/renikud) G2P (saved as `model.onnx` by default):
 
 ```bash
-# 1. Download Blue ONNX models
-uv run hf download notmax123/blue-onnx --repo-type model --local-dir ./onnx_models
-
-# 2. Download Hebrew G2P ONNX model (Optinal)
 wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
 ```
+
+Skip the second step if you only use non-Hebrew languages.
 
 *(Optional)* If you want to create new voices (extract latent mean/std), download the PyTorch weights and the multilingual stats:
 
