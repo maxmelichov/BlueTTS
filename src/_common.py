@@ -63,8 +63,12 @@ class TextProcessor:
         if espeak_lang is None:
             return text
         try:
+            import espeakng_loader
             from phonemizer.backend import EspeakBackend
+            from phonemizer.backend.espeak.wrapper import EspeakWrapper
             from phonemizer.separator import Separator
+            EspeakWrapper.set_library(espeakng_loader.get_library_path())
+            EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
             backend = EspeakBackend(
                 espeak_lang, preserve_punctuation=True,
                 with_stress=True, language_switch="remove-flags",
