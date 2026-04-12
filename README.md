@@ -22,7 +22,7 @@ You need to download the ONNX models and the Hebrew G2P model (`renikud`). We us
 
 ```bash
 # 1. Download Blue ONNX models
-uv run hf download notmax123/BlueOnnx --repo-type model --local-dir ./onnx_models
+uv run hf download notmax123/blue-onnx --repo-type model --local-dir ./onnx_models
 
 # 2. Download Hebrew G2P ONNX model
 wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
@@ -32,7 +32,7 @@ wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/mode
 
 ```bash
 uv sync --extra export
-uv run hf download notmax123/Blue --repo-type model --local-dir ./pt_models
+uv run hf download notmax123/blue --repo-type model --local-dir ./pt_models
 ```
 
 ## Usage

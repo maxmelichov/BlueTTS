@@ -12,13 +12,13 @@ uv sync --extra cu132   # PyTorch + CUDA 13.2 (nightly wheels; experimental)
 
 `bluecodec` is already a Git dependency in `pyproject.toml` and is installed with `uv sync`.
 
-*Pretrained weights for all stages (Codec, Text-to-Latent, Duration Predictor, and Latent Stats) are available at: [`notmax123/Blue`](https://huggingface.co/notmax123/Blue).*
+*Pretrained weights for all stages (Codec, Text-to-Latent, Duration Predictor, and Latent Stats) are available at: [`notmax123/blue`](https://huggingface.co/notmax123/blue).*
 
 You can download them directly into the `pt_weights` directory using the Hugging Face CLI:
 
 ```bash
 cd training
-uv run hf download notmax123/Blue --repo-type model --local-dir ./pt_weights
+uv run hf download notmax123/blue --repo-type model --local-dir ./pt_weights
 ```
 
 Training scripts live under `training/src/`. Run dataset and stats commands from `training/` unless you adjust paths. Defaults inside some scripts still mention `combined_dataset_cleaned_real_data.csv`, `checkpoints/ae/`, or `stats_real_data.pt` — align filenames with your layout or edit those constants / `configs/tts.json` (`ae_ckpt_path`).
@@ -35,7 +35,7 @@ Before training the TTS acoustic models, you need a trained autoencoder to compr
 We use **blue-codec** for this. The training instructions for the autoencoder are maintained in its own repository:  
 🔗 [**How to train blue-codec**](https://github.com/maxmelichov/blue-codec/blob/main/docs/training.md)
 
-*If you are skipping Stage 1, you can use our pretrained codec weights (`blue_codec.safetensors` from `notmax123/Blue`).*
+*If you are skipping Stage 1, you can use our pretrained codec weights (`blue_codec.safetensors` from `notmax123/blue`).*
 
 ---
 
