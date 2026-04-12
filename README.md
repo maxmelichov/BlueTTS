@@ -24,7 +24,7 @@ You need to download the ONNX models and the Hebrew G2P model (`renikud`). We us
 # 1. Download Blue ONNX models
 uv run hf download notmax123/blue-onnx --repo-type model --local-dir ./onnx_models
 
-# 2. Download Hebrew G2P ONNX model
+# 2. Download Hebrew G2P ONNX model (Optinal)
 wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
 ```
 
