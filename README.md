@@ -86,6 +86,7 @@ For faster inference on NVIDIA GPUs, you can build TensorRT engines.
 
 ```bash
 uv sync --extra tensorrt
+uv pip install tensorrt-cu12  # installed separately due to astral-sh/uv#14313
 ```
 
 2. Build the engines (see `scripts/README.md` for details):
