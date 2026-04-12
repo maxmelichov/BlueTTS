@@ -26,12 +26,12 @@ absent.
 **Weights**
 
 Latent normalization uses ``stats_multilingual.pt`` from Hugging Face
-``notmax123/Blue``. The codec and style heads need
+``notmax123/blue``. The codec and style heads need
 ``blue_codec.safetensors``, ``vf_estimator.safetensors``, and
 ``duration_predictor.safetensors`` from the same repo (or any matching paths
 on disk). To refresh stats only::
 
-    hf download notmax123/Blue stats_multilingual.pt --local-dir ./pt_weights
+    hf download notmax123/blue stats_multilingual.pt --local-dir ./pt_weights
 
 Run this script from the repo root and pass paths, e.g.::
 
@@ -70,8 +70,8 @@ if _TRAINING not in sys.path:
 from bluecodec.autoencoder.latent_encoder import LatentEncoder
 from models.utils import LinearMelSpectrogram, compress_latents, load_ttl_config
 
-# Expected file sizes (bytes) for ``notmax123/Blue`` main branch — sanity check only.
-HF_REPO_ID = "notmax123/Blue"
+# Expected file sizes (bytes) for ``notmax123/blue`` main branch — sanity check only.
+HF_REPO_ID = "notmax123/blue"
 HF_WEIGHT_SIZES: dict[str, int] = {
     "blue_codec.safetensors": 245_114_104,
     "duration_predictor.safetensors": 2_040_512,
