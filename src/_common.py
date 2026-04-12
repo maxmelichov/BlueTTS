@@ -1,6 +1,8 @@
 import os
 import re
+import subprocess
 import sys
+from importlib import import_module
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
@@ -64,11 +66,12 @@ class TextProcessor:
             return text
         try:
             import espeakng_loader
-            from phonemizer.backend import EspeakBackend
-            from phonemizer.backend.espeak.wrapper import EspeakWrapper
-            from phonemizer.separator import Separator
+            EspeakBackend = import_module("phonemizer.backend").EspeakBackend
+            EspeakWrapper = import_module("phonemizer.backend.espeak.wrapper").EspeakWrapper
+            Separator = import_module("phonemizer.separator").Separator
             EspeakWrapper.set_library(espeakng_loader.get_library_path())
-            EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
+            if hasattr(EspeakWrapper, "set_data_path"):
+                EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
             backend = EspeakBackend(
                 espeak_lang, preserve_punctuation=True,
                 with_stress=True, language_switch="remove-flags",
@@ -78,7 +81,19 @@ class TextProcessor:
             )[0]
             return normalize_text(raw, lang=lang)
         except Exception as e:
-            print(f"[WARN] Phonemization failed for lang={lang}: {e}")
+            print(f"[WARN] Phonemizer backend failed for lang={lang}: {e}")
+
+        try:
+            result = subprocess.run(
+                ["espeak-ng", "-q", "--ipa=1", "-v", espeak_lang, text],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            raw = result.stdout.replace("\n", " ").strip()
+            return normalize_text(raw, lang=lang)
+        except Exception as e:
+            print(f"[WARN] espeak-ng fallback failed for lang={lang}: {e}")
             return text
 
     def _phonemize_segment(self, content: str, lang: str) -> str:
@@ -201,4 +216,30 @@ def chunk_text(text: str, max_len: int = 300) -> List[str]:
     out: List[str] = []
     for c in base:
         out.extend(_hard_split_chunk(c, max_len))
-    return out or ([text.strip()] if text.strip() else [])
+
+    # Fix language tags that span across chunks
+    fixed_out = []
+    active_tag = None
+    for c in out:
+        c = c.strip()
+        if not c:
+            continue
+            
+        if active_tag and not c.startswith(f"<{active_tag}>"):
+            c = f"<{active_tag}>" + c
+            
+        for m in re.finditer(r"<(/)?([a-z]{2,8})>", c):
+            is_close = bool(m.group(1))
+            tag = m.group(2)
+            if is_close:
+                if active_tag == tag:
+                    active_tag = None
+            else:
+                active_tag = tag
+                
+        if active_tag and not c.endswith(f"</{active_tag}>"):
+            c = c + f"</{active_tag}>"
+            
+        fixed_out.append(c)
+        
+    return fixed_out or ([text.strip()] if text.strip() else [])
