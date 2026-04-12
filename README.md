@@ -5,12 +5,10 @@ Hebrew Text-to-Speech inference using ONNX Runtime with optional TensorRT accele
 ## ✨ Demo
 
 <p align="center">
-
-[![🤗 Try Live Demo](https://img.shields.io/badge/🤗%20Hugging%20Face-Try%20Live%20Demo-FFD21E?style=for-the-badge)](https://huggingface.co/spaces/notmax123/Blue)
-[![🌐 Website](https://img.shields.io/badge/🌐%20Website-lightbluetts.com-2563EB?style=for-the-badge)](https://lightbluetts.com/)
-
+  <a href="https://huggingface.co/spaces/notmax123/Blue"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Try%20Live%20Demo-FFD21E?style=for-the-badge" alt="Try Live Demo on Hugging Face"></a>
+  &nbsp;
+  <a href="https://lightbluetts.com/"><img src="https://img.shields.io/badge/%F0%9F%8C%90%20Website-lightbluetts.com-2563EB?style=for-the-badge" alt="lightbluetts.com"></a>
 </p>
-
 <p align="center">🎙️ Human-sounding TTS in <b>Hebrew</b>, <b>English</b>, <b>Spanish</b>, <b>Italian</b> &amp; <b>German</b> — try samples and the live demo on the site.</p>
 
 ## Installation
