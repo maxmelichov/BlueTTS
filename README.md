@@ -27,26 +27,22 @@ uv sync --extra gpu
 
 ## Download Models
 
-You need to download the ONNX models and the Hebrew G2P model (`renikud`). We use the `hf` CLI (included in dependencies) to download from Hugging Face.
-
 ```bash
-# 1. Download Blue ONNX models
-uv run hf download notmax123/blue-onnx --repo-type model --local-dir ./onnx_models
-
-# 2. Download Hebrew G2P ONNX model (Optinal)
-wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
+uv run hf download notmax123/blue-onnx --repo-type model --local-dir ./onnx_models \
+  --exclude "voices/all_voices/**"
 ```
 
-*(Optional)* If you want to create new voices (extract latent mean/std), download the PyTorch weights and the multilingual stats:
+Optional:
 
-```bash
-uv sync --extra export
-uv run hf download notmax123/blue --repo-type model --local-dir ./pt_models
-```
+- Hebrew G2P: `wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx`
+- [2000+ voice JSONs](https://huggingface.co/notmax123/blue-onnx/tree/main/voices/all_voices):  
+  `uv run hf download notmax123/blue-onnx voices/all_voices/ --repo-type model --local-dir ./onnx_models`
+- PyTorch weights (export new voices): `uv sync --extra export` then  
+  `uv run hf download notmax123/blue --repo-type model --local-dir ./pt_models`
 
 ## Usage
 
-There are **2000+** voice styles in `voices/all_voices/` (see `manifest.tsv` to browse them). Pass any of the `*.json` files there as `style_json`.
+Examples use `voices/female1.json` from this repo. After the optional voice download, use paths under `onnx_models/voices/all_voices/` (`manifest.tsv` lists them).
 
 Here is a basic example of how to use `BlueTTS` in Python:
 

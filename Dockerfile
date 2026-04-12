@@ -1,7 +1,10 @@
 # Before building:
 #
 #   1. Download model weights (from repo root):
-#      uv run hf download notmax123/blue-onnx --repo-type model --local-dir ./onnx_models
+#      uv run hf download notmax123/blue-onnx --repo-type model --local-dir ./onnx_models \
+#          --exclude "voices/all_voices/**"
+#      optional 2000+ voices: uv run hf download notmax123/blue-onnx voices/all_voices/ \
+#          --repo-type model --local-dir ./onnx_models
 #      wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
 #      (voices/ and config/tts.json ship with this repo)
 #
