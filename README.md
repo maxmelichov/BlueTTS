@@ -34,11 +34,18 @@ uv run hf download notmax123/blue-onnx --repo-type model --local-dir ./onnx_mode
 
 Optional:
 
-- Hebrew G2P: `wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx`
-- [2000+ voice JSONs](https://huggingface.co/notmax123/blue-onnx/tree/main/voices/all_voices):  
-  `uv run hf download notmax123/blue-onnx voices/all_voices/ --repo-type model --local-dir ./onnx_models`
-- PyTorch weights (export new voices): `uv sync --extra export` then  
-  `uv run hf download notmax123/blue --repo-type model --local-dir ./pt_models`
+- Hebrew G2P: 
+  ```bash
+  wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
+  ```
+- [2000+ voice JSONs](https://huggingface.co/notmax123/blue-onnx/tree/main/voices/all_voices):
+  ```bash
+  uv run hf download notmax123/blue-onnx voices/all_voices/ --repo-type model --local-dir ./onnx_models
+  ```
+- PyTorch weights (export new voices): `uv sync --extra export` then
+  ```bash
+  uv run hf download notmax123/blue --repo-type model --local-dir ./pt_models
+  ```
 
 ## Usage
 
