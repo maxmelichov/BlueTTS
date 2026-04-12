@@ -124,6 +124,10 @@ uv run python scripts/create_tensorrt.py \
 }
 ```
 
+## Acknowledgments
+
+This project uses [renikud](https://github.com/thewh1teagle/renikud) for Hebrew G2P. Special thanks to [thewh1teagle](https://github.com/thewh1teagle) for his work on Hebrew phonemization.
+
 ## License
 
 MIT

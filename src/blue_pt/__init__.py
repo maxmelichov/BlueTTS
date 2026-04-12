@@ -46,7 +46,7 @@ class BlueTTS:
         text2latent_ckpt: Optional[str] = None,
         ae_ckpt: Optional[str] = None,
         dp_ckpt: Optional[str] = None,
-        phonikud_path: Optional[str] = None,
+        renikud_path: Optional[str] = None,
     ):
         self.weights_dir = weights_dir
         self.style_json = style_json
@@ -59,10 +59,16 @@ class BlueTTS:
         self.silence_sec = silence_sec
         self.fade_duration = fade_duration
 
+        if renikud_path is None:
+            if os.path.exists("model.onnx"):
+                renikud_path = "model.onnx"
+            elif os.path.exists(os.path.join(weights_dir, "model.onnx")):
+                renikud_path = os.path.join(weights_dir, "model.onnx")
+
         self._load_config(config_path)
         self._load_models(text2latent_ckpt, ae_ckpt, dp_ckpt)
         self._load_stats()
-        self._text_proc = TextProcessor(phonikud_path)
+        self._text_proc = TextProcessor(renikud_path)
 
     # ------------------------------------------------------------------
     # Setup
