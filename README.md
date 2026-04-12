@@ -53,6 +53,8 @@ uv run hf download notmax123/blue --repo-type model --local-dir ./pt_models
 
 ## Usage
 
+There are **2000+** voice styles in `voices/all_voices/` (see `manifest.tsv` to browse them). Pass any of the `*.json` files there as `style_json`.
+
 Here is a basic example of how to use `BlueTTS` in Python:
 
 ```python
