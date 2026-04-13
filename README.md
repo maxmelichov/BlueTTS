@@ -15,7 +15,13 @@ Text-to-Speech inference using ONNX Runtime with optional TensorRT acceleration.
 
 ## Installation
 
-Install the core dependencies:
+From PyPI:
+
+```bash
+pip install blue-onnx
+```
+
+Install the core dependencies (from this repo):
 
 ```bash
 uv sync
