@@ -1,16 +1,11 @@
 import os
 import re
 import subprocess
-import sys
 from importlib import import_module
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
-_here = os.path.dirname(os.path.abspath(__file__))
-if _here not in sys.path:
-    sys.path.insert(0, _here)
-
-from _blue_vocab import LANG_CODE_ALIASES, LANG_ID, normalize_text  # noqa: E402
+from ._blue_vocab import LANG_CODE_ALIASES, LANG_ID, normalize_text
 
 
 @dataclass

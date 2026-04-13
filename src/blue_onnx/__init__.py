@@ -1,19 +1,13 @@
 import os
 import json
-import sys
 import re
 from typing import List, Optional, Tuple
 
 import numpy as np
 import onnxruntime as ort
 
-_src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _src not in sys.path:
-    sys.path.insert(0, _src)
-
-from _blue_vocab import text_to_indices, text_to_indices_multilang
-from _common import Style, TextProcessor, chunk_text  # noqa: E402
-del _src
+from ._blue_vocab import text_to_indices, text_to_indices_multilang
+from ._common import Style, TextProcessor, chunk_text
 
 
 class BlueTTS:
