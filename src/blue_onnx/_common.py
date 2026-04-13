@@ -181,6 +181,10 @@ def _hard_split_chunk(s: str, max_len: int) -> List[str]:
 
 def chunk_text(text: str, max_len: int = 300) -> List[str]:
     """Split text into sentence-boundary chunks no longer than max_len chars."""
+    # Ensure sentence endings right before a closing tag are treated as paragraph boundaries
+    # so they don't get merged with the next language's sentence.
+    text = re.sub(r"([.!?])(</[a-z]{2,8}>)\s+", r"\1\2\n\n", text)
+
     pattern = (
         r"(?<!Mr\.)(?<!Mrs\.)(?<!Ms\.)(?<!Dr\.)(?<!Prof\.)(?<!Sr\.)(?<!Jr\.)"
         r"(?<!Ph\.D\.)(?<!etc\.)(?<!e\.g\.)(?<!i\.e\.)(?<!vs\.)(?<!Inc\.)"
