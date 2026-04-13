@@ -125,7 +125,7 @@ wheels = [
 ]
 
 [[package]]
-name = "blue"
+name = "blue-onnx"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
