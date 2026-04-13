@@ -1,5 +1,4 @@
 import os
-import sys
 import json
 import re
 from typing import Optional, Tuple
@@ -7,13 +6,8 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 
-_src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _src not in sys.path:
-    sys.path.insert(0, _src)
-
-from _blue_vocab import text_to_indices, text_to_indices_multilang
-from _common import Style, TextProcessor, chunk_text  # noqa: E402
-del _src
+from blue_onnx._blue_vocab import text_to_indices, text_to_indices_multilang
+from blue_onnx._common import Style, TextProcessor, chunk_text
 
 # Resolve training models relative to repo root
 _HERE = os.path.dirname(os.path.abspath(__file__))
