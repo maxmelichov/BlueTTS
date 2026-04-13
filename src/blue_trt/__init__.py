@@ -1,6 +1,5 @@
 import os
 import json
-import sys
 import re
 from typing import Dict, List, Optional, Tuple
 
@@ -8,13 +7,8 @@ import numpy as np
 import torch
 import tensorrt as trt
 
-_src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _src not in sys.path:
-    sys.path.insert(0, _src)
-
-from _blue_vocab import text_to_indices, text_to_indices_multilang
-from _common import Style, TextProcessor, chunk_text  # noqa: E402
-del _src
+from blue_onnx._blue_vocab import text_to_indices, text_to_indices_multilang
+from blue_onnx._common import Style, TextProcessor, chunk_text
 
 
 # ─── TRT logger (module-level singleton) ──────────────────────────────────────
