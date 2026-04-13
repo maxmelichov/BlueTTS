@@ -1,6 +1,6 @@
 # Blue
 
-Hebrew Text-to-Speech inference using ONNX Runtime with optional TensorRT acceleration.
+Text-to-Speech inference using ONNX Runtime with optional TensorRT acceleration.
 
 ## ✨ Demo
 
