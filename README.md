@@ -5,6 +5,8 @@ Text-to-Speech inference using ONNX Runtime with optional TensorRT acceleration.
 ## ✨ Demo
 
 <p align="center">
+  <a href="https://pypi.org/project/blue-onnx/"><img src="https://img.shields.io/pypi/v/blue-onnx?style=for-the-badge&amp;label=PyPI" alt="PyPI version"></a>
+  &nbsp;
   <a href="https://huggingface.co/spaces/notmax123/Blue"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Try%20Live%20Demo-FFD21E?style=for-the-badge" alt="Try Live Demo on Hugging Face"></a>
   &nbsp;
   <a href="https://lightbluetts.com/"><img src="https://img.shields.io/badge/%F0%9F%8C%90%20Website-lightbluetts.com-2563EB?style=for-the-badge" alt="lightbluetts.com"></a>
