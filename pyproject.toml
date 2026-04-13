@@ -1,5 +1,5 @@
 [project]
-name = "blue"
+name = "blue-onnx"
 version = "0.1.0"
 description = "Hebrew Text-to-Speech inference using ONNX and TensorRT"
 license = "MIT"
