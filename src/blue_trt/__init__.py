@@ -7,8 +7,8 @@ import numpy as np
 import torch
 import tensorrt as trt
 
-from blue_onnx._blue_vocab import text_to_indices, text_to_indices_multilang
-from blue_onnx._common import Style, TextProcessor, chunk_text
+from .._blue_vocab import text_to_indices, text_to_indices_multilang
+from .._common import BLUE_SYNTH_MAX_CHUNK_LEN, Style, TextProcessor, chunk_text
 
 
 # ─── TRT logger (module-level singleton) ──────────────────────────────────────
@@ -109,10 +109,11 @@ class BlueTRT:
         cfg_scale: float = 3.0,
         speed: float = 1.0,
         seed: int = 42,
-        chunk_len: int = 150,
+        chunk_len: int = BLUE_SYNTH_MAX_CHUNK_LEN,
         silence_sec: float = 0.15,
         fade_duration: float = 0.02,
         renikud_path: Optional[str] = None,
+        renikud_max_clause_chars: int = 96,
         device: str = "cuda",
     ):
         self.trt_dir = trt_dir
@@ -121,7 +122,7 @@ class BlueTRT:
         self.cfg_scale = cfg_scale
         self.speed = speed
         self.seed = seed
-        self.chunk_len = chunk_len
+        self.chunk_len = min(max(1, chunk_len), BLUE_SYNTH_MAX_CHUNK_LEN)
         self.silence_sec = silence_sec
         self.fade_duration = fade_duration
         self.device = device
@@ -136,7 +137,7 @@ class BlueTRT:
         self._init_engines()
         self._load_stats()
         self._load_uncond()
-        self._text_proc = TextProcessor(renikud_path)
+        self._text_proc = TextProcessor(renikud_path, renikud_max_clause_chars=renikud_max_clause_chars)
 
     # ------------------------------------------------------------------
     # Setup
