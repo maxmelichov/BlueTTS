@@ -6,8 +6,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 import onnxruntime as ort
 
-from ._blue_vocab import text_to_indices, text_to_indices_multilang
-from ._common import Style, TextProcessor, chunk_text
+from .._blue_vocab import text_to_indices, text_to_indices_multilang
+from .._common import BLUE_SYNTH_MAX_CHUNK_LEN, Style, TextProcessor, chunk_text
 
 
 class BlueTTS:
@@ -21,10 +21,11 @@ class BlueTTS:
         speed: float = 1.0,
         seed: int = 42,
         use_gpu: bool = False,
-        chunk_len: int = 150,
+        chunk_len: int = BLUE_SYNTH_MAX_CHUNK_LEN,
         silence_sec: float = 0.15,
         fade_duration: float = 0.02,
         renikud_path: Optional[str] = None,
+        renikud_max_clause_chars: int = 96,
     ):
         self.onnx_dir = onnx_dir
         self.style_json = style_json
@@ -32,7 +33,7 @@ class BlueTTS:
         self.cfg_scale = cfg_scale
         self.speed = speed
         self.seed = seed
-        self.chunk_len = chunk_len
+        self.chunk_len = min(max(1, chunk_len), BLUE_SYNTH_MAX_CHUNK_LEN)
         self.silence_sec = silence_sec
         self.fade_duration = fade_duration
 
@@ -47,7 +48,7 @@ class BlueTTS:
         self._load_stats()
         self._load_uncond()
         self._load_shuffle_keys()
-        self._text_proc = TextProcessor(renikud_path)
+        self._text_proc = TextProcessor(renikud_path, renikud_max_clause_chars=renikud_max_clause_chars)
 
     # ------------------------------------------------------------------
     # Setup

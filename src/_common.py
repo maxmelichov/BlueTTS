@@ -7,6 +7,9 @@ from typing import Any, List, Optional
 
 from ._blue_vocab import LANG_CODE_ALIASES, LANG_ID, normalize_text
 
+# Max IPA characters per synthesis forward pass (ONNX / TRT). Independent of Renikud clause splitting.
+BLUE_SYNTH_MAX_CHUNK_LEN = 150
+
 
 @dataclass
 class Style:
@@ -30,8 +33,15 @@ class TextProcessor:
         "wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx"
     )
 
-    def __init__(self, renikud_path: Optional[str] = None):
+    def __init__(
+        self,
+        renikud_path: Optional[str] = None,
+        *,
+        renikud_max_clause_chars: int = 96,
+    ):
+        """renikud_max_clause_chars: only for Hebrew pre-G2P oversize handling; does not affect synthesis chunk_len."""
         self.renikud = None
+        self._renikud_max_clause_chars = renikud_max_clause_chars
         if renikud_path is None and os.path.exists("model.onnx"):
             renikud_path = "model.onnx"
             
@@ -103,7 +113,13 @@ class TextProcessor:
         if has_hebrew:
             if self.renikud is None:
                 raise self._hebrew_requires_renikud_error()
-            return normalize_text(self.renikud.phonemize(content), lang="he")
+            clauses = _split_hebrew_prephoneme(content, self._renikud_max_clause_chars)
+            ipa_parts = [
+                normalize_text(self.renikud.phonemize(c), lang="he")
+                for c in clauses
+                if c.strip()
+            ]
+            return re.sub(r"\s+", " ", " ".join(ipa_parts)).strip()
         if lang == "he":
             return normalize_text(content, lang="he")
         return self._espeak_phonemize(content, lang)
@@ -145,8 +161,13 @@ class TextProcessor:
                 return normalize_text(text, lang="he")
 
             if self.renikud is not None:
-                ipa = self.renikud.phonemize(text)
-                return normalize_text(ipa, lang="he")
+                clauses = _split_hebrew_prephoneme(text, self._renikud_max_clause_chars)
+                ipa_parts = [
+                    normalize_text(self.renikud.phonemize(c), lang="he")
+                    for c in clauses
+                    if c.strip()
+                ]
+                return re.sub(r"\s+", " ", " ".join(ipa_parts)).strip()
 
             raise self._hebrew_requires_renikud_error()
 
@@ -177,6 +198,74 @@ def _hard_split_chunk(s: str, max_len: int) -> List[str]:
         while start < n and s[start] == " ":
             start += 1
     return out
+
+
+def _split_oversized_hebrew_clause(part: str, max_clause_chars: int) -> List[str]:
+    """Only used when a single sentence is longer than ``max_clause_chars``."""
+    p = part.strip()
+    if not p:
+        return []
+    if len(p) <= max_clause_chars:
+        return [p]
+    # Try coarser sub-boundaries in order; recurse so we only fragment when needed.
+    if re.search(r":\s", p):
+        pieces = [x.strip() for x in re.split(r"(?<=:)\s+", p) if x.strip()]
+        if len(pieces) > 1:
+            out: List[str] = []
+            for x in pieces:
+                out.extend(_split_oversized_hebrew_clause(x, max_clause_chars))
+            return out
+    if re.search(r"[\u0590-\u05ff]-\s+[\u0590-\u05ff]", p):
+        pieces = [x.strip() for x in re.split(r"(?<=[\u0590-\u05ff])-\s+", p) if x.strip()]
+        if len(pieces) > 1:
+            out = []
+            for x in pieces:
+                out.extend(_split_oversized_hebrew_clause(x, max_clause_chars))
+            return out
+    if re.search(r",\s", p):
+        pieces = [x.strip() for x in re.split(r",\s+", p) if x.strip()]
+        if len(pieces) > 1:
+            out = []
+            for x in pieces:
+                out.extend(_split_oversized_hebrew_clause(x, max_clause_chars))
+            return out
+    return _hard_split_chunk(p, max_clause_chars)
+
+
+def _split_hebrew_prephoneme(text: str, max_clause_chars: int = 96) -> List[str]:
+    """Split raw Hebrew before Renikud G2P.
+
+    By default only **sentence boundaries** (``.?!``); colon / hyphen / comma splits run
+    only when one sentence is longer than ``max_clause_chars`` (fewer chunks, still safe
+    for very long sentences).
+    """
+    t = text.strip()
+    if not t:
+        return []
+    t = re.sub(r"\.+", ".", t)
+    t = re.sub(r"\?+", "?", t)
+    t = re.sub(r"!+", "!", t)
+    t = t.replace("…", ".")
+    t = re.sub(r"\s+", " ", t)
+
+    def refine_one(s: str) -> List[str]:
+        s = s.strip()
+        if not s:
+            return []
+        out: List[str] = []
+        for sent in re.split(r"(?<=[.!?])\s+", s):
+            sent = sent.strip()
+            if not sent:
+                continue
+            out.extend(_split_oversized_hebrew_clause(sent, max_clause_chars))
+        return out
+
+    clauses: List[str] = []
+    for block in re.split(r"\n+", t):
+        block = block.strip()
+        if block:
+            clauses.extend(refine_one(block))
+    return clauses if clauses else [t]
 
 
 def chunk_text(text: str, max_len: int = 300) -> List[str]:

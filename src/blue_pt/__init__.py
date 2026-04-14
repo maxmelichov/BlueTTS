@@ -5,9 +5,10 @@ from typing import Optional, Tuple
 
 import numpy as np
 import torch
+import sys
 
-from blue_onnx._blue_vocab import text_to_indices, text_to_indices_multilang
-from blue_onnx._common import Style, TextProcessor, chunk_text
+from .._blue_vocab import text_to_indices, text_to_indices_multilang
+from .._common import BLUE_SYNTH_MAX_CHUNK_LEN, Style, TextProcessor, chunk_text
 
 # Resolve training models relative to repo root
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -34,13 +35,14 @@ class BlueTTS:
         speed: float = 1.0,
         seed: int = 42,
         device: str = "cpu",
-        chunk_len: int = 150,
+        chunk_len: int = BLUE_SYNTH_MAX_CHUNK_LEN,
         silence_sec: float = 0.15,
         fade_duration: float = 0.02,
         text2latent_ckpt: Optional[str] = None,
         ae_ckpt: Optional[str] = None,
         dp_ckpt: Optional[str] = None,
         renikud_path: Optional[str] = None,
+        renikud_max_clause_chars: int = 96,
     ):
         self.weights_dir = weights_dir
         self.style_json = style_json
@@ -49,7 +51,7 @@ class BlueTTS:
         self.speed = speed
         self.seed = seed
         self.device = device
-        self.chunk_len = chunk_len
+        self.chunk_len = min(max(1, chunk_len), BLUE_SYNTH_MAX_CHUNK_LEN)
         self.silence_sec = silence_sec
         self.fade_duration = fade_duration
 
@@ -62,7 +64,7 @@ class BlueTTS:
         self._load_config(config_path)
         self._load_models(text2latent_ckpt, ae_ckpt, dp_ckpt)
         self._load_stats()
-        self._text_proc = TextProcessor(renikud_path)
+        self._text_proc = TextProcessor(renikud_path, renikud_max_clause_chars=renikud_max_clause_chars)
 
     # ------------------------------------------------------------------
     # Setup
