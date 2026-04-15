@@ -1,8 +1,6 @@
 # Blue
 
-Text-to-Speech inference using ONNX Runtime with optional TensorRT acceleration.
-
-## ✨ Demo
+Text-to-speech inference with ONNX Runtime; optional TensorRT acceleration on NVIDIA GPUs.
 
 <p align="center">
   <a href="https://pypi.org/project/blue-onnx/"><img src="https://img.shields.io/pypi/v/blue-onnx?style=for-the-badge&amp;label=PyPI" alt="PyPI version"></a>
@@ -11,36 +9,48 @@ Text-to-Speech inference using ONNX Runtime with optional TensorRT acceleration.
   &nbsp;
   <a href="https://lightbluetts.com/"><img src="https://img.shields.io/badge/%F0%9F%8C%90%20Website-lightbluetts.com-2563EB?style=for-the-badge" alt="lightbluetts.com"></a>
 </p>
-<p align="center">🎙️ Human-sounding TTS in <b>Hebrew</b>, <b>English</b>, <b>Spanish</b>, <b>Italian</b> &amp; <b>German</b> — try samples and the live demo on the site.</p>
 
-## Installation
+<p align="center">Hebrew, English, Spanish, Italian, and German — samples and a live demo on the site and Space above.</p>
 
-From PyPI:
+## Install
+
+**Users (PyPI)**
 
 ```bash
 pip install blue-onnx
 ```
 
-Install the core dependencies (from this repo):
+Optional Intel OpenVINO: `pip install "blue-onnx[openvino]"`, then `pip uninstall onnxruntime` so only the OpenVINO wheel provides `onnxruntime`.
+
+**This repository**
 
 ```bash
+git clone https://github.com/maxmelichov/BlueTTS.git
+cd BlueTTS
 uv sync
 ```
 
-For CUDA (GPU) support:
+Optional extras:
 
 ```bash
-uv sync --extra gpu
+uv sync --extra openvino   # Intel OpenVINO EP (then: uv pip uninstall onnxruntime)
+uv sync --extra gpu        # ONNX Runtime with CUDA
+uv sync --extra tensorrt   # TensorRT path (see below)
+uv sync --extra export     # PyTorch / export tooling
 ```
 
-## Download Models
+OpenVINO is optional. The default environment uses the stock `onnxruntime` CPU wheel. If you add `--extra openvino`, you will have two ONNX Runtime distributions until you remove the stock one so the OpenVINO build owns the `onnxruntime` import: `uv pip uninstall onnxruntime` (same idea with `pip uninstall onnxruntime` after `pip install "blue-onnx[openvino]"`).
+
+## Models
+
+**ONNX bundle** (default voices, excludes the large `all_voices` set):
 
 ```bash
 uv run hf download notmax123/blue-onnx --repo-type model --local-dir ./onnx_models \
   --exclude "voices/all_voices/**"
 ```
 
-Optional:
+**Optional**
 
 - Hebrew G2P: 
   ```bash
@@ -57,13 +67,13 @@ Optional:
 
 ## Usage
 
-Examples use `voices/female1.json` from this repo. After the optional voice download, use paths under `onnx_models/voices/all_voices/` (`manifest.tsv` lists them).
+Examples below use `voices/female1.json` from this repo. If you downloaded `all_voices`, pick paths under `onnx_models/voices/all_voices/` (see `manifest.tsv`).
 
-Here is a basic example of how to use `BlueTTS` in Python:
+## Quick start
 
 ```python
 import soundfile as sf
-from src.blue_onnx import BlueTTS
+from blue_onnx import BlueTTS
 
 tts = BlueTTS(
     onnx_dir="onnx_models",
@@ -71,56 +81,49 @@ tts = BlueTTS(
     renikud_path="model.onnx",
 )
 
-# Single language
 samples, sr = tts.synthesize("שלום, זהו מודל דיבור בעברית.", lang="he")
 sf.write("output.wav", samples, sr)
 
-# Mixed languages
 mixed = "שלום לכולם, <en>welcome to the presentation</en>, <es>espero que lo disfruten</es>."
 samples, sr = tts.synthesize(mixed, lang="he")
 sf.write("mixed_output.wav", samples, sr)
 ```
 
-### Running Examples
+If you are editing **this repo** without installing the package, use `from src.blue_onnx import BlueTTS` (as in `examples/`) or put `src` on `PYTHONPATH`.
 
-You can run the provided example scripts to test the model. Outputs will be saved in the `examples/out/` directory.
+## Examples
+
+Outputs go to `examples/out/` when run from the repo root.
 
 ```bash
-# Generate samples for individual languages
 uv run python examples/hebrew.py
 uv run python examples/english.py
 uv run python examples/spanish.py
 uv run python examples/italian.py
 uv run python examples/german.py
-
-# Generate a mixed-language sample
 uv run python examples/mixed.py
-
-# Run the CLI app
 uv run python examples/app.py --lang en --text "Hello world."
 ```
 
-## TensorRT (NVIDIA GPUs Only)
+## TensorRT (NVIDIA only)
 
-For faster inference on NVIDIA GPUs, you can build TensorRT engines.
-
-1. Install TensorRT dependencies:
+1. Dependencies:
 
 ```bash
 uv sync --extra tensorrt
-uv pip install tensorrt-cu12  # installed separately due to astral-sh/uv#14313
+uv pip install tensorrt-cu12   # separate install; see astral-sh/uv#14313
 ```
 
-2. Build the engines (see `scripts/README.md` for details):
+2. Build engines (details in `scripts/README.md`):
 
 ```bash
 uv run python scripts/create_tensorrt.py \
-  --onnx_dir onnx_models --engine_dir trt_engines --precision fp16 --config config/tts.json
+  --onnx_dir onnx_models --engine_dir trt_engines --precision fp32 --config config/tts.json
 ```
 
-*(Note: The `examples/all_langs_and_mix.py --tensorrt` flag is currently bugged).*
+Note: `examples/all_langs_and_mix.py --tensorrt`
 
-## Papers
+## Citations
 
 ```bibtex
 @ARTICLE{2025arXiv250323108K,
@@ -137,19 +140,19 @@ uv run python scripts/create_tensorrt.py \
   year={2025}
 }
 @misc{yi2025robustttstrainingselfpurifying,
-      title={Robust TTS Training via Self-Purifying Flow Matching for the WildSpoof 2026 TTS Track}, 
+      title={Robust TTS Training via Self-Purifying Flow Matching for the WildSpoof 2026 TTS Track},
       author={June Young Yi and Hyeongju Kim and Juheon Lee},
       year={2025},
       eprint={2512.17293},
       archivePrefix={arXiv},
       primaryClass={cs.SD},
-      url={https://arxiv.org/abs/2512.17293}, 
+      url={https://arxiv.org/abs/2512.17293},
 }
 ```
 
 ## Acknowledgments
 
-This project uses [renikud](https://github.com/thewh1teagle/renikud) for Hebrew G2P. Special thanks to [thewh1teagle](https://github.com/thewh1teagle) for his work on Hebrew phonemization.
+Hebrew G2P uses [renikud](https://github.com/thewh1teagle/renikud). Thanks to [thewh1teagle](https://github.com/thewh1teagle).
 
 ## License
 
