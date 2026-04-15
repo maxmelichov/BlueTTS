@@ -1,6 +1,6 @@
 [project]
 name = "blue-onnx"
-version = "0.2.2"
+version = "0.2.3"
 description = "Hebrew Text-to-Speech inference using ONNX and TensorRT"
 license = "MIT"
 readme = "README.md"
@@ -69,5 +69,12 @@ dev = [
 extraPaths = ["training"]
 
 [build-system]
-requires = ["uv_build>=0.9.13,<0.10.0"]
-build-backend = "uv_build"
+requires = ["hatchling>=1.18.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/blue_onnx"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/_blue_vocab.py" = "blue_onnx/_blue_vocab.py"
+"src/_common.py" = "blue_onnx/_common.py"

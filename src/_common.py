@@ -5,7 +5,10 @@ from importlib import import_module
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
-from ._blue_vocab import LANG_CODE_ALIASES, LANG_ID, normalize_text
+try:
+    from ._blue_vocab import LANG_CODE_ALIASES, LANG_ID, normalize_text
+except ImportError:
+    from _blue_vocab import LANG_CODE_ALIASES, LANG_ID, normalize_text
 
 # Max IPA characters per synthesis forward pass (ONNX / TRT). Independent of Renikud clause splitting.
 BLUE_SYNTH_MAX_CHUNK_LEN = 150

@@ -7,8 +7,8 @@ import numpy as np
 import torch
 import tensorrt as trt
 
-from ..blue_onnx._blue_vocab import text_to_indices, text_to_indices_multilang
-from ..blue_onnx._common import BLUE_SYNTH_MAX_CHUNK_LEN, Style, TextProcessor, chunk_text
+from .._blue_vocab import text_to_indices, text_to_indices_multilang
+from .._common import BLUE_SYNTH_MAX_CHUNK_LEN, Style, TextProcessor, chunk_text
 
 
 # ─── TRT logger (module-level singleton) ──────────────────────────────────────
