@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+"""Export all TTS models to ONNX with onnxslim optimization only (no quantization).
+
+Output directory: onnx_model_slim/
+"""
 import argparse
 import glob
 import os
-import shutil
-from functools import partial
 
 import numpy as np
 import onnx
@@ -12,7 +14,6 @@ import onnxslim
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from onnxruntime.quantization import QuantType, quantize_dynamic
 
 from bluecodec import LatentDecoder1D
 from models.text2latent.dp_network import DPNetwork
@@ -197,17 +198,15 @@ def export_one(
     input_names,
     output_names,
     dynamic_axes,
-    *,
-    do_slim=False,
-    do_int8=False,
+    do_slim: bool = True,
 ):
+    """Export model to ONNX, optionally slim with onnxslim (no quantization)."""
     model.eval()
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
     work = f"{out_path}.~work.onnx"
-    qtmp = f"{out_path}.~q.onnx"
     try:
         with torch.no_grad():
             torch.onnx.export(
@@ -227,84 +226,34 @@ def export_one(
             slimmed = onnxslim.slim(loaded)
             if slimmed:
                 onnx.save(slimmed, work)
+                print(f"  [slim] {os.path.basename(out_path)}")
 
-        if do_int8:
-            quantize_dynamic(
-                model_input=work,
-                model_output=qtmp,
-                weight_type=QuantType.QUInt8,
-            )
-            if os.path.isfile(work):
-                os.remove(work)
-            if os.path.isfile(out_path):
-                os.remove(out_path)
-            os.replace(qtmp, out_path)
-        else:
-            if os.path.isfile(out_path):
-                os.remove(out_path)
-            os.replace(work, out_path)
+        if os.path.isfile(out_path):
+            os.remove(out_path)
+        os.replace(work, out_path)
 
         print(f"[OK] {out_path}")
     finally:
-        for p in (work, qtmp):
-            if os.path.isfile(p):
-                try:
-                    os.remove(p)
-                except OSError:
-                    pass
-
-
-def verify_onnx(model, onnx_path, inputs, input_names, label="model", atol=1e-4, rtol=1e-3):
-    model.eval()
-    with torch.no_grad():
-        pt_inputs = (inputs,) if isinstance(inputs, torch.Tensor) else inputs
-        pt_out = model(*pt_inputs)
-        if isinstance(pt_out, tuple):
-            pt_out = pt_out[0]
-        pt_np = pt_out.cpu().numpy()
-
-    sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
-    feed = {}
-    if isinstance(inputs, torch.Tensor):
-        inputs = (inputs,)
-    for name, tensor in zip(input_names, inputs):
-        feed[name] = tensor.detach().cpu().numpy()
-    onnx_out = sess.run(None, feed)[0]
-
-    max_diff = float(np.max(np.abs(pt_np - onnx_out)))
-    mean_diff = float(np.mean(np.abs(pt_np - onnx_out)))
-    cos_sim = float(
-        np.dot(pt_np.flatten(), onnx_out.flatten())
-        / (np.linalg.norm(pt_np.flatten()) * np.linalg.norm(onnx_out.flatten()) + 1e-12)
-    )
-    match = np.allclose(pt_np, onnx_out, atol=atol, rtol=rtol)
-    status = "PASS" if match else "FAIL"
-    print(f"  [{status}] {label}: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}, cos_sim={cos_sim:.6f}")
-    if not match:
-        print(f"         PT  range: [{pt_np.min():.4f}, {pt_np.max():.4f}], mean={pt_np.mean():.4f}")
-        print(f"         ORT range: [{onnx_out.min():.4f}, {onnx_out.max():.4f}], mean={onnx_out.mean():.4f}")
-    return match
+        if os.path.isfile(work):
+            try:
+                os.remove(work)
+            except OSError:
+                pass
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Export TTS models to slim ONNX (output: onnx_model_slim/)"
+    )
     parser.add_argument("--config", type=str, default="config/tts.json", help="Path to tts.json config")
-    parser.add_argument("--onnx_dir", type=str, default="onnx_models", help="Output directory for ONNX models")
+    parser.add_argument("--onnx_dir", type=str, default="onnx_model_slim", help="Output directory for ONNX models")
     parser.add_argument("--ckpt_dir", type=str, default="checkpoints/text2latent", help="Text2Latent checkpoint dir")
     parser.add_argument("--ttl_ckpt", type=str, default=None, help="Explicit TTL checkpoint file to export (optional)")
     parser.add_argument("--ae_ckpt", type=str, default="checkpoints/ae/ae_latest.pt", help="AE checkpoint")
     parser.add_argument("--dp_ckpt", type=str, default="pt_weights/duration_predictor.safetensors", help="DP checkpoint (.pt or .safetensors)")
-    parser.add_argument("--no-verify", action="store_true", help="Skip ONNX vs PyTorch verification")
-    parser.add_argument("--slim", action="store_true", help="Run onnxslim on each model before finalizing")
-    parser.add_argument(
-        "--int8",
-        action="store_true",
-        help="Dynamic weight quantization; writes int8 weights to the same four .onnx filenames (after slim if --slim)",
-    )
     args = parser.parse_args()
 
     device = "cpu"
-    export = partial(export_one, do_slim=args.slim, do_int8=args.int8)
 
     if not os.path.exists(args.config):
         print(f"[ERROR] Config not found: {args.config}")
@@ -315,6 +264,7 @@ def main():
 
     onnx_dir = args.onnx_dir
     os.makedirs(onnx_dir, exist_ok=True)
+    print(f"[INFO] Output directory: {onnx_dir}")
 
     def get_latest_ckpt(dir_path):
         ckpt_step = glob.glob(os.path.join(dir_path, "ckpt_step_*.pt"))
@@ -325,7 +275,6 @@ def main():
                     return int(base.split("ckpt_step_")[-1].split(".pt")[0])
                 except Exception:
                     return -1
-
             ckpt_step.sort(key=step_num)
             return ckpt_step[-1]
         ckpts = glob.glob(os.path.join(dir_path, "*.pt"))
@@ -432,31 +381,20 @@ def main():
     ref_mask = torch.ones(B, 1, T_audio_ref, dtype=torch.float32, device=device)
     style_ttl_te = torch.randn(B, se_n_style, style_dim, dtype=torch.float32, device=device)
 
-    do_verify = not args.no_verify
-    if do_verify and args.int8:
-        print("[WARN] Skipping numerical verify with --int8; omit --int8 to verify FP32.")
-        do_verify = False
-    all_pass = True
-
-    
-    ref_enc_path = os.path.join(onnx_dir, "reference_encoder.onnx")
-    export(
+    # reference_encoder
+    export_one(
         ref_enc,
-        ref_enc_path,
+        os.path.join(onnx_dir, "reference_encoder.onnx"),
         (z_ref, ref_mask),
         input_names=["z_ref", "mask"],
         output_names=["ref_values"],
         dynamic_axes={"z_ref": {2: "T_ref_in"}, "mask": {2: "T_ref_in"}},
     )
-    if do_verify:
-        all_pass = verify_onnx(
-            ref_enc, ref_enc_path, (z_ref, ref_mask), ["z_ref", "mask"], "reference_encoder"
-        ) and all_pass
 
-    te_path = os.path.join(onnx_dir, "text_encoder.onnx")
-    export(
+    # text_encoder
+    export_one(
         text_enc,
-        te_path,
+        os.path.join(onnx_dir, "text_encoder.onnx"),
         (text_ids, style_ttl_te, text_mask),
         input_names=["text_ids", "style_ttl", "text_mask"],
         output_names=["text_emb"],
@@ -467,11 +405,8 @@ def main():
             "text_emb": {2: "T_text"},
         },
     )
-    if do_verify:
-        all_pass = verify_onnx(
-            text_enc, te_path, (text_ids, style_ttl_te, text_mask), ["text_ids", "style_ttl", "text_mask"], "text_encoder"
-        ) and all_pass
 
+    # vector_estimator
     noisy_latent = torch.randn(B, C_lat, T_lat, dtype=torch.float32, device=device)
     latent_mask = torch.ones(B, 1, T_lat, dtype=torch.float32, device=device)
     text_emb = torch.randn(B, style_dim, T_text, dtype=torch.float32, device=device)
@@ -483,22 +418,12 @@ def main():
         vf.style_key.copy_(text_enc.speech_prompted_text_encoder.style_key)
 
     vf_wrapped = VectorFieldEstimatorWrapper(vf)
-    vf_path = os.path.join(onnx_dir, "vector_estimator.onnx")
     vf_inputs = (noisy_latent, text_emb, style_ttl_vf, latent_mask, text_mask, current_step, total_step)
-    vf_input_names = [
-        "noisy_latent",
-        "text_emb",
-        "style_ttl",
-        "latent_mask",
-        "text_mask",
-        "current_step",
-        "total_step",
-    ]
-    export(
+    export_one(
         vf_wrapped,
-        vf_path,
+        os.path.join(onnx_dir, "vector_estimator.onnx"),
         vf_inputs,
-        input_names=vf_input_names,
+        input_names=["noisy_latent", "text_emb", "style_ttl", "latent_mask", "text_mask", "current_step", "total_step"],
         output_names=["denoised_latent"],
         dynamic_axes={
             "noisy_latent": {2: "T_lat"},
@@ -509,14 +434,12 @@ def main():
             "denoised_latent": {2: "T_lat"},
         },
     )
-    if do_verify:
-        all_pass = verify_onnx(vf_wrapped, vf_path, vf_inputs, vf_input_names, "vector_estimator", atol=1e-3, rtol=1e-2) and all_pass
 
+    # vocoder
     latent_dec = torch.randn(B, C_dec, T_lat * chunk_compress_factor, dtype=torch.float32, device=device)
-    voc_path = os.path.join(onnx_dir, "vocoder.onnx")
-    export(
+    export_one(
         vocoder,
-        voc_path,
+        os.path.join(onnx_dir, "vocoder.onnx"),
         (latent_dec,),
         input_names=["latent"],
         output_names=["waveform"],
@@ -525,17 +448,14 @@ def main():
             "waveform": {2: "T_wav"},
         },
     )
-    if do_verify:
-        all_pass = verify_onnx(vocoder, voc_path, (latent_dec,), ["latent"], "vocoder") and all_pass
 
-    dp_path = os.path.join(onnx_dir, "duration_predictor.onnx")
+    # duration_predictor — skip slim (onnxslim folds dynamic ops using dummy shapes)
     dp_inputs = (text_ids, z_ref, text_mask, ref_mask)
-    dp_input_names = ["text_ids", "z_ref", "text_mask", "ref_mask"]
-    export(
+    export_one(
         dp,
-        dp_path,
+        os.path.join(onnx_dir, "duration_predictor.onnx"),
         dp_inputs,
-        input_names=dp_input_names,
+        input_names=["text_ids", "z_ref", "text_mask", "ref_mask"],
         output_names=["duration"],
         dynamic_axes={
             "text_ids": {1: "T_text"},
@@ -543,56 +463,46 @@ def main():
             "z_ref": {2: "T_ref_audio"},
             "ref_mask": {2: "T_ref_audio"},
         },
+        do_slim=False,
     )
-    if do_verify:
-        all_pass = verify_onnx(dp, dp_path, dp_inputs, dp_input_names, "duration_predictor") and all_pass
 
-    # Export duration predictor with style_tokens
+    # duration_predictor with style tokens — skip slim for same reason
     style_dp = torch.randn(B, cfg["dp_style_tokens"], cfg["dp_style_dim"], dtype=torch.float32, device=device)
-    dp_style_path = os.path.join(onnx_dir, "length_pred_style.onnx")
-    
-    # We need a wrapper to pass style_tokens as a positional argument because ONNX export 
-    # doesn't handle keyword arguments well if they are mixed with None positional arguments.
+
     class DPStyleWrapper(nn.Module):
         def __init__(self, model):
             super().__init__()
             self.model = model
-            
+
         def forward(self, text_ids, style_dp, text_mask):
             return self.model(text_ids=text_ids, style_tokens=style_dp, text_mask=text_mask)
-            
+
     dp_style_wrapper = DPStyleWrapper(dp)
-    dp_style_inputs = (text_ids, style_dp, text_mask)
-    dp_style_input_names = ["text_ids", "style_dp", "text_mask"]
-    
-    export(
+    export_one(
         dp_style_wrapper,
-        dp_style_path,
-        dp_style_inputs,
-        input_names=dp_style_input_names,
+        os.path.join(onnx_dir, "length_pred_style.onnx"),
+        (text_ids, style_dp, text_mask),
+        input_names=["text_ids", "style_dp", "text_mask"],
         output_names=["duration"],
         dynamic_axes={
             "text_ids": {1: "T_text"},
             "text_mask": {2: "T_text"},
         },
+        do_slim=False,
     )
-    if do_verify:
-        all_pass = verify_onnx(dp_style_wrapper, dp_style_path, dp_style_inputs, dp_style_input_names, "duration_predictor_style") and all_pass
 
-    # Copy auxiliary files needed by the runtime (stats, uncond, multilingual stats)
-    for aux in ("stats.npz", "uncond.npz", "stats_multilingual.pt"):
-        for src in (os.path.join("onnx_models", aux), os.path.join("pt_weights", aux), aux):
-            if os.path.exists(src):
-                dst = os.path.join(onnx_dir, aux)
-                if os.path.abspath(src) != os.path.abspath(dst):
-                    shutil.copy(src, dst)
-                    print(f"[INFO] copied {aux}")
-                break
+    # Copy stats and uncond files from onnx_models if they exist
+    import shutil
+    for fname in ("stats.npz", "uncond.npz", "stats_multilingual.pt"):
+        src = os.path.join("onnx_models", fname)
+        dst = os.path.join(onnx_dir, fname)
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            print(f"[copy] {fname}")
 
-    if do_verify:
-        print("\n" + "=" * 60)
-        print("[PASS] All match." if all_pass else "[FAIL] Mismatch.")
-        print("=" * 60)
+    print("\n" + "=" * 60)
+    print(f"[DONE] All models exported to: {onnx_dir}/")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,8 @@ dependencies = [
     "renikud-onnx",
     "phonemizer-fork>=3.3.2",
     "espeakng-loader>=0.2.4",
+    "onnx>=1.20.1",
+    "onnxslim>=0.1.90",
 ]
 
 [project.optional-dependencies]
