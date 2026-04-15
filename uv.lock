@@ -179,7 +179,7 @@ requires-dist = [
     { name = "onnx", specifier = ">=1.20.1" },
     { name = "onnx", marker = "extra == 'export'", specifier = ">=1.17.0" },
     { name = "onnxruntime" },
-    { name = "onnxruntime-gpu", marker = "extra == 'gpu'" },
+    { name = "onnxruntime-gpu", marker = "extra == 'gpu'", specifier = ">=1.24.0" },
     { name = "onnxruntime-openvino", marker = "extra == 'openvino'", specifier = ">=1.24.0" },
     { name = "onnxslim", specifier = ">=0.1.90" },
     { name = "onnxslim", marker = "extra == 'export'", specifier = ">=0.1.0" },

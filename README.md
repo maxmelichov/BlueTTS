@@ -20,7 +20,10 @@ Text-to-speech inference with ONNX Runtime; optional TensorRT acceleration on NV
 pip install blue-onnx
 ```
 
-Optional Intel OpenVINO: `pip install "blue-onnx[openvino]"`, then `pip uninstall onnxruntime` so only the OpenVINO wheel provides `onnxruntime`.
+Optional accelerators (PyPI): install the extra, then drop the stock CPU wheel so a single build owns `onnxruntime`:
+
+- Intel OpenVINO: `pip install "blue-onnx[openvino]"` then `pip uninstall onnxruntime`
+- NVIDIA CUDA: `pip install "blue-onnx[gpu]"` then `pip uninstall onnxruntime`
 
 **This repository**
 
@@ -34,12 +37,12 @@ Optional extras:
 
 ```bash
 uv sync --extra openvino   # Intel OpenVINO EP (then: uv pip uninstall onnxruntime)
-uv sync --extra gpu        # ONNX Runtime with CUDA
+uv sync --extra gpu        # NVIDIA CUDA ORT (then: uv pip uninstall onnxruntime)
 uv sync --extra tensorrt   # TensorRT path (see below)
 uv sync --extra export     # PyTorch / export tooling
 ```
 
-OpenVINO is optional. The default environment uses the stock `onnxruntime` CPU wheel. If you add `--extra openvino`, you will have two ONNX Runtime distributions until you remove the stock one so the OpenVINO build owns the `onnxruntime` import: `uv pip uninstall onnxruntime` (same idea with `pip uninstall onnxruntime` after `pip install "blue-onnx[openvino]"`).
+The default environment uses the stock `onnxruntime` CPU wheel. **OpenVINO** and **CUDA (`gpu`)** are optional; each adds a second ONNX Runtime distribution until you remove the stock CPU wheel so the accelerator build owns the `onnxruntime` import (`uv pip uninstall onnxruntime`, or the same with `pip` after a PyPI install with `[openvino]` or `[gpu]`). Do not combine the `openvino` and `gpu` extras.
 
 ## Models
 
