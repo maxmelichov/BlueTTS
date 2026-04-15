@@ -1,6 +1,6 @@
 [project]
 name = "blue-onnx"
-version = "0.1.1"
+version = "0.2.1"
 description = "Hebrew Text-to-Speech inference using ONNX and TensorRT"
 license = "MIT"
 readme = "README.md"
@@ -18,12 +18,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Intel OpenVINO EP (optional). After `uv sync --extra openvino` / `pip install "blue-onnx[openvino]"`, uninstall the
+# stock CPU wheel so only one package provides `onnxruntime`: `uv pip uninstall onnxruntime` / `pip uninstall onnxruntime`.
+# Linux wheels bundle OpenVINO; on Windows also install the `openvino` PyPI package per Intel docs.
+openvino = [
+    "onnxruntime-openvino>=1.24.0",
+]
 gpu = [
     "onnxruntime-gpu",
 ]
-
-# PyPI `tensorrt` defaults to CUDA 13 wheels; most driver stacks still report CUDA 12.x.
-# Use `tensorrt-cu13` instead if your driver/toolkit is CUDA 13+.
 tensorrt = [
     # "tensorrt-cu12; sys_platform == 'linux'",  # see astral-sh/uv#14313
     "torch>=2.1.0",
@@ -41,9 +44,21 @@ export = [
 [tool.uv]
 # Repo is scripts + src packages, not a single importable `blue` package tree (avoids uv_build errors).
 package = false
+# Default `onnxruntime` and `onnxruntime-gpu` / `onnxruntime-openvino` are mutually exclusive at import time.
+conflicts = [
+    [
+        { extra = "openvino" },
+        { extra = "gpu" },
+    ],
+]
 
 [tool.uv.sources]
 bluecodec = { git = "https://github.com/maxmelichov/blue-codec.git" }
+
+[dependency-groups]
+dev = [
+    "ruff",
+]
 
 [tool.pyright]
 # `models.*` lives under training/; same layout as PYTHONPATH=training for scripts/export_onnx.py
@@ -52,7 +67,3 @@ extraPaths = ["training"]
 [build-system]
 requires = ["uv_build>=0.9.13,<0.10.0"]
 build-backend = "uv_build"
-
-dev = [
-    "ruff",
-]
