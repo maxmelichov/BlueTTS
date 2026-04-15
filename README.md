@@ -14,6 +14,8 @@ Text-to-speech inference with ONNX Runtime; optional TensorRT acceleration on NV
 
 ## Install
 
+Requires **Python 3.12+** (see `requires-python` in `pyproject.toml`).
+
 **Users (PyPI)**
 
 ```bash
@@ -46,12 +48,14 @@ The default environment uses the stock `onnxruntime` CPU wheel. **OpenVINO** and
 
 ## Models
 
-**ONNX bundle** (default voices, excludes the large `all_voices` set):
+**ONNX bundle** (model weights; excludes the large `all_voices` tree on the Hub):
 
 ```bash
 uv run hf download notmax123/blue-onnx --repo-type model --local-dir ./onnx_models \
   --exclude "voices/all_voices/**"
 ```
+
+That download does **not** include small **voice JSON** files such as `voices/female1.json`. Copy the `voices/` directory from **this repository** (or browse it on [GitHub](https://github.com/maxmelichov/BlueTTS/tree/main/voices)) next to your working directory so paths like `voices/female1.json` resolve. If you use `pip` without `uv`, the same CLI is available after install because `blue-onnx` depends on `huggingface-hub` — run `hf download ...` with the same arguments.
 
 **Optional**
 
