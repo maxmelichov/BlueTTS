@@ -24,8 +24,10 @@ dependencies = [
 openvino = [
     "onnxruntime-openvino>=1.24.0",
 ]
+# NVIDIA CUDA build of ONNX Runtime (optional). Same as OpenVINO: remove the stock CPU wheel after install
+# so only one distribution provides `onnxruntime`: `uv pip uninstall onnxruntime` / `pip uninstall onnxruntime`.
 gpu = [
-    "onnxruntime-gpu",
+    "onnxruntime-gpu>=1.24.0",
 ]
 tensorrt = [
     # "tensorrt-cu12; sys_platform == 'linux'",  # see astral-sh/uv#14313
@@ -44,6 +46,8 @@ export = [
 [tool.uv]
 # Repo is scripts + src packages, not a single importable `blue` package tree (avoids uv_build errors).
 package = false
+# Do not install `[dependency-groups] dev` on every `uv sync` (matches behavior before a proper `dev` group existed).
+default-groups = []
 # Default `onnxruntime` and `onnxruntime-gpu` / `onnxruntime-openvino` are mutually exclusive at import time.
 conflicts = [
     [
