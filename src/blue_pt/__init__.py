@@ -7,8 +7,8 @@ import numpy as np
 import torch
 import sys
 
-from ..blue_onnx._blue_vocab import text_to_indices, text_to_indices_multilang
-from ..blue_onnx._common import BLUE_SYNTH_MAX_CHUNK_LEN, Style, TextProcessor, chunk_text
+from .._blue_vocab import text_to_indices, text_to_indices_multilang
+from .._common import BLUE_SYNTH_MAX_CHUNK_LEN, Style, TextProcessor, chunk_text
 
 # Resolve training models relative to repo root
 _HERE = os.path.dirname(os.path.abspath(__file__))
