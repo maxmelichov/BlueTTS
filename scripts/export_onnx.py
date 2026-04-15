@@ -2,6 +2,7 @@
 import argparse
 import glob
 import os
+import shutil
 from functools import partial
 
 import numpy as np
@@ -287,12 +288,12 @@ def verify_onnx(model, onnx_path, inputs, input_names, label="model", atol=1e-4,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/tts.json", help="Path to tts.json config")
+    parser.add_argument("--config", type=str, default="config/tts.json", help="Path to tts.json config")
     parser.add_argument("--onnx_dir", type=str, default="onnx_models", help="Output directory for ONNX models")
     parser.add_argument("--ckpt_dir", type=str, default="checkpoints/text2latent", help="Text2Latent checkpoint dir")
     parser.add_argument("--ttl_ckpt", type=str, default=None, help="Explicit TTL checkpoint file to export (optional)")
     parser.add_argument("--ae_ckpt", type=str, default="checkpoints/ae/ae_latest.pt", help="AE checkpoint")
-    parser.add_argument("--dp_ckpt", type=str, default="checkpoints/duration_predictor/duration_predictor_final.pt", help="DP checkpoint")
+    parser.add_argument("--dp_ckpt", type=str, default="pt_weights/duration_predictor.safetensors", help="DP checkpoint (.pt or .safetensors)")
     parser.add_argument("--no-verify", action="store_true", help="Skip ONNX vs PyTorch verification")
     parser.add_argument("--slim", action="store_true", help="Run onnxslim on each model before finalizing")
     parser.add_argument(
@@ -400,9 +401,13 @@ def main():
 
     dp_ckpt_path = args.dp_ckpt
     if os.path.exists(dp_ckpt_path):
-        dp_state = torch.load(dp_ckpt_path, map_location=device)
-        if isinstance(dp_state, dict) and "state_dict" in dp_state:
-            dp_state = dp_state["state_dict"]
+        if dp_ckpt_path.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            dp_state = load_file(dp_ckpt_path, device=device)
+        else:
+            dp_state = torch.load(dp_ckpt_path, map_location=device)
+            if isinstance(dp_state, dict) and "state_dict" in dp_state:
+                dp_state = dp_state["state_dict"]
         dp.load_state_dict(dp_state, strict=False)
     elif "dp_network" in t2l_state:
         dp.load_state_dict(t2l_state["dp_network"], strict=True)
@@ -573,6 +578,16 @@ def main():
     )
     if do_verify:
         all_pass = verify_onnx(dp_style_wrapper, dp_style_path, dp_style_inputs, dp_style_input_names, "duration_predictor_style") and all_pass
+
+    # Copy auxiliary files needed by the runtime (stats, uncond, multilingual stats)
+    for aux in ("stats.npz", "uncond.npz", "stats_multilingual.pt"):
+        for src in (os.path.join("onnx_models", aux), os.path.join("pt_weights", aux), aux):
+            if os.path.exists(src):
+                dst = os.path.join(onnx_dir, aux)
+                if os.path.abspath(src) != os.path.abspath(dst):
+                    shutil.copy(src, dst)
+                    print(f"[INFO] copied {aux}")
+                break
 
     if do_verify:
         print("\n" + "=" * 60)
