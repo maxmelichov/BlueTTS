@@ -5,10 +5,13 @@ if "CUDA_VISIBLE_DEVICES" not in os.environ:
 import sys
 import logging
 import argparse
-import numpy as np
-import tensorrt as trt
 
-from scripts.utils import load_ttl_config
+# Allow `uv run python scripts/create_tensorrt.py` from the repository root.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from scripts.utils import load_ttl_config  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("EngineBuilder")
@@ -24,6 +27,9 @@ class EngineBuilder:
         :param workspace: Max memory workspace to allow, in GB. Increased for maximum optimization.
         :param cfg: Optional dict from load_ttl_config() for profile shape heuristics.
         """
+        import tensorrt as trt
+
+        self._trt = trt
         self.trt_logger = trt.Logger(trt.Logger.INFO)
         if verbose:
             self.trt_logger.min_severity = trt.Logger.Severity.VERBOSE
@@ -49,7 +55,7 @@ class EngineBuilder:
         :param onnx_path: The path to the ONNX graph to load.
         """
         self.network = self.builder.create_network(1)
-        self.parser = trt.OnnxParser(self.network, self.trt_logger)
+        self.parser = self._trt.OnnxParser(self.network, self.trt_logger)
 
         onnx_path = os.path.realpath(onnx_path)
         with open(onnx_path, "rb") as f:
@@ -84,7 +90,6 @@ class EngineBuilder:
 
         # Config-derived dimensions for better heuristics
         se_n_style = self.cfg["se_n_style"] if self.cfg else 50
-        ccf = self.cfg["chunk_compress_factor"] if self.cfg else 6
 
         for i in range(self.network.num_inputs):
             input_tensor = self.network.get_input(i)
@@ -162,13 +167,13 @@ class EngineBuilder:
         if precision == "fp16":
             if not self.builder.platform_has_fast_fp16:
                 log.warning("FP16 is not supported natively on this platform/device")
-            self.config.set_flag(trt.BuilderFlag.FP16)
+            self.config.set_flag(self._trt.BuilderFlag.FP16)
         
         if use_int8:
             if not self.builder.platform_has_fast_int8:
                 log.warning("INT8 is not supported natively on this platform/device")
             else:
-                self.config.set_flag(trt.BuilderFlag.INT8)
+                self.config.set_flag(self._trt.BuilderFlag.INT8)
 
         # Set optimization profile for dynamic shapes
         self.set_profile()
