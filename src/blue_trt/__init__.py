@@ -347,7 +347,9 @@ class BlueTRT:
         if "ref_keys"   in te_in: te_feed["ref_keys"]   = ref_keys
 
         te_out   = self._text_enc.run(te_feed)
-        text_emb = te_out.get("text_emb") or next(iter(te_out.values()))
+        text_emb = te_out.get("text_emb")
+        if text_emb is None:
+            text_emb = next(iter(te_out.values()))
 
         # Duration
         T_lat = self._predict_duration(ids_dp, mask_dp, z_ref_norm, style_dp)
@@ -437,21 +439,28 @@ class BlueTRT:
             u_text_mask = torch.ones(1, 1, 1, dtype=torch.float32, device=self.device)
 
         for s in range(self.steps):
+            t_val = np.array([float(s)], dtype=np.float32)
+            total_t = np.array([float(self.steps)], dtype=np.float32)
+            
             feed_cond = self._vf_feed(x, text_emb, ref_values, text_mask, latent_mask, s)
+            feed_cond["current_step"] = torch.from_numpy(t_val).to(self.device)
+            feed_cond["total_step"] = torch.from_numpy(total_t).to(self.device)
             out_cond  = self._vf.run(feed_cond)
 
             if self._vf_has_denoised:
                 cond_next = out_cond["denoised_latent"]
             else:
-                cond_next = x + out_cond["velocity"] / total_t.view(1, 1, 1)
+                cond_next = x + out_cond["velocity"] / total_t.item()
 
             if use_cfg:
                 feed_uncond = self._vf_feed(x, self._u_text, self._u_ref, u_text_mask, latent_mask, s)
+                feed_uncond["current_step"] = torch.from_numpy(t_val).to(self.device)
+                feed_uncond["total_step"] = torch.from_numpy(total_t).to(self.device)
                 out_uncond  = self._vf.run(feed_uncond)
                 if self._vf_has_denoised:
                     uncond_next = out_uncond["denoised_latent"]
                 else:
-                    uncond_next = x + out_uncond["velocity"] / total_t.view(1, 1, 1)
+                    uncond_next = x + out_uncond["velocity"] / total_t.item()
                 x = uncond_next + self.cfg_scale * (cond_next - uncond_next)
             else:
                 x = cond_next
@@ -480,7 +489,9 @@ class BlueTRT:
         )
 
         voc_out = self._vocoder.run({"latent": z_dec})
-        wav = voc_out.get("waveform") or next(iter(voc_out.values()))
+        wav = voc_out.get("waveform")
+        if wav is None:
+            wav = next(iter(voc_out.values()))
 
         # Trim boundary artifacts
         frame_len = self.hop_length * self.chunk_compress_factor
