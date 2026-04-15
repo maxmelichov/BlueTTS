@@ -6,8 +6,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 import onnxruntime as ort
 
-from .._blue_vocab import text_to_indices, text_to_indices_multilang
-from .._common import BLUE_SYNTH_MAX_CHUNK_LEN, Style, TextProcessor, chunk_text
+from ._blue_vocab import text_to_indices, text_to_indices_multilang
+from ._common import BLUE_SYNTH_MAX_CHUNK_LEN, Style, TextProcessor, chunk_text
 
 
 class BlueTTS:

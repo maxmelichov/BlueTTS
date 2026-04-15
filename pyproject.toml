@@ -1,6 +1,6 @@
 [project]
 name = "blue-onnx"
-version = "0.2.1"
+version = "0.2.2"
 description = "Hebrew Text-to-Speech inference using ONNX and TensorRT"
 license = "MIT"
 readme = "README.md"

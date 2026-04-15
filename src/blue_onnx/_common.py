@@ -59,7 +59,7 @@ class TextProcessor:
     def _hebrew_requires_renikud_error(self) -> ValueError:
         return ValueError(
             "Hebrew text requires the Renikud ONNX weights (not bundled with the wheel). "
-            f"Download: https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx\n"
+            "Download: https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx\n"
             "Then pass renikud_path='model.onnx' (or an absolute path) to the TTS class. "
             "The `renikud-onnx` PyPI package is a project dependency."
         )
