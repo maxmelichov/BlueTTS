@@ -5,6 +5,18 @@ import os
 from typing import Any, Dict, Optional
 
 
+def _resolve_vocab_size(char_dict_path: Optional[str], default: int = 384) -> int:
+    """Helper to get vocab size from a char_dict.json file."""
+    if not char_dict_path or not os.path.exists(char_dict_path):
+        return default
+    try:
+        with open(char_dict_path, "r") as f:
+            char_dict = json.load(f)
+        return len(char_dict)
+    except Exception:
+        return default
+
+
 def load_ttl_config(config_path="configs/tts.json"):
     import json
     with open(config_path, "r") as f:
