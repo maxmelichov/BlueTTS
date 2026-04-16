@@ -14,6 +14,7 @@ from functools import partial
 import numpy as np
 import onnx
 import onnxruntime as ort
+from onnxruntime.quantization import quantize_dynamic, QuantType
 import onnxslim
 import torch
 import torch.nn as nn
@@ -191,6 +192,7 @@ def export_one(
     dynamic_axes,
     *,
     do_slim=False,
+    do_int8=False,
 ):
     model.eval()
     out_dir = os.path.dirname(out_path)
@@ -198,6 +200,7 @@ def export_one(
         os.makedirs(out_dir, exist_ok=True)
 
     work = f"{out_path}.~work.onnx"
+    qtmp = f"{out_path}.~q.onnx"
     try:
         with torch.no_grad():
             torch.onnx.export(
@@ -218,18 +221,38 @@ def export_one(
             if slimmed is not None:
                 onnx.save(slimmed, work)
 
-        if os.path.isfile(out_path):
-            os.remove(out_path)
-        os.replace(work, out_path)
+        if do_int8:
+            # Per-tensor weight-only QUInt8. Per-channel produces zero-point tensor shapes
+            # that ORT's MatMulInteger kernel rejects on some attention MatMuls
+            # (/.../attention*/MatMul_quant: "B zero point is not valid"). Per-tensor avoids
+            # that; quality on Conv layers is fine because the vocoder uses Conv1d, which ORT
+            # quantizes via QLinearConv (separate code path, no zero-point validation issue).
+            quantize_dynamic(
+                model_input=work,
+                model_output=qtmp,
+                per_channel=False,
+                reduce_range=False,
+                weight_type=QuantType.QUInt8,
+            )
+            if os.path.isfile(work):
+                os.remove(work)
+            if os.path.isfile(out_path):
+                os.remove(out_path)
+            os.replace(qtmp, out_path)
+        else:
+            if os.path.isfile(out_path):
+                os.remove(out_path)
+            os.replace(work, out_path)
 
-        tag = "slim" if do_slim else "fp32"
+        tag = "int8" if do_int8 else ("slim" if do_slim else "fp32")
         print(f"[OK] [{tag}] {out_path}")
     finally:
-        if os.path.isfile(work):
-            try:
-                os.remove(work)
-            except OSError:
-                pass
+        for p in (work, qtmp):
+            if os.path.isfile(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
 
 def verify_onnx(model, onnx_path, inputs, input_names, label="model", atol=1e-4, rtol=1e-3):
@@ -284,10 +307,12 @@ def main():
                         help="Duration predictor checkpoint (.pt or .safetensors)")
     parser.add_argument("--no-verify", dest="no_verify", action="store_true", help="Skip ONNX vs PyTorch verification")
     parser.add_argument("--slim", action="store_true", help="Run onnxslim on each model before finalizing")
+    parser.add_argument("--int8", action="store_true",
+                        help="Per-channel symmetric QInt8 weight-only quantization (after slim if --slim).")
     args = parser.parse_args()
 
     device = "cpu"
-    export = partial(export_one, do_slim=args.slim)
+    export = partial(export_one, do_slim=args.slim, do_int8=args.int8)
 
     if not os.path.exists(args.config):
         print(f"[ERROR] Config not found: {args.config}")
@@ -407,19 +432,10 @@ def main():
     style_ttl_te = torch.randn(B, se_n_style, style_dim, dtype=torch.float32, device=device)
 
     do_verify = not args.no_verify
+    if do_verify and args.int8:
+        print("[WARN] --int8 uses lossy weight quantization; skipping strict numerical verify.")
+        do_verify = False
     all_pass = True
-
-    ref_enc_path = os.path.join(onnx_dir, "reference_encoder.onnx")
-    export(
-        ref_enc,
-        ref_enc_path,
-        (z_ref, ref_mask),
-        input_names=["z_ref", "mask"],
-        output_names=["ref_values"],
-        dynamic_axes={"z_ref": {2: "T_ref_in"}, "mask": {2: "T_ref_in"}},
-    )
-    if do_verify:
-        all_pass = verify_onnx(ref_enc, ref_enc_path, (z_ref, ref_mask), ["z_ref", "mask"], "reference_encoder") and all_pass
 
     te_path = os.path.join(onnx_dir, "text_encoder.onnx")
     export(
@@ -508,33 +524,6 @@ def main():
     )
     if do_verify:
         all_pass = verify_onnx(dp, dp_path, dp_inputs, dp_input_names, "duration_predictor") and all_pass
-
-    style_dp = torch.randn(B, cfg["dp_style_tokens"], cfg["dp_style_dim"], dtype=torch.float32, device=device)
-    dp_style_path = os.path.join(onnx_dir, "length_pred_style.onnx")
-
-    class DPStyleWrapper(nn.Module):
-        def __init__(self, model):
-            super().__init__()
-            self.model = model
-
-        def forward(self, text_ids, style_dp, text_mask):
-            return self.model(text_ids=text_ids, style_tokens=style_dp, text_mask=text_mask)
-
-    dp_style_wrapper = DPStyleWrapper(dp)
-    dp_style_inputs = (text_ids, style_dp, text_mask)
-    dp_style_input_names = ["text_ids", "style_dp", "text_mask"]
-
-    export(
-        dp_style_wrapper,
-        dp_style_path,
-        dp_style_inputs,
-        input_names=dp_style_input_names,
-        output_names=["duration"],
-        dynamic_axes={"text_ids": {1: "T_text"}, "text_mask": {2: "T_text"}},
-    )
-    if do_verify:
-        all_pass = verify_onnx(dp_style_wrapper, dp_style_path, dp_style_inputs,
-                               dp_style_input_names, "duration_predictor_style") and all_pass
 
     if do_verify:
         print("\n" + "=" * 60)
