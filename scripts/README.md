@@ -23,23 +23,63 @@ cd /path/to/blue
 uv sync --extra export
 ```
 
-**Run:**
+**Default run (HF `pt_weights/` layout — flat `*.safetensors` for codec, flow, and duration predictor):**
+
+```bash
+PYTHONPATH=training uv run python scripts/export_onnx.py \
+  --config config/tts.json \
+  --onnx_dir onnx_models
+```
+
+With those defaults the exporter reads:
+
+- `pt_weights/vf_estimator.safetensors` — combined text2latent (text encoder + reference encoder + flow-matching estimator, flat keys)
+- `pt_weights/blue_codec.safetensors` — autoencoder (the `decoder.*` keys become the vocoder)
+- `pt_weights/duration_predictor.safetensors` — duration predictor
+
+**Run against training-tree checkpoints (legacy nested `.pt`):**
 
 ```bash
 PYTHONPATH=training uv run python scripts/export_onnx.py \
   --config path/to/tts.json \
   --onnx_dir onnx_models \
-  --ckpt_dir training/checkpoints/text2latent \
-  --ae_ckpt training/checkpoints/ae/ae_latest.pt \
-  --dp_ckpt training/checkpoints/duration_predictor/duration_predictor_final.pt
+  --ttl_ckpt training/checkpoints/text2latent/ckpt_step_XXXX.pt \
+  --ae_ckpt  training/checkpoints/ae/ae_latest.pt \
+  --dp_ckpt  training/checkpoints/duration_predictor/duration_predictor_final.pt
 ```
+
+If `--ttl_ckpt` is missing the script falls back to the newest `ckpt_step_*.pt` under `--ckpt_dir` (default `checkpoints/text2latent`).
 
 Useful options:
 
-- `--ttl_ckpt` — explicit Text2Latent checkpoint file (otherwise the latest under `--ckpt_dir` is chosen).
-- `--no-verify` — skip ONNX Runtime vs PyTorch numerical checks (faster, less safe).
+- `--slim` — run `onnxslim` on each model for a small graph-cleanup pass (same numerics, marginally faster load, negligible speed change at inference).
+- `--no-verify` — skip the ONNX Runtime vs PyTorch numerical check (faster export, less safe).
 
-The script writes multiple `.onnx` files under `--onnx_dir` (text encoder, vector-field estimator, latent decoder / vocoder, reference encoder, duration predictors, etc.) and `uncond.npz` when unconditional tokens are present in the checkpoint.
+Outputs written under `--onnx_dir`:
+
+| File | Source module |
+|---|---|
+| `text_encoder.onnx` | `TextEncoder` |
+| `reference_encoder.onnx` | `ReferenceEncoder` |
+| `vector_estimator.onnx` | flow-matching `VectorFieldEstimator` |
+| `vocoder.onnx` | `LatentDecoder1D` (codec decoder) |
+| `duration_predictor.onnx` | `DPNetwork` (reference-conditioned) |
+| `length_pred_style.onnx` | `DPNetwork` (style-token-conditioned) |
+
+Remember to copy `stats.npz` and `uncond.npz` into the same `--onnx_dir` before calling `BlueTTS` (see the next section for `stats.npz`).
+
+### Inference runtime — FP32 vs `--slim`
+
+Measured on a 33 s mixed-language utterance, 32 flow-matching steps, one warm-up synth before timing. CPU = local x86 via ORT `CPUExecutionProvider`, GPU = RTX 3090 via `CUDAExecutionProvider`.
+
+| Variant | Device | Load (s) | Synth (s) | Audio (s) | RTF |
+|---|---|---:|---:|---:|---:|
+| regular | CPU | 0.50 | 6.06 | 33.27 | 0.182 |
+| slim    | CPU | 0.29 | 5.98 | 33.27 | 0.180 |
+| regular | GPU | 0.88 | 1.68 | 33.27 | 0.051 |
+| slim    | GPU | 0.57 | 1.64 | 33.27 | 0.049 |
+
+On-disk sizes are basically identical (regular 277 MB, slim 275 MB); `--slim` is free to enable. Dynamic INT8 was tried and removed: ORT's `QUInt8` kernels offered no speedup on either device and introduced metallic artifacts on the vocoder.
 
 ---
 
