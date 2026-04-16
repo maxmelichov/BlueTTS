@@ -53,6 +53,7 @@ If `--ttl_ckpt` is missing the script falls back to the newest `ckpt_step_*.pt` 
 Useful options:
 
 - `--slim` — run `onnxslim` on each model for a small graph-cleanup pass (same numerics, marginally faster load, negligible speed change at inference).
+- `--int8` — per-tensor `QUInt8` weight-only dynamic quantization after the slim pass. **Not recommended** (see runtime table); kept for experimentation.
 - `--no-verify` — skip the ONNX Runtime vs PyTorch numerical check (faster export, less safe).
 
 Outputs written under `--onnx_dir`:
@@ -60,26 +61,28 @@ Outputs written under `--onnx_dir`:
 | File | Source module |
 |---|---|
 | `text_encoder.onnx` | `TextEncoder` |
-| `reference_encoder.onnx` | `ReferenceEncoder` |
 | `vector_estimator.onnx` | flow-matching `VectorFieldEstimator` |
 | `vocoder.onnx` | `LatentDecoder1D` (codec decoder) |
 | `duration_predictor.onnx` | `DPNetwork` (reference-conditioned) |
-| `length_pred_style.onnx` | `DPNetwork` (style-token-conditioned) |
 
 Remember to copy `stats.npz` and `uncond.npz` into the same `--onnx_dir` before calling `BlueTTS` (see the next section for `stats.npz`).
 
-### Inference runtime — FP32 vs `--slim`
+### Inference runtime
 
-Measured on a 33 s mixed-language utterance, 32 flow-matching steps, one warm-up synth before timing. CPU = local x86 via ORT `CPUExecutionProvider`, GPU = RTX 3090 via `CUDAExecutionProvider`.
+Measured on a 44.4 s mixed-language utterance, 32 flow-matching steps, CFG scale 3.0, one warm-up synth before timing. CPU = local x86 via ORT `CPUExecutionProvider`, GPU = RTX 3090 via `CUDAExecutionProvider`. SNR is vs the FP32 `regular` output on the same device.
 
-| Variant | Device | Load (s) | Synth (s) | Audio (s) | RTF |
-|---|---|---:|---:|---:|---:|
-| regular | CPU | 0.50 | 6.06 | 33.27 | 0.182 |
-| slim    | CPU | 0.29 | 5.98 | 33.27 | 0.180 |
-| regular | GPU | 0.88 | 1.68 | 33.27 | 0.051 |
-| slim    | GPU | 0.57 | 1.64 | 33.27 | 0.049 |
+| Variant | Device | Load (s) | Synth (s) | Audio (s) | RTF | SNR vs FP32 (dB) |
+|---|---|---:|---:|---:|---:|---:|
+| regular   | CPU | 0.51 |  7.50 | 44.42 | 0.169 | —    |
+| slim      | CPU | 0.27 |  7.10 | 44.42 | 0.160 | 89.6 |
+| int8_slim | CPU | 0.56 | 17.02 | 44.42 | 0.383 |  2.9 |
+| regular   | GPU | 0.59 |  1.41 | 44.42 | 0.032 | —    |
+| slim      | GPU | 0.36 |  1.59 | 44.42 | 0.036 | 34.3 |
+| int8_slim | GPU | 0.58 | 20.94 | 44.42 | 0.471 |  3.3 |
 
-On-disk sizes are basically identical (regular 277 MB, slim 275 MB); `--slim` is free to enable. Dynamic INT8 was tried and removed: ORT's `QUInt8` kernels offered no speedup on either device and introduced metallic artifacts on the vocoder.
+On-disk directory sizes: regular **252 MB**, slim **251 MB**, int8_slim **65 MB**. `--slim` is free numerically (CPU SNR ≈ 90 dB) and recommended. `--int8` trades 4× disk savings for 2–15× slower inference and destroyed quality (~3 dB SNR) — ORT's `MatMulInteger` kernels do not beat MLAS FP32 on modern x86, and CUDA has no INT8 path so it falls back to CPU.
+
+The flow-matching loop dominates synth time: 32 steps × 2 (conditional + unconditional for CFG) = 64 `vector_estimator.onnx` calls per chunk. To go faster, lower `steps` or set `cfg_scale=1.0` (skips the unconditional pass) when constructing `BlueTTS`.
 
 ---
 
