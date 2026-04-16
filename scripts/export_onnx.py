@@ -506,6 +506,19 @@ def main():
     if do_verify:
         all_pass = verify_onnx(vocoder, voc_path, (latent_dec,), ["latent"], "vocoder") and all_pass
 
+    re_path = os.path.join(onnx_dir, "reference_encoder.onnx")
+    export(
+        ref_enc,
+        re_path,
+        (z_ref, ref_mask),
+        input_names=["z_ref", "mask"],
+        output_names=["ref_values"],
+        dynamic_axes={"z_ref": {2: "T_ref_in"}, "mask": {2: "T_ref_in"}},
+    )
+    if do_verify:
+        all_pass = verify_onnx(ref_enc, re_path, (z_ref, ref_mask),
+                               ["z_ref", "mask"], "reference_encoder") and all_pass
+
     dp_path = os.path.join(onnx_dir, "duration_predictor.onnx")
     dp_inputs = (text_ids, z_ref, text_mask, ref_mask)
     dp_input_names = ["text_ids", "z_ref", "text_mask", "ref_mask"]
@@ -524,6 +537,44 @@ def main():
     )
     if do_verify:
         all_pass = verify_onnx(dp, dp_path, dp_inputs, dp_input_names, "duration_predictor") and all_pass
+
+    # Style-token duration predictor (for voices that ship `style_dp` instead of `z_ref`).
+    # onnxslim folds the dynamic T_text dim against the dummy shape, so force slim off here.
+    style_dp = torch.randn(B, cfg["dp_style_tokens"], cfg["dp_style_dim"], dtype=torch.float32, device=device)
+
+    class DPStyleWrapper(nn.Module):
+        def __init__(self, model):
+            super().__init__()
+            self.model = model
+
+        def forward(self, text_ids, style_dp, text_mask):
+            return self.model(text_ids=text_ids, style_tokens=style_dp, text_mask=text_mask)
+
+    dp_style_wrapper = DPStyleWrapper(dp)
+    dps_path = os.path.join(onnx_dir, "length_pred_style.onnx")
+    dps_inputs = (text_ids, style_dp, text_mask)
+    dps_input_names = ["text_ids", "style_dp", "text_mask"]
+    export_one(
+        dp_style_wrapper,
+        dps_path,
+        dps_inputs,
+        input_names=dps_input_names,
+        output_names=["duration"],
+        dynamic_axes={"text_ids": {1: "T_text"}, "text_mask": {2: "T_text"}},
+        do_slim=False,
+        do_int8=args.int8,
+    )
+    if do_verify:
+        all_pass = verify_onnx(dp_style_wrapper, dps_path, dps_inputs, dps_input_names,
+                               "length_pred_style") and all_pass
+
+    import shutil
+    for fname in ("stats.npz", "uncond.npz", "stats_multilingual.pt"):
+        src = os.path.join("onnx_models", fname)
+        dst = os.path.join(onnx_dir, fname)
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            print(f"[copy] {fname}")
 
     if do_verify:
         print("\n" + "=" * 60)
