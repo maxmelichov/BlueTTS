@@ -30,7 +30,7 @@ class BlueTTS:
         weights_dir: str,
         config_path: str = "tts.json",
         style_json: Optional[str] = None,
-        steps: int = 32,
+        steps: int = 5,
         cfg_scale: float = 3.0,
         speed: float = 1.0,
         seed: int = 42,
