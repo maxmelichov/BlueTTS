@@ -71,15 +71,6 @@ Remember to copy `stats.npz` and `uncond.npz` into the same `--onnx_dir` before 
 
 Measured on a 44.4 s mixed-language utterance, 32 flow-matching steps, CFG scale 3.0, one warm-up synth before timing. CPU = local x86 via ORT `CPUExecutionProvider`, GPU = RTX 3090 via `CUDAExecutionProvider`. SNR is vs the FP32 `regular` output on the same device.
 
-| Variant | Device | Load (s) | Synth (s) | Audio (s) | RTF | SNR vs FP32 (dB) |
-|---|---|---:|---:|---:|---:|---:|
-| regular   | CPU | 0.51 |  7.50 | 44.42 | 0.169 | —    |
-| slim      | CPU | 0.27 |  7.10 | 44.42 | 0.160 | 89.6 |
-| int8_slim | CPU | 0.56 | 17.02 | 44.42 | 0.383 |  2.9 |
-| regular   | GPU | 0.59 |  1.41 | 44.42 | 0.032 | —    |
-| slim      | GPU | 0.36 |  1.59 | 44.42 | 0.036 | 34.3 |
-| int8_slim | GPU | 0.58 | 20.94 | 44.42 | 0.471 |  3.3 |
-
 On-disk directory sizes: regular **252 MB**, slim **251 MB**, int8_slim **65 MB**. `--slim` is free numerically (CPU SNR ≈ 90 dB) and recommended. `--int8` trades 4× disk savings for 2–15× slower inference and destroyed quality (~3 dB SNR) — ORT's `MatMulInteger` kernels do not beat MLAS FP32 on modern x86, and CUDA has no INT8 path so it falls back to CPU.
 
 The flow-matching loop dominates synth time: 32 steps × 2 (conditional + unconditional for CFG) = 64 `vector_estimator.onnx` calls per chunk. To go faster, lower `steps` or set `cfg_scale=1.0` (skips the unconditional pass) when constructing `BlueTTS`.
