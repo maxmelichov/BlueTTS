@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Export all TTS models to ONNX (FP32, optionally slimmed).
+"""Export the 4 self-contained ONNX models (FP32, optionally slimmed / int8).
 
-Supports:
-- Flat *.safetensors checkpoints from pt_weights/ (vf_estimator, blue_codec, duration_predictor).
-- Legacy nested *.pt checkpoints (training dumps with `text_encoder`, `reference_encoder`, etc. sub-dicts).
-- Optional onnxslim pass (--slim).
+Produces:
+- text_encoder.onnx
+- vector_estimator.onnx  (u_text / u_ref baked in; CFG done internally)
+- vocoder.onnx           (mean / std / normalizer_scale baked in; unnorm + reshape in-graph)
+- duration_predictor.onnx (style-conditioned: takes style_dp from the voice JSON)
+
+Voice JSON must carry `style_ttl` and `style_dp` (see scripts/export_new_voice.py).
+No stats.npz or uncond.npz is needed at inference.
+
+Supports flat *.safetensors from pt_weights/ and legacy nested *.pt training dumps.
 """
 import argparse
 import glob
@@ -165,13 +171,18 @@ def _replace_mha_with_safe(module: nn.Module) -> None:
                 module[key] = _to_safe(child)
 
 
-class VectorFieldEstimatorWrapper(nn.Module):
-    def __init__(self, model: VectorFieldEstimator):
+class VectorFieldEstimatorCFG(nn.Module):
+    """Wraps VF and bakes u_text / u_ref so CFG is one ONNX call per diffusion step."""
+
+    def __init__(self, model: VectorFieldEstimator, u_text: torch.Tensor, u_ref: torch.Tensor):
         super().__init__()
         self.model = model
+        self.register_buffer("u_text", u_text.detach().clone())
+        self.register_buffer("u_ref", u_ref.detach().clone())
+        self.register_buffer("u_text_mask", torch.ones(1, 1, 1, dtype=torch.float32))
 
-    def forward(self, noisy_latent, text_emb, style_ttl, latent_mask, text_mask, current_step, total_step):
-        return self.model(
+    def forward(self, noisy_latent, text_emb, style_ttl, latent_mask, text_mask, current_step, total_step, cfg_scale):
+        den_cond = self.model(
             noisy_latent=noisy_latent,
             text_emb=text_emb,
             style_ttl=style_ttl,
@@ -181,6 +192,54 @@ class VectorFieldEstimatorWrapper(nn.Module):
             total_step=total_step,
             style_keys=None,
         )
+        den_uncond = self.model(
+            noisy_latent=noisy_latent,
+            text_emb=self.u_text,
+            style_ttl=self.u_ref,
+            latent_mask=latent_mask,
+            text_mask=self.u_text_mask,
+            current_step=current_step,
+            total_step=total_step,
+            style_keys=None,
+        )
+        return den_uncond + cfg_scale * (den_cond - den_uncond)
+
+
+class VocoderWithStats(nn.Module):
+    """Bakes mean/std/normalizer_scale in, plus the (B,C,T) -> (B,latent_dim,T*factor) reshape."""
+
+    def __init__(self, vocoder, mean: torch.Tensor, std: torch.Tensor, normalizer_scale: float,
+                 latent_dim: int, chunk_compress_factor: int):
+        super().__init__()
+        self.vocoder = vocoder
+        self.register_buffer("mean", mean.to(torch.float32).view(1, -1, 1))
+        self.register_buffer("std", std.to(torch.float32).view(1, -1, 1))
+        inv_scale = 1.0 / float(normalizer_scale) if float(normalizer_scale) not in (0.0,) else 1.0
+        self.register_buffer("inv_scale", torch.tensor(inv_scale, dtype=torch.float32))
+        self.latent_dim = int(latent_dim)
+        self.factor = int(chunk_compress_factor)
+
+    def forward(self, z_pred):
+        z = (z_pred * self.inv_scale) * self.std + self.mean
+        B = z.shape[0]
+        T = z.shape[2]
+        z = (
+            z.reshape(B, self.latent_dim, self.factor, T)
+            .permute(0, 1, 3, 2)
+            .reshape(B, self.latent_dim, T * self.factor)
+        )
+        return self.vocoder(z)
+
+
+class DPStyleWrapper(nn.Module):
+    """Style-conditioned duration: takes pre-computed style_dp instead of z_ref."""
+
+    def __init__(self, dp):
+        super().__init__()
+        self.dp = dp
+
+    def forward(self, text_ids, style_dp, text_mask):
+        return self.dp(text_ids=text_ids, text_mask=text_mask, style_tokens=style_dp)
 
 
 def export_one(
@@ -305,6 +364,8 @@ def main():
                         help="Audio codec checkpoint (.pt or .safetensors)")
     parser.add_argument("--dp_ckpt", type=str, default="pt_weights/duration_predictor.safetensors",
                         help="Duration predictor checkpoint (.pt or .safetensors)")
+    parser.add_argument("--stats", type=str, default="pt_weights/stats_multilingual.pt",
+                        help="Normalization stats .pt (mean/std/normalizer_scale). Baked into vocoder.onnx.")
     parser.add_argument("--no-verify", dest="no_verify", action="store_true", help="Skip ONNX vs PyTorch verification")
     parser.add_argument("--slim", action="store_true", help="Run onnxslim on each model before finalizing")
     parser.add_argument("--int8", action="store_true",
@@ -350,6 +411,22 @@ def main():
 
     t2l_state = _load_state_any(text2latent_ckpt, device) if text2latent_ckpt else {}
     ae_state = _load_state_any(args.ae_ckpt, device)
+
+    u_text = t2l_state.get("u_text") if isinstance(t2l_state, dict) else None
+    u_ref = t2l_state.get("u_ref") if isinstance(t2l_state, dict) else None
+    if u_text is None or u_ref is None:
+        raise RuntimeError(
+            f"u_text/u_ref not found in {text2latent_ckpt!r}. These must be baked into "
+            "vector_estimator.onnx for CFG; re-export vf_estimator.safetensors with uncond params."
+        )
+    print(f"[INFO] baking uncond: u_text {tuple(u_text.shape)}, u_ref {tuple(u_ref.shape)}")
+
+    if not os.path.exists(args.stats):
+        raise FileNotFoundError(f"Stats file not found: {args.stats}")
+    stats_blob = torch.load(args.stats, map_location=device, weights_only=False)
+    stats_mean = stats_blob["mean"].to(torch.float32)
+    stats_std = stats_blob["std"].to(torch.float32)
+    print(f"[INFO] baking stats: mean {tuple(stats_mean.shape)}, std {tuple(stats_std.shape)}")
 
     vocab_size = cfg["vocab_size"]
     compressed_channels = cfg["compressed_channels"]
@@ -419,16 +496,12 @@ def main():
 
     B = 1
     T_text = 32
-    T_audio_ref = 256
     T_lat = 100
     C_lat = compressed_channels
-    C_dec = latent_dim
     style_dim = se_d_model
 
     text_ids = torch.zeros(B, T_text, dtype=torch.long, device=device)
     text_mask = torch.ones(B, 1, T_text, dtype=torch.float32, device=device)
-    z_ref = torch.randn(B, C_lat, T_audio_ref, dtype=torch.float32, device=device)
-    ref_mask = torch.ones(B, 1, T_audio_ref, dtype=torch.float32, device=device)
     style_ttl_te = torch.randn(B, se_n_style, style_dim, dtype=torch.float32, device=device)
 
     do_verify = not args.no_verify
@@ -466,13 +539,14 @@ def main():
         with torch.no_grad():
             vf.style_key.copy_(text_enc.speech_prompted_text_encoder.style_key)
 
-    vf_wrapped = VectorFieldEstimatorWrapper(vf)
+    vf_wrapped = VectorFieldEstimatorCFG(vf, u_text.to(device), u_ref.to(device)).to(device).eval()
+    cfg_scale_t = torch.tensor([3.0], dtype=torch.float32, device=device)
     vf_path = os.path.join(onnx_dir, "vector_estimator.onnx")
-    vf_inputs = (noisy_latent, text_emb, style_ttl_vf, latent_mask, text_mask, current_step, total_step)
+    vf_inputs = (noisy_latent, text_emb, style_ttl_vf, latent_mask, text_mask, current_step, total_step, cfg_scale_t)
     vf_input_names = [
         "noisy_latent", "text_emb", "style_ttl",
         "latent_mask", "text_mask",
-        "current_step", "total_step",
+        "current_step", "total_step", "cfg_scale",
     ]
     export(
         vf_wrapped,
@@ -493,88 +567,42 @@ def main():
         all_pass = verify_onnx(vf_wrapped, vf_path, vf_inputs, vf_input_names,
                                "vector_estimator", atol=1e-3, rtol=1e-2) and all_pass
 
-    latent_dec = torch.randn(B, C_dec, T_lat * chunk_compress_factor, dtype=torch.float32, device=device)
+    vocoder_wrapped = VocoderWithStats(
+        vocoder, stats_mean, stats_std, cfg.get("normalizer_scale", 1.0),
+        latent_dim=latent_dim, chunk_compress_factor=chunk_compress_factor,
+    ).to(device).eval()
+    z_pred_sample = torch.randn(B, C_lat, T_lat, dtype=torch.float32, device=device)
     voc_path = os.path.join(onnx_dir, "vocoder.onnx")
     export(
-        vocoder,
+        vocoder_wrapped,
         voc_path,
-        (latent_dec,),
-        input_names=["latent"],
+        (z_pred_sample,),
+        input_names=["z_pred"],
         output_names=["waveform"],
-        dynamic_axes={"latent": {2: "T_dec"}, "waveform": {2: "T_wav"}},
+        dynamic_axes={"z_pred": {2: "T_lat"}, "waveform": {2: "T_wav"}},
     )
     if do_verify:
-        all_pass = verify_onnx(vocoder, voc_path, (latent_dec,), ["latent"], "vocoder") and all_pass
+        all_pass = verify_onnx(vocoder_wrapped, voc_path, (z_pred_sample,), ["z_pred"], "vocoder") and all_pass
 
-    re_path = os.path.join(onnx_dir, "reference_encoder.onnx")
-    export(
-        ref_enc,
-        re_path,
-        (z_ref, ref_mask),
-        input_names=["z_ref", "mask"],
-        output_names=["ref_values"],
-        dynamic_axes={"z_ref": {2: "T_ref_in"}, "mask": {2: "T_ref_in"}},
-    )
-    if do_verify:
-        all_pass = verify_onnx(ref_enc, re_path, (z_ref, ref_mask),
-                               ["z_ref", "mask"], "reference_encoder") and all_pass
-
+    # Style-conditioned duration predictor: style_dp comes from the voice JSON (precomputed
+    # by dp.ref_encoder on the reference audio), so no z_ref and no stats at inference.
+    dp_style_wrapped = DPStyleWrapper(dp).to(device).eval()
+    style_dp_sample = torch.randn(B, cfg["dp_style_tokens"], cfg["dp_style_dim"],
+                                  dtype=torch.float32, device=device)
     dp_path = os.path.join(onnx_dir, "duration_predictor.onnx")
-    dp_inputs = (text_ids, z_ref, text_mask, ref_mask)
-    dp_input_names = ["text_ids", "z_ref", "text_mask", "ref_mask"]
+    dp_inputs = (text_ids, style_dp_sample, text_mask)
+    dp_input_names = ["text_ids", "style_dp", "text_mask"]
     export(
-        dp,
+        dp_style_wrapped,
         dp_path,
         dp_inputs,
         input_names=dp_input_names,
         output_names=["duration"],
-        dynamic_axes={
-            "text_ids": {1: "T_text"},
-            "text_mask": {2: "T_text"},
-            "z_ref": {2: "T_ref_audio"},
-            "ref_mask": {2: "T_ref_audio"},
-        },
-    )
-    if do_verify:
-        all_pass = verify_onnx(dp, dp_path, dp_inputs, dp_input_names, "duration_predictor") and all_pass
-
-    # Style-token duration predictor (for voices that ship `style_dp` instead of `z_ref`).
-    # onnxslim folds the dynamic T_text dim against the dummy shape, so force slim off here.
-    style_dp = torch.randn(B, cfg["dp_style_tokens"], cfg["dp_style_dim"], dtype=torch.float32, device=device)
-
-    class DPStyleWrapper(nn.Module):
-        def __init__(self, model):
-            super().__init__()
-            self.model = model
-
-        def forward(self, text_ids, style_dp, text_mask):
-            return self.model(text_ids=text_ids, style_tokens=style_dp, text_mask=text_mask)
-
-    dp_style_wrapper = DPStyleWrapper(dp)
-    dps_path = os.path.join(onnx_dir, "length_pred_style.onnx")
-    dps_inputs = (text_ids, style_dp, text_mask)
-    dps_input_names = ["text_ids", "style_dp", "text_mask"]
-    export_one(
-        dp_style_wrapper,
-        dps_path,
-        dps_inputs,
-        input_names=dps_input_names,
-        output_names=["duration"],
         dynamic_axes={"text_ids": {1: "T_text"}, "text_mask": {2: "T_text"}},
-        do_slim=False,
-        do_int8=args.int8,
     )
     if do_verify:
-        all_pass = verify_onnx(dp_style_wrapper, dps_path, dps_inputs, dps_input_names,
-                               "length_pred_style") and all_pass
-
-    import shutil
-    for fname in ("stats.npz", "uncond.npz", "stats_multilingual.pt"):
-        src = os.path.join("onnx_models", fname)
-        dst = os.path.join(onnx_dir, fname)
-        if os.path.exists(src) and not os.path.exists(dst):
-            shutil.copy2(src, dst)
-            print(f"[copy] {fname}")
+        all_pass = verify_onnx(dp_style_wrapped, dp_path, dp_inputs, dp_input_names,
+                               "duration_predictor") and all_pass
 
     if do_verify:
         print("\n" + "=" * 60)
