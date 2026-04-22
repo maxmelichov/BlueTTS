@@ -5,18 +5,12 @@ from .duration_predictor import TTSDurationModel
 
 
 class DPNetwork(TTSDurationModel):
-    """
-    Backward-compatible wrapper around TTSDurationModel.
-
-    Uses inheritance (not composition) so that state_dict keys
-    are ``sentence_encoder.*`` / ``predictor.*`` — matching the
-    ONNX graph and existing checkpoints (no ``core.`` prefix).
-    """
+    """Inheritance keeps state_dict keys (`sentence_encoder.*` / `predictor.*`) aligned with ONNX/checkpoints."""
 
     def __init__(
         self,
         vocab_size: int = 37,
-        latent_channels: int = 144,   # kept for call-site compat, unused
+        latent_channels: int = 144,
         style_dp: int = 8,
         style_dim: int = 16,
         sentence_encoder_cfg: dict = None,
@@ -41,19 +35,6 @@ class DPNetwork(TTSDurationModel):
         style_dp: torch.Tensor | None = None,
         return_log: bool = False,
     ) -> torch.Tensor:
-        """
-        Args:
-            text_ids:     [B, T_text]
-            z_ref:        [B, C_latent, T_ref]  (normalized compressed latents)
-            text_mask:    [B, 1, T_text]         (1 = valid, 0 = pad)
-            ref_mask:     [B, 1, T_ref] or None  (1 = valid, 0 = pad)
-            style_dp: [B, N, D] or None      (pre-computed style tokens)
-            return_log:   If True return log(duration), else linear duration.
-
-        Returns:
-            duration: [B]
-        """
-        # Ensure masks are float32
         if text_mask is not None and text_mask.dtype != torch.float32:
             text_mask = text_mask.float()
 

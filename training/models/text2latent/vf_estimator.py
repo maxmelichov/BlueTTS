@@ -1,17 +1,12 @@
 import math
-from typing import Optional, Tuple, List
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# -----------------------------------------------------------------------------
-# Wrappers to match Checkpoint/Notebook Structure
-# -----------------------------------------------------------------------------
 
 class LinearWrapper(nn.Module):
-    """
-    Wraps nn.Linear to match checkpoint path `linear.weight` -> `module.linear.weight`.
-    """
     def __init__(self, in_features: int, out_features: int):
         super().__init__()
         self.linear = nn.Linear(in_features, out_features)
@@ -19,26 +14,20 @@ class LinearWrapper(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(x)
 
+
 class LayerNormWrapper(nn.Module):
-    """
-    Wraps nn.LayerNorm. Expects [B, C, T] input, normalizes over C.
-    """
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.norm = nn.LayerNorm(dim, eps=eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, C, T] -> [B, T, C] -> norm -> [B, C, T]
         x = x.transpose(1, 2)
         x = self.norm(x)
         x = x.transpose(1, 2)
         return x
 
+
 class ProjectionWrapper(nn.Module):
-    """
-    Wraps Conv1d 1x1 to match `proj.net.weight`.
-    ONNX graph shows no bias for proj_in/proj_out Conv nodes.
-    """
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.net = nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False)
@@ -46,13 +35,11 @@ class ProjectionWrapper(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
-# -----------------------------------------------------------------------------
-# Basic Blocks
-# -----------------------------------------------------------------------------
 
 class Mish(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x * torch.tanh(F.softplus(x))
+
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim: int, scale: float = 1000.0):
@@ -70,64 +57,42 @@ class SinusoidalPosEmb(nn.Module):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
+
 class TimeEncoder(nn.Module):
     def __init__(self, embed_dim: int, hdim: int = 256):
         super().__init__()
         self.sinusoidal = SinusoidalPosEmb(embed_dim, scale=1000.0)
-        # MLP: 64 -> 256 -> 64 (matches ONNX graph sources 160-164)
         self.mlp = nn.Sequential(
             LinearWrapper(embed_dim, hdim),
             Mish(),
             LinearWrapper(hdim, embed_dim),
         )
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.sinusoidal(x)
         x = self.mlp(x)
         return x
 
+
 class TimeCondBlock(nn.Module):
     def __init__(self, time_dim: int, channels: int):
         super().__init__()
-        # Output channels for Shift (Add)
         self.linear = LinearWrapper(time_dim, channels)
-        
-        # Zero-initialize the projection so the block starts as Identity.
+        # Zero-init so the block starts as identity.
         nn.init.zeros_(self.linear.linear.weight)
         nn.init.zeros_(self.linear.linear.bias)
 
     def forward(self, x: torch.Tensor, time_emb: torch.Tensor) -> torch.Tensor:
-        # x: [B, C, T]
-        # time_emb: [B, time_dim]
-        
-        # Project time to Shift
-        cond = self.linear(time_emb)       # [B, C]
-        cond = cond.unsqueeze(-1)          # [B, C, 1]
-        
-        # Additive conditioning: x + shift
+        cond = self.linear(time_emb)
+        cond = cond.unsqueeze(-1)
         return x + cond
 
+
 class ConvNeXtBlock1D(nn.Module):
-    """
-    ConvNeXt Block with symmetric padding.
-    NOTE: expansion=2 matches ONNX graph weights (512->1024).
-    ONNX uses explicit Pad->Conv (no built-in Conv padding).
-    """
-    def __init__(
-        self,
-        dim: int,
-        kernel_size: int = 5,
-        expansion: int = 2, 
-        dropout: float = 0.0,
-        dilation: int = 1,
-    ):
+    def __init__(self, dim: int, kernel_size: int = 5, expansion: int = 2, dropout: float = 0.0, dilation: int = 1):
         super().__init__()
-        # Symmetric padding: pad_left = pad_right = (kernel_size - 1) // 2 * dilation
-        # Matches ONNX graph pattern: separate Pad node -> Conv(padding=0)
         self.pad = ((kernel_size - 1) // 2) * dilation
-        self.dwconv = nn.Conv1d(
-            dim, dim, kernel_size=kernel_size, padding=0, groups=dim, dilation=dilation
-        )
+        self.dwconv = nn.Conv1d(dim, dim, kernel_size=kernel_size, padding=0, groups=dim, dilation=dilation)
         self.norm = LayerNormWrapper(dim)
         self.pwconv1 = nn.Conv1d(dim, dim * expansion, kernel_size=1)
         self.act = nn.GELU()
@@ -136,34 +101,31 @@ class ConvNeXtBlock1D(nn.Module):
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if mask is not None: x = x * mask
+        if mask is not None:
+            x = x * mask
         residual = x
-        
-        # Symmetric replicate padding — verified against reference ONNX:
-        # all 28 Pad nodes use mode='edge' (PyTorch 'replicate').
-        # Pad values: [0, 0, pad, 0, 0, pad] (symmetric on time dim).
-        x = F.pad(x, (self.pad, self.pad), mode='replicate')
+
+        x = F.pad(x, (self.pad, self.pad), mode="replicate")
         x = self.dwconv(x)
-        if mask is not None: x = x * mask
-        
+        if mask is not None:
+            x = x * mask
+
         x = self.norm(x)
-        
         x = self.pwconv1(x)
         x = self.act(x)
         x = self.pwconv2(x)
         x = self.gamma * x
         x = self.dropout(x)
-        
+
         x = x + residual
-        if mask is not None: x = x * mask
-        
+        if mask is not None:
+            x = x * mask
         return x
+
 
 class ConvNeXtStack(nn.Module):
     def __init__(self, channels, kernel_size, dilations):
         super().__init__()
-        # Expansion=2 to match ONNX intermediate=1024 with hidden=512 (512*2=1024)
-        # Note: If hidden=256, expansion=4 would be needed. But checkpoints use 512.
         self.convnext = nn.ModuleList([
             ConvNeXtBlock1D(channels, kernel_size=kernel_size, dilation=d, expansion=2)
             for d in dilations
@@ -174,52 +136,30 @@ class ConvNeXtStack(nn.Module):
             x = blk(x, mask)
         return x
 
-# -----------------------------------------------------------------------------
-# Attention Mechanisms
-# -----------------------------------------------------------------------------
 
-def apply_rotary_pos_emb(x: torch.Tensor,
-                         cos: torch.Tensor,
-                         sin: torch.Tensor) -> torch.Tensor:
-    """
-    x:   [B, H, T, D] or [H, B, T, D]
-    cos: [T, D/2] or [B, T, D/2] or [1, B, T, D/2]
-    sin: [T, D/2] or [B, T, D/2] or [1, B, T, D/2]
-    """
-    # Note: B, H here are just placeholders for first two dims
+def apply_rotary_pos_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     B, H, T, D = x.shape
     assert D % 2 == 0, "head_dim must be even for RoPE"
 
-    x1 = x[..., : D // 2]  # [..., T, D/2]
-    x2 = x[..., D // 2 :]  # [..., T, D/2]
+    x1 = x[..., : D // 2]
+    x2 = x[..., D // 2 :]
 
-    # Handle batched or unbatched freqs
     if cos.dim() == 2:
-        cos = cos[None, None, :, :]  # [1, 1, T, D/2]
-        sin = sin[None, None, :, :]  # [1, 1, T, D/2]
+        cos = cos[None, None, :, :]
+        sin = sin[None, None, :, :]
     elif cos.dim() == 3:
-        cos = cos.unsqueeze(1)       # [B, 1, T, D/2]
-        sin = sin.unsqueeze(1)       # [B, 1, T, D/2]
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
 
-    # (x1, x2) rotated in the complex plane
     x1_rot = x1 * cos - x2 * sin
     x2_rot = x1 * sin + x2 * cos
 
     return torch.cat([x1_rot, x2_rot], dim=-1)
 
+
 class AttentionModule(nn.Module):
-    """
-    Attention module used for both text (RoPE) and style (no RoPE).
+    """Text path uses LARoPE; style path uses tanh on keys (no RoPE)."""
 
-    Notebook ONNX (see `checks/notebook.ipynb`):
-      - Text attention: K/V both come from `text_emb` (channel-last).
-      - Style attention: K comes from the tiled `style_key` constant,
-        V comes from `style_ttl` (K and V have different sources).
-
-    We support this via separate `context_keys` (K source) and `context`
-    (V source) inputs. If `context_keys is None`, we fall back to using
-    `context` for both (text path).
-    """
     def __init__(
         self,
         d_model: int,
@@ -228,14 +168,14 @@ class AttentionModule(nn.Module):
         attn_dim: int,
         use_rope: bool,
         dropout: float = 0.0,
-        rope_gamma: float = 10.0,  # LARoPE scaling γ
-        attn_scale: Optional[float] = None,  # Override attention scale divisor
+        rope_gamma: float = 10.0,
+        attn_scale: Optional[float] = None,
         rotary_base: float = 10000.0,
         use_residual: bool = True,
     ):
         super().__init__()
         assert attn_dim % num_heads == 0
-        
+
         self.d_model = d_model
         self.num_heads = num_heads
         self.head_dim = attn_dim // num_heads
@@ -243,34 +183,24 @@ class AttentionModule(nn.Module):
         self.use_rope = use_rope
         self.use_residual = use_residual
         self.rope_gamma = rope_gamma
-        # ONNX graph shows all attention blocks use sqrt(attn_dim) = sqrt(256) = 16.0
-        # as the scale divisor, NOT sqrt(head_dim). Default to sqrt(attn_dim).
         self.attn_scale = attn_scale if attn_scale is not None else math.sqrt(self.attn_dim)
-        
-        # Wrapped Linears
+
         self.W_query = LinearWrapper(d_model, attn_dim)
         self.W_key = LinearWrapper(d_context, attn_dim)
         self.W_value = LinearWrapper(d_context, attn_dim)
         self.out_fc = LinearWrapper(attn_dim, d_model)
-        
+
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
-        
+
         if use_rope:
-            # Frequencies for half the head dimension
-            # ONNX: 'theta' shape [1, 1, 32] (head_dim/2=32), 'increments' shape [1, 1000, 1] int64.
-            inv_freq = 1.0 / (
-                rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim)
-            )
-            # Pre-scale by rope_gamma to match trace (Div -> Mul(theta))
-            theta = (inv_freq * rope_gamma).view(1, 1, -1)  # [1, 1, D/2] matches ONNX shape
-            
+            inv_freq = 1.0 / (rotary_base ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim))
+            theta = (inv_freq * rope_gamma).view(1, 1, -1)
             self.register_buffer("theta", theta, persistent=True)
             self.register_buffer("increments", torch.arange(1000).view(1, 1000, 1), persistent=True)
             self.tanh = None
         else:
             self.theta = None
             self.increments = None
-            # Style attention path: tanh on keys
             self.tanh = nn.Tanh()
 
     def forward(
@@ -281,129 +211,92 @@ class AttentionModule(nn.Module):
         x_mask: Optional[torch.Tensor] = None,
         context_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Args:
-            x:            [B, d_model, T] — query source (latent).
-            context:      [B, L, d_context] — V source, channel-last.
-            context_keys: [B, L, d_context] — K source. If None, K comes from `context`.
-        """
         B, d_model, T = x.shape
         L = context.shape[1]
-        
-        x_t = x.transpose(1, 2)  # [B, T, d_model]
-        
+
+        x_t = x.transpose(1, 2)
         q = self.W_query(x_t)
-        
-        # Keys: separate source for style attn (tiled style_key), same as V for text.
+
         k_src = context_keys if context_keys is not None else context
         k = self.W_key(k_src)
-
         v = self.W_value(context)
-        
-        # Style attention (no RoPE): tanh on keys
+
         if not self.use_rope and self.tanh is not None:
             k = self.tanh(k)
 
         H = self.num_heads
         D = self.head_dim
-        
-        # ONNX layout: [H, B, T, D]
-        q = q.view(B, T, H, D).permute(2, 0, 1, 3)  # [H, B, T, D]
-        k = k.view(B, L, H, D).permute(2, 0, 1, 3)  # [H, B, L, D]
-        v = v.view(B, L, H, D).permute(2, 0, 1, 3)  # [H, B, L, D]
-        
+
+        q = q.view(B, T, H, D).permute(2, 0, 1, 3)
+        k = k.view(B, L, H, D).permute(2, 0, 1, 3)
+        v = v.view(B, L, H, D).permute(2, 0, 1, 3)
+
         if self.use_rope:
-            # ---------------- Length-Aware RoPE (LARoPE) ----------------
-            # Ref: https://arxiv.org/abs/2509.11084
-            # Normalizes positions by sequence length to induce diagonal bias.
-            #
-            # ONNX trace (1-to-1):
-            #   ReduceSum(mask) -> Reshape -> [B,1,1]  (=sequence length)
-            #   Slice(increments, :T) -> [1,T,1]  (=positions)
-            #   Div([1,T,1], [B,1,1]) -> [B,T,1]  (=normalized positions)
-            #   Mul([B,T,1], theta[1,1,D/2]) -> [B,T,D/2]  (=frequencies)
-            #   Sin / Cos -> [B,T,D/2]
             device = x.device
-            
-            # Get lengths from masks: sum all non-batch dims -> [B] -> reshape [B,1,1]
+
             if x_mask is not None:
-                len_q = x_mask.sum(dim=(-2, -1)).reshape(-1, 1, 1)  # [B,1,1]
+                len_q = x_mask.sum(dim=(-2, -1)).reshape(-1, 1, 1)
             else:
                 len_q = torch.tensor([T], device=device, dtype=torch.float32).reshape(1, 1, 1)
 
             if context_mask is not None:
-                len_k = context_mask.sum(dim=(-2, -1)).reshape(-1, 1, 1)  # [B,1,1]
+                len_k = context_mask.sum(dim=(-2, -1)).reshape(-1, 1, 1)
             else:
                 len_k = torch.tensor([L], device=device, dtype=torch.float32).reshape(1, 1, 1)
-            
-            # Positions: Slice increments [1,1000,1] -> [1,T,1] / [1,L,1], cast to float
+
             if self.increments is not None and self.increments.shape[1] >= max(T, L):
-                pos_q = self.increments[:, :T, :].to(device).float()  # [1, T, 1]
-                pos_k = self.increments[:, :L, :].to(device).float()  # [1, L, 1]
+                pos_q = self.increments[:, :T, :].to(device).float()
+                pos_k = self.increments[:, :L, :].to(device).float()
             else:
                 pos_q = torch.arange(T, device=device, dtype=torch.float32).reshape(1, -1, 1)
                 pos_k = torch.arange(L, device=device, dtype=torch.float32).reshape(1, -1, 1)
-            
-            # Normalize: [1,T,1] / [B,1,1] -> [B,T,1]
-            norm_pos_q = pos_q / len_q  # [B, T, 1]
-            norm_pos_k = pos_k / len_k  # [B, L, 1]
-            
-            # Frequencies: [B,T,1] * [1,1,D/2] -> [B,T,D/2]
+
+            norm_pos_q = pos_q / len_q
+            norm_pos_k = pos_k / len_k
+
             theta = self.theta if self.theta is not None else (
                 (1.0 / (10000 ** (torch.arange(0, D, 2, device=device).float() / D))) * self.rope_gamma
             ).view(1, 1, -1)
-            
-            freqs_q = norm_pos_q * theta  # [B, T, D/2]
-            freqs_k = norm_pos_k * theta  # [B, L, D/2]
-            
-            cos_q, sin_q = freqs_q.cos(), freqs_q.sin()  # [B, T, D/2]
-            cos_k, sin_k = freqs_k.cos(), freqs_k.sin()  # [B, L, D/2]
-            
-            # Unsqueeze for [H, B, T, D] layout broadcasting -> [1, B, T, D/2]
+
+            freqs_q = norm_pos_q * theta
+            freqs_k = norm_pos_k * theta
+
+            cos_q, sin_q = freqs_q.cos(), freqs_q.sin()
+            cos_k, sin_k = freqs_k.cos(), freqs_k.sin()
+
             cos_q, sin_q = cos_q.unsqueeze(0), sin_q.unsqueeze(0)
             cos_k, sin_k = cos_k.unsqueeze(0), sin_k.unsqueeze(0)
 
-            # Apply rotation separately to Q and K
-            q = apply_rotary_pos_emb(q, cos_q, sin_q)  # [H, B, T, D]
-            k = apply_rotary_pos_emb(k, cos_k, sin_k)  # [H, B, L, D]
-            # ------------------------------------------------------------
-        
-        # Scaled dot-product attention
+            q = apply_rotary_pos_emb(q, cos_q, sin_q)
+            k = apply_rotary_pos_emb(k, cos_k, sin_k)
+
         attn_logits = torch.matmul(q, k.transpose(-1, -2)) / self.attn_scale
-        
-        # Pre-softmax: mask invalid keys (context positions)
-        # Matches ONNX: Equal(text_mask==0) -> Where(-inf, logits)
+
         if context_mask is not None:
             if context_mask.dim() == 2:
-                context_mask = context_mask.unsqueeze(1)  # [B,1,L]
-            cm = (context_mask == 0)  # [B, 1, L] bool
-            # [H, B, T, L] vs [1, B, 1, L]
-            attn_logits = attn_logits.masked_fill(cm.unsqueeze(0), float('-inf'))
-            
+                context_mask = context_mask.unsqueeze(1)
+            cm = (context_mask == 0)
+            attn_logits = attn_logits.masked_fill(cm.unsqueeze(0), float("-inf"))
+
         attn = torch.softmax(attn_logits, dim=-1)
-        
-        # Post-softmax: zero out attention for masked query positions
-        # Matches ONNX: Equal_1(latent_mask==0) -> Where_1(0, softmax)
+
         if x_mask is not None:
             if x_mask.dim() == 2:
-                x_mask = x_mask.unsqueeze(1)  # [B,1,T]
-            # x_mask: [B, 1, T] -> [1, B, T, 1]
-            qm = (x_mask == 0).permute(1, 0, 2).unsqueeze(-1) # [1, B, T, 1]
+                x_mask = x_mask.unsqueeze(1)
+            qm = (x_mask == 0).permute(1, 0, 2).unsqueeze(-1)
             attn = attn.masked_fill(qm, 0.0)
-            
-        out = torch.matmul(attn, v)  # [H, B, T, D]
-        
-        # [H, B, T, D] -> [B, T, H, D] -> [B, T, H*D]
+
+        out = torch.matmul(attn, v)
         out = out.permute(1, 2, 0, 3).contiguous().view(B, T, self.attn_dim)
         out = self.out_fc(out)
         out = self.dropout(out)
-        
-        # Mask output (matches ONNX Mul_14: out_fc output * latent_mask_transposed)
+
         if x_mask is not None:
-            out = out * x_mask.transpose(1, 2)  # x_mask [B,1,T] -> [B,T,1]
-        
-        out = out.transpose(1, 2)  # [B, C, T]
+            out = out * x_mask.transpose(1, 2)
+
+        out = out.transpose(1, 2)
         return out
+
 
 class CrossAttentionBlock(nn.Module):
     def __init__(
@@ -425,14 +318,11 @@ class CrossAttentionBlock(nn.Module):
             d_model, d_context, num_heads, attn_dim, use_rope,
             rope_gamma=rope_gamma, attn_scale=attn_scale, rotary_base=rotary_base, use_residual=use_residual,
         )
-        # Match checkpoint naming conventions:
-        # Text (RoPE) -> 'attn'
-        # Style (No RoPE) -> 'attention'
+        # Checkpoint naming: text (RoPE) -> 'attn'; style (no RoPE) -> 'attention'.
         if use_rope:
             self.attn = attn_module
         else:
             self.attention = attn_module
-            
         self.norm = LayerNormWrapper(d_model)
 
     def forward(
@@ -443,59 +333,39 @@ class CrossAttentionBlock(nn.Module):
         x_mask: Optional[torch.Tensor],
         context_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """
-        Args:
-            x:       [B, d_model, T]
-            context: [B, L, d_context] — always channel-last.
-                     Caller is responsible for transposing if needed.
-        """
-        # Pre-mask x before attention (matches ONNX: main_blocks.N/Mul before Transpose)
         if x_mask is not None:
             x = x * x_mask
-        
+
         residual = x
-        
-        # Attention
+
         if self.use_rope:
             attn_out = self.attn(x, context, context_keys, x_mask, context_mask)
         else:
             attn_out = self.attention(x, context, context_keys, x_mask, context_mask)
-        
-        # Residual Add
+
         if self.use_residual:
             x = residual + attn_out
         else:
             x = attn_out
-        
-        # Norm
+
         x = self.norm(x)
-        
         if x_mask is not None:
             x = x * x_mask
-            
         return x
 
-# -----------------------------------------------------------------------------
-# Main Estimator
-# -----------------------------------------------------------------------------
 
 class VectorFieldEstimator(nn.Module):
-    """
-    Vector Field Estimator for Flow Matching TTS.
-    
-    Architecture verified against ONNX trace in `checks/notebook.ipynb`.
-    """
     def __init__(
         self,
         in_channels: int = 144,
-        hidden_channels: int = 512,  # Checkpoint: 512
+        hidden_channels: int = 512,
         out_channels: int = 144,
-        text_dim: int = 256,         # Checkpoint: 256
-        style_dim: int = 256,        # Checkpoint: 256
-        num_style_tokens: int = 50,  # tts.json: style_token_layer.n_style=50
+        text_dim: int = 256,
+        style_dim: int = 256,
+        num_style_tokens: int = 50,
         num_superblocks: int = 4,
-        time_embed_dim: int = 64,    # Matches ONNX graph
-        rope_gamma: float = 10.0,  # LARoPE scaling factor (tts.json: rotary_scale=10)
+        time_embed_dim: int = 64,
+        rope_gamma: float = 10.0,
         main_blocks_cfg: dict = None,
         last_convnext_cfg: dict = None,
         text_n_heads: int = 4,
@@ -511,50 +381,33 @@ class VectorFieldEstimator(nn.Module):
         self.style_dim = style_dim
         self.rope_gamma = rope_gamma
 
-        # ------------------------------------------------------------------
-        # ONNX `/Expand_output_0` constant ([1, 50, 256]) — tiled to
-        # [B, 50, 256] (`/Tile_output_0`) and consumed by every style-attn
-        # W_key/MatMul. Stored as a single shared learnable parameter.
-        # ------------------------------------------------------------------
+        # Shared tiled constant ([1, 50, 256]) consumed by every style-attn W_key.
         self.tile = nn.Parameter(torch.randn(1, num_style_tokens, style_dim) * 0.02)
 
-        
-        # 1. Input Projection
         self.proj_in = ProjectionWrapper(in_channels, hidden_channels)
-        
-        # 2. Time Encoder
         self.time_encoder = TimeEncoder(time_embed_dim, hdim=time_hdim)
-        
-        # 3. Main Blocks
+
         self.main_blocks = nn.ModuleList()
-        
-        # ONNX graph shows all attention blocks share the same scale divisor
-        # sqrt(attn_dim) = sqrt(256) = 16.0 for both text and style attention.
-        # This is verified from the original ONNX constants (Constant_39 and
-        # Constant_9 in each attention block all equal 16.0).
-        shared_attn_scale = math.sqrt(256)  # = sqrt(attn_dim) = 16.0
-        
+
+        shared_attn_scale = math.sqrt(256)
+
         mb_cfg = main_blocks_cfg or {}
         lc_cfg = last_convnext_cfg or {}
-        
+
         c0_cfg = mb_cfg.get("convnext_0", {})
         c1_cfg = mb_cfg.get("convnext_1", {})
         c2_cfg = mb_cfg.get("convnext_2", {})
-        
+
         for _ in range(num_superblocks):
-            # 0: 4x Dilated ConvNeXt
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c0_cfg.get("ksz", 5), dilations=c0_cfg.get("dilation_lst", [1, 2, 4, 8]))
             )
-            # 1: Time Injection
             self.main_blocks.append(
                 TimeCondBlock(time_dim=time_embed_dim, channels=hidden_channels)
             )
-            # 2: 1x Standard ConvNeXt
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c1_cfg.get("ksz", 5), dilations=c1_cfg.get("dilation_lst", [1]))
             )
-            # 3: Text Attention (Length-Aware RoPE / LARoPE)
             self.main_blocks.append(
                 CrossAttentionBlock(
                     d_model=hidden_channels,
@@ -568,11 +421,9 @@ class VectorFieldEstimator(nn.Module):
                     rotary_base=rotary_base,
                 )
             )
-            # 4: 1x Standard ConvNeXt
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c2_cfg.get("ksz", 5), dilations=c2_cfg.get("dilation_lst", [1]))
             )
-            # 5: Style Attention (No RoPE, Tanh on Keys)
             self.main_blocks.append(
                 CrossAttentionBlock(
                     d_model=hidden_channels,
@@ -585,19 +436,15 @@ class VectorFieldEstimator(nn.Module):
                     rotary_base=rotary_base,
                 )
             )
-            
-        # 4. Last ConvNeXt
+
         self.last_convnext = ConvNeXtStack(
             hidden_channels, kernel_size=lc_cfg.get("ksz", 5), dilations=lc_cfg.get("dilation_lst", [1, 1, 1, 1])
         )
-        
-        # 5. Output Projection
         self.proj_out = ProjectionWrapper(hidden_channels, out_channels)
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
-        # Back-compat: old checkpoints stored the style-key constant under
-        # `style_key`; it was renamed to `tile` to match ONNX `/Tile_output_0`.
+        # Back-compat: older checkpoints stored the tiled style-key under `style_key`.
         legacy_key = prefix + "style_key"
         new_key = prefix + "tile"
         if legacy_key in state_dict and new_key not in state_dict:
@@ -617,55 +464,23 @@ class VectorFieldEstimator(nn.Module):
         current_step: torch.Tensor,
         total_step: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Forward pass. Signature matches the ONNX VF graph 1-to-1
-        (see `checks/notebook.ipynb`):
-
-            Inputs:
-              noisy_latent:  [B, 144, latent_length]
-              text_emb:      [B, 256, text_length]
-              style_ttl:     [B, 50, 256]
-              latent_mask:   [B, 1, latent_length]
-              text_mask:     [B, 1, text_length]
-              current_step:  [B]
-              total_step:    [B]  (ONNX inference only; None during training)
-            Output:
-              denoised_latent: [B, 144, latent_length]  (ONNX inference)
-              or vector_field: [B, 144, latent_length]  (training)
-
-        ONNX behavior (total_step provided):
-            /Reshape, /Reshape_1, /Div → normalized t in [0,1]
-            /Reciprocal → 1/total_step
-            /Mul + /Add + /Mul_1  → denoised = noisy + (1/total_step)*diff_out
-        Training behavior (total_step is None):
-            `current_step` is already normalized t in [0,1] and we return
-            the raw vector-field prediction `diff_out` (no Euler step).
-        """
         B = noisy_latent.shape[0]
 
-        # --- Time normalization (/Reshape, /Reshape_1, /Div, /Reciprocal) ---
         if total_step is not None:
-            t_norm = current_step.reshape(B, 1, 1) / total_step.reshape(B, 1, 1)  # [B,1,1]
-            reciprocal = 1.0 / total_step.reshape(B, 1, 1)                         # [B,1,1]
+            t_norm = current_step.reshape(B, 1, 1) / total_step.reshape(B, 1, 1)
+            reciprocal = 1.0 / total_step.reshape(B, 1, 1)
             t_norm_flat = t_norm.reshape(B)
         else:
             t_norm_flat = current_step.reshape(B)
 
-        # /vector_field/time_encoder — sinusoidal → MLP → [B, 64]
         t_emb = self.time_encoder(t_norm_flat)
-
-        # /vector_field/main_blocks.3/Transpose_1 — text [B,256,T] → [B,T,256]
         text_blc = text_emb.transpose(1, 2)
 
-        # /vector_field/proj_in/net/Conv + /vector_field/proj_in/Mul
         x = self.proj_in(noisy_latent)
         x = x * latent_mask
 
-        # Main Blocks — 4 superblocks × 6 sub-blocks (ConvNeXt×4d, TimeCond, ConvNeXt×1,
-        # TextAttn (LARoPE, 4h), ConvNeXt×1, StyleAttn (Tanh, 2h))
         for i, block in enumerate(self.main_blocks):
             idx_in_super = i % 6
-
             if idx_in_super == 0:
                 x = block(x, mask=latent_mask)
             elif idx_in_super == 1:
@@ -679,51 +494,14 @@ class VectorFieldEstimator(nn.Module):
             elif idx_in_super == 4:
                 x = block(x, mask=latent_mask)
             elif idx_in_super == 5:
-                # ONNX /Tile: [1,50,256] -> [B,50,256] feeds every style-attn W_key.
                 x = block(x, context=style_ttl,
                           context_keys=self.tile.expand(B, -1, -1),
                           x_mask=latent_mask, context_mask=None)
 
-        # /vector_field/last_convnext
         x = self.last_convnext(x, mask=latent_mask)
-
-        # /vector_field/proj_out/net/Conv + /vector_field/proj_out/Mul
         diff_out = self.proj_out(x) * latent_mask
 
         if total_step is not None:
-            # ONNX: /Mul (reciprocal * diff_out) → /Add (noisy + ...) → /Mul_1 (* mask)
             denoised = noisy_latent + reciprocal * diff_out
             return denoised * latent_mask
         return diff_out
-
-if __name__ == "__main__":
-    B = 1
-    T_latent = 100
-    T_text = 60
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Running on {device}")
-
-    model = VectorFieldEstimator(
-        in_channels=144, hidden_channels=512, out_channels=144,
-        text_dim=256, style_dim=256, num_superblocks=4, time_embed_dim=64,
-    ).to(device).eval()
-
-    print(f"Params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
-
-    # ONNX input spec — 7 inputs, 1 output (see checks/notebook.ipynb).
-    noisy_latent = torch.randn(B, 144, T_latent, device=device)
-    text_emb     = torch.randn(B, 256, T_text, device=device)
-    style_ttl    = torch.randn(B, 50, 256, device=device)
-    latent_mask  = torch.ones(B, 1, T_latent, device=device)
-    text_mask    = torch.ones(B, 1, T_text, device=device)
-    current_step = torch.tensor([5.0], device=device)
-    total_step   = torch.tensor([32.0], device=device)
-
-    with torch.no_grad():
-        out = model(noisy_latent, text_emb, style_ttl,
-                    latent_mask, text_mask, current_step, total_step)
-
-    print(f"Output: {out.shape}")
-    assert out.shape == (B, 144, T_latent)
-    print("OK")
