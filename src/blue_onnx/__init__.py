@@ -1,14 +1,409 @@
-import os
+"""Blue ONNX TTS — single-file inference module.
+
+Everything (vocab loading, phonemization, chunking, ONNX pipeline) lives here.
+Character→ID tables are loaded from ``vocab.json`` at import time.
+"""
+
 import json
+import os
 import re
-from typing import List, Optional, Tuple
+import subprocess
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from importlib import import_module
+from typing import Any, List, Optional, Tuple
+from unicodedata import normalize as uni_normalize
 
 import numpy as np
 import onnxruntime as ort
 
-from ._blue_vocab import text_to_indices, text_to_indices_multilang
-from ._common import BLUE_SYNTH_MAX_CHUNK_LEN, Style, TextProcessor, chunk_text
 
+# ─── Vocab (loaded from vocab.json) ───────────────────────────────────────────
+
+_VOCAB_PATH = os.path.join(os.path.dirname(__file__), "vocab.json")
+with open(_VOCAB_PATH, encoding="utf-8") as _f:
+    _VOCAB = json.load(_f)
+
+PAD_ID: int = _VOCAB["pad_id"]
+BOS_ID: int = _VOCAB["bos_id"]
+EOS_ID: int = _VOCAB["eos_id"]
+VOCAB_SIZE: int = _VOCAB["vocab_size"]
+LANG_ID: dict = {k: int(v) for k, v in _VOCAB["lang_id"].items()}
+LANG_CODE_ALIASES: dict = dict(_VOCAB["lang_aliases"])
+CHAR_TO_ID: dict = {k: int(v) for k, v in _VOCAB["char_to_id"].items()}
+ID_TO_CHAR: dict = {v: k for k, v in CHAR_TO_ID.items()}
+for _n, _i in LANG_ID.items():
+    ID_TO_CHAR[_i] = f"<{_n}>"
+
+# Max IPA chars per synthesis forward pass.
+BLUE_SYNTH_MAX_CHUNK_LEN = 150
+
+_INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)(?:</\1>|<\1>)", re.DOTALL)
+
+
+# ─── Text normalization & tokenization ────────────────────────────────────────
+
+def normalize_text(text: str, lang: str = "he") -> str:
+    """Unicode-normalize and apply common phoneme substitutions."""
+    text = uni_normalize("NFD", text.strip())
+    for k, v in {
+        "\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'",
+        "\u00b4": "'", "`": "'", "\u2013": "-", "\u2011": "-", "\u2014": "-",
+    }.items():
+        text = text.replace(k, v)
+    if lang == "he":
+        text = text.replace("r", "\u0281").replace("g", "\u0261")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def text_to_indices(text: str, lang: str = "he") -> List[int]:
+    """IPA string → vocab IDs, prefixed with a language token."""
+    lang = LANG_CODE_ALIASES.get(lang, lang)
+    if lang not in LANG_ID:
+        raise ValueError(f"Unknown language {lang!r}. Available: {list(LANG_ID)}")
+    return [LANG_ID[lang]] + [CHAR_TO_ID.get(ch, PAD_ID) for ch in text]
+
+
+def text_to_indices_multilang(text: str, base_lang: str = "he") -> List[int]:
+    """IPA string with ``<lan>…</lan>`` tags → vocab IDs with inline switch tokens."""
+    base_lang = LANG_CODE_ALIASES.get(base_lang, base_lang)
+    if base_lang not in LANG_ID:
+        raise ValueError(f"Unknown language {base_lang!r}. Available: {list(LANG_ID)}")
+    if "<" not in text:
+        return text_to_indices(text, lang=base_lang)
+
+    segments: List[Tuple[str, str]] = []
+    last_end = 0
+    for m in _INLINE_LANG_PAIR.finditer(text):
+        if m.start() > last_end:
+            segments.append((base_lang, text[last_end:m.start()]))
+        tag = LANG_CODE_ALIASES.get(m.group(1), m.group(1))
+        segments.append((tag if tag in LANG_ID else base_lang, m.group(2)))
+        last_end = m.end()
+    if last_end < len(text):
+        segments.append((base_lang, text[last_end:]))
+
+    ids: List[int] = [LANG_ID[base_lang]]
+    current = base_lang
+    for lang, seg in segments:
+        if lang != current:
+            ids.append(LANG_ID.get(lang, LANG_ID[base_lang]))
+            current = lang
+        ids.extend(CHAR_TO_ID.get(ch, PAD_ID) for ch in seg)
+    return ids
+
+
+# ─── Hebrew pre-G2P clause splitter ───────────────────────────────────────────
+
+def _hard_split(s: str, max_len: int) -> List[str]:
+    s = s.strip()
+    if not s or max_len <= 0:
+        return [s] if s else []
+    if len(s) <= max_len:
+        return [s]
+    out, start, n = [], 0, len(s)
+    while start < n:
+        end = min(start + max_len, n)
+        if end < n:
+            cut = s[start:end].rfind(" ")
+            if cut > max(max_len // 4, 8):
+                end = start + cut
+        piece = s[start:end].strip()
+        if piece:
+            out.append(piece)
+        start = end
+        while start < n and s[start] == " ":
+            start += 1
+    return out
+
+
+def _split_hebrew_clause(p: str, max_chars: int) -> List[str]:
+    p = p.strip()
+    if not p:
+        return []
+    if len(p) <= max_chars:
+        return [p]
+    for pat in (r"(?<=:)\s+", r"(?<=[\u0590-\u05ff])-\s+", r",\s+"):
+        pieces = [x.strip() for x in re.split(pat, p) if x.strip()]
+        if len(pieces) > 1:
+            out: List[str] = []
+            for x in pieces:
+                out.extend(_split_hebrew_clause(x, max_chars))
+            return out
+    return _hard_split(p, max_chars)
+
+
+def _split_hebrew_prephoneme(text: str, max_chars: int = 96) -> List[str]:
+    t = re.sub(r"\s+", " ", re.sub(r"[.?!]+", lambda m: m.group(0)[0], text).replace("…", ".")).strip()
+    if not t:
+        return []
+    clauses: List[str] = []
+    for block in re.split(r"\n+", t):
+        for sent in re.split(r"(?<=[.!?])\s+", block.strip()):
+            if sent.strip():
+                clauses.extend(_split_hebrew_clause(sent.strip(), max_chars))
+    return clauses or [t]
+
+
+# ─── Generic text chunker ─────────────────────────────────────────────────────
+
+_CHUNK_BOUNDARY = re.compile(
+    r"(?<!Mr\.)(?<!Mrs\.)(?<!Ms\.)(?<!Dr\.)(?<!Prof\.)(?<!Sr\.)(?<!Jr\.)"
+    r"(?<!Ph\.D\.)(?<!etc\.)(?<!e\.g\.)(?<!i\.e\.)(?<!vs\.)(?<!Inc\.)"
+    r"(?<!Ltd\.)(?<!Co\.)(?<!Corp\.)(?<!St\.)(?<!Ave\.)(?<!Blvd\.)"
+    r"(?<!\b[A-Z]\.)(?<=[.!?])\s+"
+)
+
+
+def chunk_text(text: str, max_len: int = 300) -> List[str]:
+    """Split text into sentence-boundary chunks no longer than ``max_len``."""
+    text = re.sub(r"([.!?])(</[a-z]{2,8}>)\s+", r"\1\2\n\n", text)
+    chunks: List[str] = []
+    for paragraph in re.split(r"\n\s*\n+", text.strip()):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        current = ""
+        for sentence in _CHUNK_BOUNDARY.split(paragraph):
+            if len(current) + len(sentence) + 1 <= max_len:
+                current += (" " if current else "") + sentence
+            else:
+                if current:
+                    chunks.append(current.strip())
+                if len(sentence) > max_len:
+                    chunks.extend(_hard_split(sentence, max_len))
+                    current = ""
+                else:
+                    current = sentence
+        if current:
+            chunks.append(current.strip())
+    base = chunks if chunks else ([text.strip()] if text.strip() else [])
+    out: List[str] = []
+    for c in base:
+        out.extend(_hard_split(c, max_len))
+
+    # Repair language tags split across chunks.
+    fixed, active = [], None
+    for c in out:
+        c = c.strip()
+        if not c:
+            continue
+        if active and not c.startswith(f"<{active}>"):
+            c = f"<{active}>" + c
+        for m in re.finditer(r"<(/)?([a-z]{2,8})>", c):
+            if m.group(1):
+                if active == m.group(2):
+                    active = None
+            else:
+                active = m.group(2)
+        if active and not c.endswith(f"</{active}>"):
+            c = c + f"</{active}>"
+        fixed.append(c)
+    return fixed or ([text.strip()] if text.strip() else [])
+
+
+# ─── Phonemization ────────────────────────────────────────────────────────────
+
+_ESPEAK_MAP = {
+    "en": "en-us", "en-us": "en-us", "de": "de", "ge": "de",
+    "it": "it", "es": "es",
+}
+
+
+class TextProcessor:
+    """Renikud G2P (Hebrew) + espeak (others). ``<lan>…</lan>`` spans phonemize per-tag."""
+
+    def __init__(self, renikud_path: Optional[str] = None, *, renikud_max_clause_chars: int = 96):
+        self.renikud = None
+        self._max_clause = renikud_max_clause_chars
+        if renikud_path is None and os.path.exists("model.onnx"):
+            renikud_path = "model.onnx"
+        if renikud_path and os.path.exists(renikud_path):
+            try:
+                from renikud_onnx import G2P
+                self.renikud = G2P(renikud_path)
+                print(f"[INFO] Loaded Renikud G2P from {renikud_path}")
+            except ImportError as e:
+                raise RuntimeError(
+                    "Hebrew G2P needs `renikud-onnx`. Install with `uv sync`."
+                ) from e
+
+    def _require_renikud(self) -> ValueError:
+        return ValueError(
+            "Hebrew text requires Renikud ONNX weights. Download:\n"
+            "  wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx\n"
+            "Then pass renikud_path='model.onnx' to BlueTTS."
+        )
+
+    def _espeak(self, text: str, lang: str) -> str:
+        espeak_lang = _ESPEAK_MAP.get(lang)
+        if espeak_lang is None:
+            return text
+        try:
+            import espeakng_loader
+            EspeakBackend = import_module("phonemizer.backend").EspeakBackend
+            EspeakWrapper = import_module("phonemizer.backend.espeak.wrapper").EspeakWrapper
+            Separator = import_module("phonemizer.separator").Separator
+            EspeakWrapper.set_library(espeakng_loader.get_library_path())
+            if hasattr(EspeakWrapper, "set_data_path"):
+                EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
+            backend = EspeakBackend(
+                espeak_lang, preserve_punctuation=True,
+                with_stress=True, language_switch="remove-flags",
+            )
+            raw = backend.phonemize([text], separator=Separator(phone="", word=" ", syllable=""))[0]
+            return normalize_text(raw, lang=lang)
+        except Exception as e:
+            print(f"[WARN] Phonemizer backend failed for lang={lang}: {e}")
+        try:
+            r = subprocess.run(
+                ["espeak-ng", "-q", "--ipa=1", "-v", espeak_lang, text],
+                check=True, capture_output=True, text=True,
+            )
+            return normalize_text(r.stdout.replace("\n", " ").strip(), lang=lang)
+        except Exception as e:
+            print(f"[WARN] espeak-ng fallback failed for lang={lang}: {e}")
+            return text
+
+    def _phonemize_segment(self, content: str, lang: str) -> str:
+        content = content.strip()
+        if not content:
+            return ""
+        lang = LANG_CODE_ALIASES.get(lang, lang)
+        if lang not in LANG_ID:
+            lang = "he"
+        has_hebrew = any("\u0590" <= c <= "\u05ff" for c in content)
+        if has_hebrew:
+            if self.renikud is None:
+                raise self._require_renikud()
+            clauses = _split_hebrew_prephoneme(content, self._max_clause)
+            parts = [normalize_text(self.renikud.phonemize(c), lang="he") for c in clauses if c.strip()]
+            return re.sub(r"\s+", " ", " ".join(parts)).strip()
+        if lang == "he":
+            return normalize_text(content, lang="he")
+        return self._espeak(content, lang)
+
+    def phonemize(self, text: str, lang: str = "he") -> str:
+        if _INLINE_LANG_PAIR.search(text):
+            pieces: List[str] = []
+            last_end = 0
+            for m in _INLINE_LANG_PAIR.finditer(text):
+                if m.start() > last_end:
+                    p = self._phonemize_segment(text[last_end:m.start()], lang)
+                    if p:
+                        pieces.append(p)
+                tag = m.group(1)
+                seg_lang = LANG_CODE_ALIASES.get(tag, tag)
+                if seg_lang not in LANG_ID:
+                    seg_lang = lang
+                pieces.append(f"<{tag}>{self._phonemize_segment(m.group(2), seg_lang)}</{tag}>")
+                last_end = m.end()
+            if last_end < len(text):
+                p = self._phonemize_segment(text[last_end:], lang)
+                if p:
+                    pieces.append(p)
+            return re.sub(r"\s+", " ", " ".join(pieces)).strip()
+        return self._phonemize_segment(text, lang)
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+@contextmanager
+def timer(name: str):
+    start = time.time()
+    print(f"{name}...")
+    yield
+    print(f"  -> {name} completed in {time.time() - start:.2f} sec")
+
+
+def sanitize_filename(text: str, max_len: int) -> str:
+    return re.sub(r"[^\w]", "_", text[:max_len], flags=re.UNICODE)
+
+
+@dataclass
+class Style:
+    """Pre-extracted speaker style vectors."""
+    ttl: Any
+    dp: Optional[Any] = None
+
+
+# ─── ONNX loaders ─────────────────────────────────────────────────────────────
+
+def make_session_options() -> ort.SessionOptions:
+    opts = ort.SessionOptions()
+    opts.log_severity_level = 3
+    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    cores = max(1, (os.cpu_count() or 4) // 4)
+    opts.intra_op_num_threads = int(os.environ.get("ORT_INTRA", cores))
+    opts.inter_op_num_threads = int(os.environ.get("ORT_INTER", 1))
+    return opts
+
+
+def pick_providers(use_gpu: bool) -> List[str]:
+    available = ort.get_available_providers()
+    wanted = ["CUDAExecutionProvider", "OpenVINOExecutionProvider", "CPUExecutionProvider"] if use_gpu \
+        else ["OpenVINOExecutionProvider", "CPUExecutionProvider"]
+    return [p for p in wanted if p in available]
+
+
+def _resolve(onnx_dir: str, name: str) -> Optional[str]:
+    base = os.path.join(onnx_dir, name)
+    slim = base.replace(".onnx", ".slim.onnx")
+    if os.path.exists(slim):
+        return slim
+    return base if os.path.exists(base) else None
+
+
+def load_onnx(path: str, opts: ort.SessionOptions, providers: List[str]) -> ort.InferenceSession:
+    return ort.InferenceSession(path, sess_options=opts, providers=providers)
+
+
+def load_cfgs(onnx_dir: str, config_path: str = "tts.json") -> dict:
+    for p in (config_path, os.path.join(onnx_dir, "tts.json")):
+        if p and os.path.exists(p):
+            with open(p) as f:
+                return json.load(f)
+    return {}
+
+
+def load_shuffle_keys(onnx_dir: str) -> dict:
+    p = os.path.join(onnx_dir, "keys.npz")
+    if not os.path.exists(p):
+        return {}
+    data = np.load(p)
+    out: dict = {}
+    for k in data.files:
+        parts = k.split("/", 1)
+        if len(parts) == 2:
+            out.setdefault(parts[0], {})[parts[1]] = data[k]
+    return out
+
+
+def load_voice_style(voice_style_paths: List[str], verbose: bool = False) -> Style:
+    """Load one or more voice style JSONs into a batched ``Style``."""
+    bsz = len(voice_style_paths)
+    with open(voice_style_paths[0]) as f:
+        first = json.load(f)
+    ttl_dims = first["style_ttl"]["dims"]
+    ttl = np.zeros([bsz, ttl_dims[1], ttl_dims[2]], dtype=np.float32)
+    dp: Optional[np.ndarray] = None
+    if "style_dp" in first:
+        dd = first["style_dp"]["dims"]
+        dp = np.zeros([bsz, dd[1], dd[2]], dtype=np.float32)
+    for i, path in enumerate(voice_style_paths):
+        with open(path) as f:
+            d = json.load(f)
+        ttl[i] = np.array(d["style_ttl"]["data"], dtype=np.float32).reshape(ttl_dims[1], ttl_dims[2])
+        if dp is not None and "style_dp" in d:
+            dd = d["style_dp"]["dims"]
+            dp[i] = np.array(d["style_dp"]["data"], dtype=np.float32).reshape(dd[1], dd[2])
+    if verbose:
+        print(f"Loaded {bsz} voice styles")
+    return Style(ttl=ttl, dp=dp)
+
+
+# ─── BlueTTS (single class, single voice) ─────────────────────────────────────
 
 class BlueTTS:
     def __init__(
@@ -28,7 +423,6 @@ class BlueTTS:
         renikud_max_clause_chars: int = 96,
     ):
         self.onnx_dir = onnx_dir
-        self.style_json = style_json
         self.steps = steps
         self.cfg_scale = cfg_scale
         self.speed = speed
@@ -38,239 +432,209 @@ class BlueTTS:
         self.fade_duration = fade_duration
 
         if renikud_path is None:
-            if os.path.exists("model.onnx"):
-                renikud_path = "model.onnx"
-            elif os.path.exists(os.path.join(onnx_dir, "model.onnx")):
-                renikud_path = os.path.join(onnx_dir, "model.onnx")
+            for cand in ("model.onnx", os.path.join(onnx_dir, "model.onnx")):
+                if os.path.exists(cand):
+                    renikud_path = cand
+                    break
 
-        self._load_config(config_path)
-        self._init_sessions(use_gpu)
-        self._load_shuffle_keys()
-        self._text_proc = TextProcessor(renikud_path, renikud_max_clause_chars=renikud_max_clause_chars)
-
-    # ------------------------------------------------------------------
-    # Setup
-    # ------------------------------------------------------------------
-
-    def _load_config(self, config_path: str):
-        self.latent_dim = 24
-        self.chunk_compress_factor = 6
-        self.hop_length = 512
-        self.sample_rate = 44100
-
-        if config_path and os.path.exists(config_path):
-            with open(config_path) as f:
-                cfg = json.load(f)
-            self.latent_dim = int(cfg.get("ttl", {}).get("latent_dim", self.latent_dim))
-            self.chunk_compress_factor = int(cfg.get("ttl", {}).get("chunk_compress_factor", self.chunk_compress_factor))
-            self.sample_rate = int(cfg.get("ae", {}).get("sample_rate", self.sample_rate))
-            self.hop_length = int(cfg.get("ae", {}).get("encoder", {}).get("spec_processor", {}).get("hop_length", self.hop_length))
-
+        cfgs = load_cfgs(onnx_dir, config_path)
+        ttl = cfgs.get("ttl", {}) or {}
+        ae = cfgs.get("ae", {}) or {}
+        spec = (ae.get("encoder", {}) or {}).get("spec_processor", {}) or {}
+        self.latent_dim = int(ttl.get("latent_dim", 24))
+        self.chunk_compress_factor = int(ttl.get("chunk_compress_factor", 6))
+        self.hop_length = int(spec.get("hop_length", 512))
+        self.sample_rate = int(ae.get("sample_rate", 44100))
         self.compressed_channels = self.latent_dim * self.chunk_compress_factor
 
-    def _init_sessions(self, use_gpu: bool):
-        available = ort.get_available_providers()
-        if use_gpu:
-            providers = [p for p in ["CUDAExecutionProvider", "OpenVINOExecutionProvider", "CPUExecutionProvider"] if p in available]
-        else:
-            providers = [p for p in ["OpenVINOExecutionProvider", "CPUExecutionProvider"] if p in available]
+        opts = make_session_options()
+        providers = pick_providers(use_gpu)
 
-        opts = ort.SessionOptions()
-        opts.log_severity_level = 3
-        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        cpu_cores = max(1, (os.cpu_count() or 4) // 4)
-        opts.intra_op_num_threads = int(os.environ.get("ORT_INTRA", cpu_cores))
-        opts.inter_op_num_threads = int(os.environ.get("ORT_INTER", 1))
+        def _req(name):
+            p = _resolve(onnx_dir, name)
+            if p is None:
+                raise FileNotFoundError(f"Model not found: {os.path.join(onnx_dir, name)}")
+            return load_onnx(p, opts, providers)
 
-        self._opts = opts
-        self._providers = providers
+        def _opt(name):
+            p = _resolve(onnx_dir, name)
+            return load_onnx(p, opts, providers) if p else None
 
-        self._text_enc = self._load_session("text_encoder.onnx")
-        self._vf = self._load_session("vector_estimator.onnx")
-        self._vocoder = self._load_session("vocoder.onnx")
-        self._dp = self._load_session("duration_predictor.onnx", required=False)
-
+        self._text_enc = _req("text_encoder.onnx")
+        self._vf = _req("vector_estimator.onnx")
+        self._vocoder = _req("vocoder.onnx")
+        # Prefer length_pred_style (uses style_dp from voice JSON); fall back to
+        # duration_predictor (newer export — requires z_ref/ref_mask).
+        self._dp = _opt("length_pred_style.onnx") or _opt("duration_predictor.onnx")
+        self._te_inputs = {i.name for i in self._text_enc.get_inputs()}
         self._vf_inputs = {i.name for i in self._vf.get_inputs()}
+        self._dp_inputs = {i.name for i in self._dp.get_inputs()} if self._dp else set()
+        self._vocoder_input = self._vocoder.get_inputs()[0].name
 
-    def _load_session(self, name: str, required: bool = True) -> Optional[ort.InferenceSession]:
-        base = os.path.join(self.onnx_dir, name)
-        slim = base.replace(".onnx", ".slim.onnx")
-        path = slim if os.path.exists(slim) else base
-        if not os.path.exists(path):
-            if required:
-                raise FileNotFoundError(f"Model not found: {base}")
-            return None
-        return ort.InferenceSession(path, sess_options=self._opts, providers=self._providers)
+        # Optional uncond embeddings for classifier-free guidance (u_text, u_ref).
+        # If present, CFG is applied via two vector_estimator passes per step.
+        self._u_text = None
+        self._u_ref = None
+        uncond_path = os.path.join(onnx_dir, "uncond.npz")
+        if os.path.exists(uncond_path):
+            un = np.load(uncond_path)
+            if "u_text" in un.files:
+                self._u_text = un["u_text"].astype(np.float32)
+            if "u_ref" in un.files:
+                self._u_ref = un["u_ref"].astype(np.float32)
 
-    def _load_shuffle_keys(self):
-        self._model_keys: dict = {}
-        keys_path = os.path.join(self.onnx_dir, "keys.npz")
-        if not os.path.exists(keys_path):
-            return
-        data = np.load(keys_path)
-        for k in data.files:
-            parts = k.split("/", 1)
-            if len(parts) == 2:
-                model, inp = parts
-                self._model_keys.setdefault(model, {})[inp] = data[k]
+        # Optional denormalization stats (mean/std/normalizer_scale)
+        self._stats_mean = None
+        self._stats_std = None
+        self._normalizer_scale = 1.0
+        stats_path = os.path.join(onnx_dir, "stats.npz")
+        if os.path.exists(stats_path):
+            st = np.load(stats_path)
+            if "mean" in st.files:
+                self._stats_mean = st["mean"].astype(np.float32)
+            if "std" in st.files:
+                self._stats_std = st["std"].astype(np.float32)
+            if "normalizer_scale" in st.files:
+                self._normalizer_scale = float(np.squeeze(st["normalizer_scale"]))
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        self._keys = load_shuffle_keys(onnx_dir)
+        self._style = load_voice_style([style_json]) if style_json else None
+        self._text_proc = TextProcessor(renikud_path, renikud_max_clause_chars=renikud_max_clause_chars)
+
+    # ── Public API ──────────────────────────────────────────────────────────
+
+    def synthesize(self, text: str, lang: str = "he") -> Tuple[np.ndarray, int]:
+        """Phonemize raw text then synthesize."""
+        return self.create(self._text_proc.phonemize(text, lang=lang), lang=lang)
 
     def create(self, phonemes: str, lang: str = "he") -> Tuple[np.ndarray, int]:
-        """Synthesize speech from a pre-phonemized (IPA) string."""
+        """Synthesize from pre-phonemized IPA."""
         chunks = chunk_text(phonemes, self.chunk_len)
         silence = np.zeros(int(self.silence_sec * self.sample_rate), dtype=np.float32)
-        parts = []
+        parts: List[np.ndarray] = []
         for i, chunk in enumerate(chunks):
-            parts.append(self._infer_chunk(chunk, lang=lang))
+            parts.append(self._infer_chunk(chunk, lang))
             if i < len(chunks) - 1:
                 parts.append(silence)
         wav = np.concatenate(parts) if parts else np.array([], dtype=np.float32)
         return wav, self.sample_rate
 
-    def synthesize(self, text: str, lang: str = "he") -> Tuple[np.ndarray, int]:
-        """Phonemize raw text (phonikud for Hebrew, espeak for others) then synthesize."""
-        phonemes = self._text_proc.phonemize(text, lang=lang)
-        return self.create(phonemes, lang=lang)
+    # ── Internals ───────────────────────────────────────────────────────────
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _run(self, sess: ort.InferenceSession, feed: dict, model_name: str):
-        keys = self._model_keys.get(model_name)
-        if keys:
-            feed = {**feed, **keys}
+    def _run(self, sess, feed, name):
+        extra = self._keys.get(name)
+        if extra:
+            feed = {**feed, **extra}
         return sess.run(None, feed)
 
-    def _load_style_json(self, path: str):
-        with open(path) as f:
-            j = json.load(f)
-
-        def _arr(key):
-            if key not in j:
-                return None
-            a = np.array(j[key]["data"], dtype=np.float32)
-            return a[None] if a.ndim == 2 else a
-
-        style_ttl = _arr("style_ttl")
-        style_dp = _arr("style_dp")
-        return style_ttl, style_dp
-
-    def _infer_chunk(self, phonemes: str, lang: str = "he") -> np.ndarray:
-        if not self.style_json:
+    def _infer_chunk(self, phonemes: str, lang: str) -> np.ndarray:
+        if self._style is None:
             raise ValueError("style_json is required (must contain style_ttl and style_dp).")
-        style_ttl, style_dp = self._load_style_json(self.style_json)
-        if style_ttl is None:
-            raise ValueError(f"{self.style_json} missing 'style_ttl'.")
-
-        text_plain = re.sub(r"</?[a-z]{2,8}>", "", phonemes)
-        indices_dp = text_to_indices(text_plain, lang=lang)
-        ids_dp = np.array([indices_dp], dtype=np.int64)
-        mask_dp = np.ones((1, 1, len(indices_dp)), dtype=np.float32)
-
-        indices_full = text_to_indices_multilang(phonemes, base_lang=lang)
-        text_ids = np.array([indices_full], dtype=np.int64)
-        text_mask = np.ones((1, 1, len(indices_full)), dtype=np.float32)
-
+        style_ttl = self._style.ttl
         if style_ttl.ndim == 2:
             style_ttl = style_ttl[None]
+        style_dp = self._style.dp
 
-        # Text encoder
-        te_names = {i.name for i in self._text_enc.get_inputs()}
+        plain = re.sub(r"</?[a-z]{2,8}>", "", phonemes)
+        ids_dp = np.array([text_to_indices(plain, lang=lang)], dtype=np.int64)
+        mask_dp = np.ones((1, 1, ids_dp.shape[1]), dtype=np.float32)
+        text_ids = np.array([text_to_indices_multilang(phonemes, base_lang=lang)], dtype=np.int64)
+        text_mask = np.ones((1, 1, text_ids.shape[1]), dtype=np.float32)
+
         te_feed = {"text_ids": text_ids, "text_mask": text_mask, "style_ttl": style_ttl}
-        if "ref_keys" in te_names:
+        if "ref_keys" in self._te_inputs:
             te_feed["ref_keys"] = style_ttl
         text_emb = self._run(self._text_enc, te_feed, "text_encoder")[0]
 
-        T_lat = self._predict_duration(ids_dp, mask_dp, style_dp)
-        x = self._flow_matching(text_emb, style_ttl, text_mask, T_lat)
-        return self._decode(x)
+        # Duration predictor: length_pred_style outputs T_lat in latent frames directly;
+        # the legacy duration_predictor outputs seconds.
+        if self._dp is not None:
+            dp_feed: dict = {"text_ids": ids_dp, "text_mask": mask_dp}
+            if "style_dp" in self._dp_inputs and style_dp is not None:
+                dp_feed["style_dp"] = style_dp
+            if "z_ref" in self._dp_inputs and style_dp is not None:
+                dp_feed["z_ref"] = style_dp
+            if "ref_mask" in self._dp_inputs and style_dp is not None:
+                dp_feed["ref_mask"] = np.ones((1, 1, style_dp.shape[-1]), dtype=np.float32)
+            raw = float(np.squeeze(self._run(self._dp, dp_feed, "duration_predictor")[0]))
+            raw = raw / max(self.speed, 1e-6)
+            # Heuristic: small values (<~60 for 5-20 token chunks) are seconds; larger are frames.
+            # length_pred_style returns frames (~token_count in magnitude); scale-through both.
+            chunk_size = self.hop_length * self.chunk_compress_factor
+            as_frames = int(np.ceil(raw))
+            as_seconds = int(np.ceil(raw * self.sample_rate / chunk_size))
+            # Pick the interpretation that stays within a plausible range vs. token count.
+            ref = ids_dp.shape[1]  # a chunk's token count; T_lat is roughly in this ballpark
+            T_lat = as_frames if abs(as_frames - ref) <= abs(as_seconds - ref) else as_seconds
+            T_lat = max(10, T_lat)
+        else:
+            T_lat = max(10, int(ids_dp.shape[1] * 1.3))
 
-    def _predict_duration(self, text_ids, text_mask, style_dp) -> int:
-        T_lat = None
-        if self._dp is not None and style_dp is not None:
-            out = self._run(
-                self._dp,
-                {"text_ids": text_ids, "style_dp": style_dp, "text_mask": text_mask},
-                "duration_predictor",
-            )
-            val = float(np.squeeze(out[0]))
-            if np.isfinite(val):
-                T_lat = int(np.round(val / max(self.speed, 1e-6)))
-
-        if T_lat is None:
-            T_lat = int(text_ids.shape[1] * 1.3)
-
-        txt_len = int(np.sum(text_mask))
-        T_cap = max(20, min(txt_len * 3 + 20, 600))
-        T_lat = min(max(int(T_lat), 1), T_cap, 800)
-        return max(10, T_lat)
-
-    def _flow_matching(self, text_emb, style_ttl, text_mask, T_lat) -> np.ndarray:
+        # Flow matching
         rng = np.random.RandomState(self.seed)
         x = rng.randn(1, self.compressed_channels, T_lat).astype(np.float32)
         latent_mask = np.ones((1, 1, T_lat), dtype=np.float32)
-        cfg_scale = np.array([float(self.cfg_scale)], dtype=np.float32)
-
+        total = np.array([float(self.steps)], dtype=np.float32)
+        use_cfg = self.cfg_scale != 1.0 and self._u_text is not None and self._u_ref is not None
+        u_text_mask = np.ones((1, 1, 1), dtype=np.float32) if use_cfg else None
         for i in range(self.steps):
-            feed = {
-                "noisy_latent": x,
-                "text_emb": text_emb,
-                "style_ttl": style_ttl,
-                "latent_mask": latent_mask,
-                "text_mask": text_mask,
-                "current_step": np.array([float(i)], dtype=np.float32),
-                "total_step": np.array([float(self.steps)], dtype=np.float32),
-                "cfg_scale": cfg_scale,
+            cur = np.array([float(i)], dtype=np.float32)
+            feed_cond = {
+                "noisy_latent": x, "text_emb": text_emb, "style_ttl": style_ttl,
+                "latent_mask": latent_mask, "text_mask": text_mask,
+                "current_step": cur, "total_step": total,
             }
-            x = self._run(self._vf, feed, "vector_estimator")[0]
+            if "cfg_scale" in self._vf_inputs:
+                # CFG baked into the graph.
+                feed_cond["cfg_scale"] = np.array([float(self.cfg_scale)], dtype=np.float32)
+                x = self._run(self._vf, feed_cond, "vector_estimator")[0]
+            elif use_cfg:
+                # CFG externally: v = v_uncond + cfg_scale * (v_cond - v_uncond).
+                v_cond = self._run(self._vf, feed_cond, "vector_estimator")[0]
+                feed_uncond = {
+                    "noisy_latent": x, "text_emb": self._u_text, "style_ttl": self._u_ref,
+                    "latent_mask": latent_mask, "text_mask": u_text_mask,
+                    "current_step": cur, "total_step": total,
+                }
+                v_uncond = self._run(self._vf, feed_uncond, "vector_estimator")[0]
+                x = v_uncond + self.cfg_scale * (v_cond - v_uncond)
+            else:
+                x = self._run(self._vf, feed_cond, "vector_estimator")[0]
 
-        return x
+        # Denormalize in the compressed (144-ch) space: z = (x / scale) * std + mean
+        if self._normalizer_scale and self._normalizer_scale != 1.0:
+            x = x / self._normalizer_scale
+        if self._stats_mean is not None and self._stats_std is not None:
+            x = x * self._stats_std + self._stats_mean
 
-    def _apply_fade(self, wav: np.ndarray) -> np.ndarray:
-        fade_samples = int(self.fade_duration * self.sample_rate)
-        if fade_samples == 0 or len(wav) < 2 * fade_samples:
-            return wav
-        wav = wav.copy()
-        wav[:fade_samples] *= np.linspace(0.0, 1.0, fade_samples, dtype=np.float32)
-        wav[-fade_samples:] *= np.linspace(1.0, 0.0, fade_samples, dtype=np.float32)
-        return wav
+        # Time-axis decompression: (B, C*K, T) -> (B, C, K, T) -> (B, C, T, K) -> (B, C, T*K)
+        if x.shape[1] == self.compressed_channels and self.chunk_compress_factor > 1:
+            B, _, T = x.shape
+            C, K = self.latent_dim, self.chunk_compress_factor
+            x = x.reshape(B, C, K, T).transpose(0, 1, 3, 2).reshape(B, C, T * K)
 
-    def _decode(self, z_pred: np.ndarray) -> np.ndarray:
-        wav = self._run(self._vocoder, {"z_pred": z_pred.astype(np.float32)}, "vocoder")[0]
-
+        # Vocoder (input name varies across exports: "z_pred" or "latent")
+        wav = self._run(self._vocoder, {self._vocoder_input: x.astype(np.float32)}, "vocoder")[0]
         frame_len = int(self.hop_length * self.chunk_compress_factor)
         if wav.shape[-1] > 2 * frame_len:
             wav = wav[..., frame_len:-frame_len]
-
         wav = wav.squeeze()
-        return self._apply_fade(wav)
+
+        # Fade in/out
+        fs = int(self.fade_duration * self.sample_rate)
+        if fs and len(wav) >= 2 * fs:
+            wav = wav.copy()
+            wav[:fs] *= np.linspace(0.0, 1.0, fs, dtype=np.float32)
+            wav[-fs:] *= np.linspace(1.0, 0.0, fs, dtype=np.float32)
+        return wav
 
 
-# ─── Module-level loaders ─────────────────────────────────────────────────────
-
-def load_voice_style(style_paths: List[str]) -> Style:
-    """Load pre-extracted style vectors from one or more style JSON files."""
-    B = len(style_paths)
-    with open(style_paths[0]) as f:
-        first = json.load(f)
-
-    ttl_dims = first["style_ttl"]["dims"]
-    ttl = np.zeros([B, ttl_dims[1], ttl_dims[2]], dtype=np.float32)
-
-    dp: Optional[np.ndarray] = None
-    if "style_dp" in first:
-        dp_dims = first["style_dp"]["dims"]
-        dp = np.zeros([B, dp_dims[1], dp_dims[2]], dtype=np.float32)
-
-    for i, path in enumerate(style_paths):
-        with open(path) as f:
-            d = json.load(f)
-        ttl[i] = np.array(d["style_ttl"]["data"], dtype=np.float32).reshape(ttl_dims[1], ttl_dims[2])
-        if dp is not None and "style_dp" in d:
-            dp[i] = np.array(d["style_dp"]["data"], dtype=np.float32).reshape(dp_dims[1], dp_dims[2])
-
-    return Style(ttl=ttl, dp=dp)
+__all__ = [
+    "BLUE_SYNTH_MAX_CHUNK_LEN", "BOS_ID", "CHAR_TO_ID", "EOS_ID", "ID_TO_CHAR",
+    "LANG_CODE_ALIASES", "LANG_ID", "PAD_ID", "VOCAB_SIZE",
+    "BlueTTS", "Style", "TextProcessor",
+    "chunk_text", "load_cfgs", "load_onnx", "load_shuffle_keys",
+    "load_voice_style", "make_session_options", "normalize_text",
+    "pick_providers", "sanitize_filename", "text_to_indices",
+    "text_to_indices_multilang", "timer",
+]
