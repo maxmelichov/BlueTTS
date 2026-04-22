@@ -222,6 +222,9 @@ def sample_audio(
     latent_dim=24,
     chunk_compress_factor=6,
     normalizer_scale=1.0,
+    cfg_scale: float = 1.0,
+    u_text=None,
+    u_ref=None,
 ):
     """
     Plain flow-matching sampling:
@@ -301,6 +304,14 @@ def sample_audio(
     x = xt
     dt = 1.0 / steps
 
+    # Classifier-free guidance (SupertonicTTS §3.4, arxiv 2503.23108):
+    #   v = v_uncond + cfg_scale * (v_cond - v_uncond)
+    use_cfg = float(cfg_scale) != 1.0 and u_text is not None and u_ref is not None
+    if use_cfg:
+        u_text_in = u_text.expand(B, -1, h_text.shape[2])
+        u_ref_in = u_ref.expand(B, -1, -1)
+        u_text_mask = torch.ones(B, 1, h_text.shape[2], device=device)
+
     for i in range(steps):
         t_val = i / steps
         t = torch.full((B,), t_val, device=device)
@@ -315,14 +326,21 @@ def sample_audio(
             current_step=t,
         )
 
-        v = v_cond
+        if use_cfg:
+            v_uncond = vf_estimator(
+                noisy_latent=x_in,
+                text_emb=u_text_in,
+                style_ttl=u_ref_in,
+                latent_mask=latent_mask,
+                text_mask=u_text_mask,
+                current_step=t,
+            )
+            v = v_uncond + cfg_scale * (v_cond - v_uncond)
+        else:
+            v = v_cond
 
         v = v * latent_mask
-
-
         x = x + v * dt
-
-
         x = x * latent_mask
     if normalizer_scale != 1.0 and normalizer_scale != 0.0:
         z_pred = (x / normalizer_scale) * std + mean
@@ -1423,6 +1441,9 @@ def train(
                                 normalizer_scale=normalizer_scale,
                                 style_ttl=style_ttl,
                                 style_dp=style_dp,
+                                cfg_scale=float(os.environ.get("BLUE_CFG_SCALE", 3.0)),
+                                u_text=u_text.detach(),
+                                u_ref=u_ref.detach(),
                             )
                             wav = wav_out.squeeze().cpu().numpy()
                             sf.write(os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_{suffix}.wav"), wav, ae_sample_rate)
@@ -1470,6 +1491,9 @@ def train(
                                     normalizer_scale=normalizer_scale,
                                     style_ttl=val_style_ttl,
                                     style_dp=val_style_dp,
+                                cfg_scale=float(os.environ.get("BLUE_CFG_SCALE", 3.0)),
+                                u_text=u_text.detach(),
+                                u_ref=u_ref.detach(),
                                 )
                                 wav = wav_out.squeeze().cpu().numpy()
                                 sf.write(os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_val_sample.wav"), wav, ae_sample_rate)
@@ -1523,6 +1547,9 @@ def train(
                                 normalizer_scale=normalizer_scale,
                                 style_ttl=vc_style_ttl,
                                 style_dp=vc_style_dp,
+                                cfg_scale=float(os.environ.get("BLUE_CFG_SCALE", 3.0)),
+                                u_text=u_text.detach(),
+                                u_ref=u_ref.detach(),
                             )
                             sf.write(
                                 os.path.join(log_dir, f"step_{global_step}_vc_output.wav"),
