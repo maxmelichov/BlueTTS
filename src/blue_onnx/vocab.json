@@ -2,18 +2,7 @@
   "pad_id": 0,
   "bos_id": 1,
   "eos_id": 2,
-  "vocab_size": 384,
-  "lang_region_start": 244,
-  "lang_id": {
-    "he": 244,
-    "en": 245,
-    "es": 246,
-    "de": 252,
-    "it": 253
-  },
-  "lang_aliases": {
-    "ge": "de"
-  },
+  "vocab_size": 256,
   "char_to_id": {
     "_": 0,
     "^": 1,
