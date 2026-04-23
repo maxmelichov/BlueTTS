@@ -40,12 +40,28 @@ class Style:
 # ─── Loaders ──────────────────────────────────────────────────────────────────
 
 def _load_sd(path: str, *candidates: str) -> dict:
-    """torch.load(path) then pick the first matching sub-key, or return raw."""
-    raw = torch.load(path, map_location="cpu", weights_only=False)
-    if isinstance(raw, dict):
-        for k in candidates:
-            if k in raw:
-                return raw[k]
+    """Load ``.pt`` or flat ``.safetensors``; pick nested key or ``prefix.*`` strip (HF codec exports)."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+    if path.endswith(".safetensors"):
+        from safetensors.torch import load_file
+
+        raw = load_file(path, device="cpu")
+    else:
+        raw = torch.load(path, map_location="cpu", weights_only=False)
+    if isinstance(raw, dict) and "state_dict" in raw and isinstance(raw["state_dict"], dict):
+        other = [k for k in raw if k not in ("state_dict", "optimizer", "scheduler", "global_step")]
+        if not other:
+            raw = raw["state_dict"]
+    if not isinstance(raw, dict):
+        raise TypeError(f"{path}: expected a dict checkpoint, got {type(raw)}")
+    for k in candidates:
+        if k in raw and isinstance(raw[k], dict):
+            return raw[k]
+        p = f"{k}."
+        sub = {x[len(p) :]: v for x, v in raw.items() if isinstance(x, str) and x.startswith(p)}
+        if sub:
+            return sub
     return raw
 
 
