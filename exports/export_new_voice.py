@@ -348,7 +348,12 @@ def main() -> None:
             if isinstance(state, dict) and emb in state:
                 vs = int(state[emb].shape[0])
 
-            dp = DPNetwork(vocab_size=vs, style_tokens=tok, style_dim=dim).to(device).eval()
+            dp = DPNetwork(
+                vocab_size=vs,
+                latent_channels=compressed_channels,
+                style_dp=tok,
+                style_dim=dim,
+            ).to(device).eval()
             dp.load_state_dict(state, strict=True)
 
             z_dp = trim_reference_latents(z_ref_norm, "DP")
