@@ -287,14 +287,18 @@ class BlueTTS:
         return self._decode(x)
 
     def _predict_duration(self, text_ids, text_mask, style_dp) -> int:
-        T_lat: Optional[int] = None
-        if style_dp is not None:
-            log_dur = self._dp(text_ids, text_mask=text_mask, style_dp=style_dp, return_log=True)
-            val = torch.exp(log_dur) / max(self.speed, 1e-6)
-            T_lat = int(val.round().item())
-        if T_lat is None:
-            T_lat = int(text_ids.shape[1] * 1.3)
+        """Match ``blue_onnx.BlueTTS._infer_chunk``: DP raw is ambiguous (frames vs seconds); pick closer to text length."""
         txt_len = int(text_ids.shape[1])
+        if style_dp is not None:
+            raw_t = self._dp(text_ids, text_mask=text_mask, style_dp=style_dp, return_log=False)
+            raw = float(raw_t.squeeze().detach().cpu()) / max(self.speed, 1e-6)
+            chunk_size = float(self.hop_length * self.chunk_compress_factor)
+            as_frames = int(np.ceil(raw))
+            as_seconds = int(np.ceil(raw * float(self.sample_rate) / chunk_size))
+            ref = txt_len
+            T_lat = as_frames if abs(as_frames - ref) <= abs(as_seconds - ref) else as_seconds
+        else:
+            T_lat = int(txt_len * 1.3)
         T_cap = max(20, min(txt_len * 3 + 20, 600))
         return max(10, min(max(T_lat, 10), T_cap, 800))
 
