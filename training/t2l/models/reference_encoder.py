@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from models.text2latent.text_encoder import ConvNeXtWrapper
+from training.t2l.models.text_encoder import ConvNeXtWrapper
 
 
 class ReferenceEncoder(nn.Module):
