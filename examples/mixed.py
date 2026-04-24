@@ -4,10 +4,10 @@ from pathlib import Path
 import soundfile as sf
 
 sys.path.append(".")
-from src.blue_onnx import BlueTTS
+from src.blue_onnx import TextToSpeech
 
 
-tts = BlueTTS(
+tts = TextToSpeech(
     onnx_dir="onnx_models",
     style_json="voices/female1.json",
 )
