@@ -395,7 +395,7 @@ class TextToSpeech:
         total_step: int,
         speed: float = 1.0,
         cfg_scale: float = 3.0,
-        silence_duration: float = 0.1,
+        silence_duration: float = 0.0,
         phonemize: bool = True,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Synthesize speech.
