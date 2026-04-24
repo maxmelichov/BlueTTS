@@ -186,8 +186,14 @@ class TextToSpeech:
         cfg_scale: float = 3.0,
         silence_duration: float = 0.0,
         phonemize: bool = True,
+        text_is_phonemes: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Synthesize speech (see ``blue_onnx.TextToSpeech.__call__``)."""
+        """Synthesize speech (see ``blue_onnx.TextToSpeech.__call__``).
+
+        Set ``text_is_phonemes=True`` when ``text`` already contains phonemes; this
+        skips G2P while keeping the normal tokenizer/chunking path.
+        """
+        phonemize = phonemize and not text_is_phonemes
         if isinstance(text, list):
             assert isinstance(lang, list) and len(text) == len(lang), (
                 "Batch mode requires `lang` to be a list of the same length as `text`."
