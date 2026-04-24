@@ -190,7 +190,7 @@ class TextToSpeech:
         total_step: int,
         speed: float = 1.0,
         cfg_scale: float = 3.0,
-        silence_duration: float = 0.1,
+        silence_duration: float = 0.0,
         phonemize: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Synthesize speech (see ``blue_onnx.TextToSpeech.__call__``)."""
