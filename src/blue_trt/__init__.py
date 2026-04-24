@@ -268,8 +268,15 @@ class BlueTRT:
 
     # ── Public API ──────────────────────────────────────────────────────────
 
-    def synthesize(self, text: str, lang: str = "he", cfg_scale: Optional[float] = None) -> Tuple[np.ndarray, int]:
-        return self.create(self._text_proc.phonemize(text, lang=lang), cfg_scale=cfg_scale)
+    def synthesize(
+        self,
+        text: str,
+        lang: str = "he",
+        cfg_scale: Optional[float] = None,
+        text_is_phonemes: bool = False,
+    ) -> Tuple[np.ndarray, int]:
+        phonemes = text if text_is_phonemes else self._text_proc.phonemize(text, lang=lang)
+        return self.create(phonemes, cfg_scale=cfg_scale)
 
     def create(self, phonemes: str, cfg_scale: Optional[float] = None) -> Tuple[np.ndarray, int]:
         cfg = self.cfg_scale if cfg_scale is None else float(cfg_scale)
