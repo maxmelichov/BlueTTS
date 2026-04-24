@@ -43,6 +43,10 @@ export = [
     "torchaudio>=2.1.0",
 ]
 
+[project.scripts]
+blue-train = "training.t2l.cli:main"
+blue-train-dp = "training.dp.cli:main"
+
 [tool.uv]
 # Repo is scripts + src packages, not a single importable `blue` package tree (avoids uv_build errors).
 package = false
