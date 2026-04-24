@@ -1,5 +1,14 @@
+from __future__ import annotations
+
+import glob
+import os
+from typing import Optional
+
 import torch
 import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+from training.utils import seed_worker
 
 class UncondParams(nn.Module):
     """Learnable unconditional tokens for CFG. Dims from ttl.uncond_masker config."""
@@ -71,3 +80,23 @@ def _validate_ttl_config(ttl_cfg: dict) -> None:
     lc = vf["last_convnext"]
     _eq("last_convnext.idim", lc["idim"], hidden)
     _eq("last_convnext.num_layers == len(dilation_lst)", len(lc["dilation_lst"]), lc["num_layers"])
+
+
+# --- dataloader / DDP / checkpoint helpers (kept with cfg to avoid extra tiny modules) ---
+
+
+def unwrap_ddp(module: nn.Module) -> nn.Module:
+    return module.module if isinstance(module, DDP) else module
+
+
+def ddp_state_dict(module: nn.Module) -> dict:
+    return module.module.state_dict() if isinstance(module, DDP) else module.state_dict()
+
+
+def _latest_ckpt_in_dir(directory: str) -> Optional[str]:
+    """Path to latest ``ckpt_step_*.pt`` in ``directory``, or None."""
+    ckpts = glob.glob(os.path.join(directory, "ckpt_step_*.pt"))
+    if not ckpts:
+        return None
+    ckpts.sort(key=lambda x: int(x.split("_")[-1].split(".")[0]))
+    return ckpts[-1]
