@@ -1,18 +1,10 @@
 import numpy as np
-import random
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler, DistributedSampler
 
 from training.data.text2latent_dataset import Text2LatentDataset, collate_text2latent
+from training.t2l.cfg_utils import seed_worker
 
-def seed_worker(worker_id):
-    np.random.seed(worker_id)
-    random.seed(worker_id)
-    torch.manual_seed(worker_id)
-    torch.cuda.manual_seed(worker_id)
-    torch.cuda.manual_seed_all(worker_id)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
 
 def get_dataloader(metadata_path, ae_sample_rate, batch_size, is_distributed, rank=0):
     dataset = Text2LatentDataset(
