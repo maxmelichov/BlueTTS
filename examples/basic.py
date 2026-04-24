@@ -10,8 +10,15 @@ style = load_voice_style(["voices/reference_pt.json"])
 OUT = Path("examples/out"); OUT.mkdir(parents=True, exist_ok=True)
 
 
-def save(text: str, lang: str, name: str):
-    audio, _ = tts(text, lang=lang, style=style, total_step=16, cfg_scale=3.0)
+def save(text: str, lang: str, name: str, text_is_phonemes: bool = False):
+    audio, _ = tts(
+        text,
+        lang=lang,
+        style=style,
+        total_step=5,
+        cfg_scale=3.0,
+        text_is_phonemes=text_is_phonemes,
+    )
     if audio.ndim == 2: audio = audio[0]
     sf.write(OUT / name, audio, tts.sample_rate)
     print(f"Saved {OUT / name}  ({len(audio)/tts.sample_rate:.2f}s)")
@@ -30,3 +37,7 @@ save(
     "שלום לכולם, <en>welcome to the demo</en>, <es>gracias por escuchar</es>.",
     "he", "basic_mixed.wav",
 )
+
+assert tts.g2p is not None
+ready_phonemes = tts.g2p.phonemize("Hello, this sentence is already phonemes.", lang="en")
+save(ready_phonemes, "en", "basic_en_ready_phonemes.wav", text_is_phonemes=True)

@@ -13,12 +13,14 @@ import onnxruntime as ort
 
 
 AVAILABLE_LANGS = ["en", "es", "de", "it", "he"]
+BLUE_SYNTH_MAX_CHUNK_LEN = 300
 
 _ESPEAK_MAP = {
     "en": "en-us", "en-us": "en-us",
     "de": "de", "ge": "de",
     "it": "it", "es": "es",
 }
+_TEXT_TO_INDICES_PROCESSOR: Optional["UnicodeProcessor"] = None
 
 _INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)(?:</\1>|<\1>)", re.DOTALL)
 _LANG_TAG_RE = re.compile(r"</?\w+>")
@@ -403,6 +405,7 @@ class TextToSpeech:
         cfg_scale: float = 3.0,
         silence_duration: float = 0.0,
         phonemize: bool = True,
+        text_is_phonemes: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Synthesize speech.
 
@@ -418,7 +421,11 @@ class TextToSpeech:
         If ``phonemize=True`` and a :class:`TextProcessor` was wired in via
         :func:`load_text_to_speech`, text is phonemized first (renikud for Hebrew,
         espeak for Latin langs), preserving inline ``<lang>…</lang>`` spans.
+
+        Set ``text_is_phonemes=True`` when ``text`` already contains phonemes; this
+        skips G2P while keeping the normal tokenizer/chunking path.
         """
+        phonemize = phonemize and not text_is_phonemes
         if isinstance(text, list):
             assert isinstance(lang, list) and len(text) == len(lang), (
                 "Batch mode requires `lang` to be a list of the same length as `text`."
@@ -516,6 +523,15 @@ def load_cfgs(onnx_dir: str, config_path: str = "config/tts.json") -> dict:
 
 def load_text_processor(onnx_dir: str = "") -> UnicodeProcessor:
     return UnicodeProcessor(os.path.join(os.path.dirname(__file__), "..", "vocab.json"))
+
+
+def text_to_indices(text: str, lang: str = "he") -> list[int]:
+    """Compatibility helper used by TRT: encode phoneme text with the bundled vocab."""
+    global _TEXT_TO_INDICES_PROCESSOR
+    if _TEXT_TO_INDICES_PROCESSOR is None:
+        _TEXT_TO_INDICES_PROCESSOR = load_text_processor()
+    text_ids, _ = _TEXT_TO_INDICES_PROCESSOR([text], [lang])
+    return text_ids[0].astype(np.int64).tolist()
 
 
 def load_text_to_speech(
