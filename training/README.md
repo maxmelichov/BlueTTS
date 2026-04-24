@@ -1,159 +1,84 @@
-# Training — Blue
+# Light-BlueTTS Training
 
-Install from the `training/` directory:
+This directory contains the training modules, datasets, and execution loops for Light-BlueTTS. The architecture has been refactored into a highly modular design to separate concerns and make the codebase easily extensible.
 
-```bash
-cd training
-uv sync
-# GPU — pick one (do not combine):
-uv sync --extra cu128   # PyTorch + CUDA 12.8 (stable)
-uv sync --extra cu132   # PyTorch + CUDA 13.2 (nightly wheels; experimental)
-```
+## Directory Structure
 
-`bluecodec` is already a Git dependency in `pyproject.toml` and is installed with `uv sync`.
+The training codebase is split into two primary subpackages alongside shared data utilities:
 
-*Pretrained weights for all stages (Codec, Text-to-Latent, Duration Predictor, and Latent Stats) are available at: [`notmax123/blue`](https://huggingface.co/notmax123/blue).*
+*   **`t2l/` (Text-to-Latent):** 
+    Handles the core generative Flow Matching model. This includes the `TextEncoder`, `ReferenceEncoder`, and the `VectorFieldEstimator`.
+*   **`dp/` (Duration Predictor):** 
+    Houses the `DPNetwork` used to predict segment durations (lengths) based on text and reference speech styles.
+*   **`data/`:**
+    Shared data utilities for audio processing (`audio_utils.py`), text phonemization and indexing (`text_vocab.py`).
+*   **`utils.py` & `models/`:** 
+    Shared building blocks, mel-spectrogram generation, and latent compression helpers.
 
-You can download them directly into the `pt_weights` directory using the Hugging Face CLI:
+### Subpackage Breakdown
 
-```bash
-cd training
-uv run hf download notmax123/blue --repo-type model --local-dir ./pt_weights
-```
+Within both `t2l` and `dp`, you will find a similar standard structure:
+- `models/`: PyTorch `nn.Module` definitions.
+- `data_module.py`: PyTorch `Dataset` and `collate_fn` implementations.
+- `trainer.py`: The core training loop, validation logic, and inference checks (e.g., SPFM handling in `t2l`).
+- `builders.py`: Factory functions for instantiating the models from configuration.
+- `cli.py`: Command-line interface definitions via `argparse`.
+- `cfg_utils.py`: Helpers for parsing and validating the JSON config.
 
-Training scripts live under `training/src/`. Run dataset and stats commands from `training/` unless you adjust paths. Defaults inside some scripts still mention `combined_dataset_cleaned_real_data.csv`, `checkpoints/ae/`, or `stats_real_data.pt` — align filenames with your layout or edit those constants / `configs/tts.json` (`ae_ckpt_path`).
+## Running Training
 
----
+You can initiate training runs using the provided CLI entry points or via the `uv run` commands if you have them registered in `pyproject.toml`.
 
-## 🏗️ Full Training Structure
+### 1. Text-to-Latent (Flow Matching)
 
-The full training process consists of two primary parts: the standalone audio codec (Stage 1), followed by the interconnected acoustic models (Stages 2 & 3: Duration Predictor and Flow Matching).
-
-### Stage 1: Train the Autoencoder (blue-codec) [Standalone]
-
-Before training the TTS acoustic models, you need a trained autoencoder to compress audio into discrete/continuous latents.  
-We use **blue-codec** for this. The training instructions for the autoencoder are maintained in its own repository:  
-🔗 [**How to train blue-codec**](https://github.com/maxmelichov/blue-codec/blob/main/docs/training.md)
-
-*If you are skipping Stage 1, you can use our pretrained codec weights (`blue_codec.safetensors` from `notmax123/blue`).*
-
----
-
-## 🧹 Prepare Dataset for Text-to-Latent & Duration Predictor (Stages 2 & 3)
-
-Before training the downstream models (Duration Predictor and flow matching), combine and clean labeled datasets (audio + phonemes).
-
-### Adding a New Language
-The text vocabulary has a fixed size built to accommodate many languages without changing the model architecture. To add a new language and train a multilingual model for Stages 2/3:
-1. Open [`training/data/text_vocab.py`](data/text_vocab.py) and locate the `LANG_ID` dictionary at the bottom.
-2. Add your language code (e.g., `"fr"`) and increment the offset `LANG_REGION_START + X` (where `X` is the next available index, up to 139).
-3. Ensure your generated training CSV data contains this exact language code in the `lang` column.
-4. Continue with training exactly as normal.
-
-### Data Preparation Steps
-1. Keep labeled data (e.g. `voice1`, `voice2`) under `generated_audio/` (or paths you list in the JSON config).
-2. Copy `datasets.example.json` to a real config (for example `datasets.json`) and set `datasets`, `output`, and `clean_output` (for example `generated_audio/two_voices_cleaned.csv`).
-3. Run:
+To train the core Text-to-Latent model, use the `t2l` trainer:
 
 ```bash
-cd training
-uv run python combine_datasets.py --config datasets.json
+python -m training.t2l.cli --config configs/tts.json --checkpoint_dir checkpoints/text2latent
 ```
 
-- **Input:** CSVs and audio paths defined in the config (see `datasets.example.json`).
-- **Output:** Combined then cleaned CSV; default example name `generated_audio/two_voices_cleaned.csv` if you set `clean_output` that way.
-- **Note:** Phoneme cleaning includes Hebrew-specific rules; non-Hebrew rows can be phonemized via espeak when configured.
+**Key Arguments:**
+- `--finetune`: Enables fine-tuning mode (starts with a lower learning rate, adjusts SPFM warmup).
+- `--Ke`: Overrides the Context-sharing expansion factor defined in the config.
+- `--resume_from`: If the `checkpoint_dir` is empty, load the initial weights from this alternative directory.
 
----
+### 2. Duration Predictor
 
-## 📊 Compute Latent Statistics (CRITICAL FOR NEW DATA)
-
-> **⚠️ IMPORTANT:** Whenever you prepare a **new dataset**, you MUST compute the latent statistics (mean and standard deviation). Flow matching and the duration predictor strictly expect these latents to be properly normalized for your data.
-
-After your training datasets are set up and the autoencoder weights are ready (or you downloaded `blue_codec.safetensors`), compute the stats:
+To train the Duration Predictor network:
 
 ```bash
-cd training
-uv run python compute_latent_stats.py --tts-json configs/tts.json --ae-ckpt pt_weights/blue_codec.safetensors
+python -m training.dp.cli --config configs/tts.json --checkpoint_dir checkpoints/duration_predictor
 ```
 
-- **Input:** AE checkpoint from `ae_ckpt_path` in `configs/tts.json` (fallback in script: `checkpoints/ae/blue_codec.safetensors`), and a metadata CSV the script can find (see `compute_latent_stats.py` for the candidate list — point your data at one of those paths or extend the script).
-- **Output:** Latent stats `.pt` file (script default: `stats_real_data.pt`; use your own name such as `stats_voice1.pt` by editing the script or re-saving).
+## Distributed Data Parallel (DDP)
 
----
-
-## ⏱️ Stage 2: Train Duration Predictor
-
-The duration predictor learns utterance length from text (and reference audio in the training loop).
+Both the `t2l` and `dp` trainers support multi-GPU training via PyTorch DDP. You can run them using `torchrun`:
 
 ```bash
-cd training
-uv run python src/train_duration_predictor.py --config configs/tts.json \
-    --ae_checkpoint pt_weights/blue_codec.safetensors \
-    --stats_path pt_weights/stats_multilingual.pt \
-    --checkpoint_dir pt_weights
+torchrun --nproc_per_node=8 -m training.t2l.cli --config configs/tts.json
 ```
 
-Optional flags include `--max_steps`, `--batch_size`, `--lr`, `--device`.
+The script automatically detects the `RANK` and `WORLD_SIZE` environment variables and wraps the model in `DistributedDataParallel` and uses a `DistributedSampler` for the dataloader.
 
-- **Input:** Frozen AE encoder weights and stats file paths as set inside `src/train_duration_predictor.py` (defaults: `blue_codec.safetensors`, `stats_multilingual.pt`).
-- **Dataset:** Metadata CSV path is set in the same script.
-- **Output:** Checkpoints under `checkpoints/duration_predictor/` (e.g. `duration_predictor_final.pt`).
+## Configuration (`tts.json`)
 
----
+The architecture and training parameters are heavily governed by the `configs/tts.json` file. 
 
-## 🌊 Stage 3: Train Text-to-Latent (Flow Matching)
+The `t2l` config includes:
+- `latent_dim` & `chunk_compress_factor`: Dictates the compression ratios of the autoencoder latents.
+- `text_encoder`, `style_encoder`, `vector_field`: Architectural layer counts, dimensions, and attention head configurations.
+- `uncond_masker`: Probabilities for Classifier-Free Guidance (CFG) dropping text/style.
+- `batch_expander.n_batch_expand`: The $K_e$ batch expansion factor for parallel flow matching integration.
 
-Core TTS model: text (+ reference) → audio latents via flow matching and classifier-free guidance.
+## Advanced Features
 
-**Single GPU:**
+### Self-Purifying Flow Matching (SPFM)
 
-```bash
-cd training
-uv run python src/train_text_to_latent.py --config configs/tts.json \
-    --ae_checkpoint pt_weights/blue_codec.safetensors \
-    --stats_path pt_weights/stats_multilingual.pt \
-    --checkpoint_dir pt_weights
-```
+The `t2l` trainer implements SPFM (Self-Purifying Flow Matching) to handle noisy data dynamically.
+- During training, the model evaluates its conditional and unconditional velocity estimates.
+- Based on the MSE, it determines "dirty" candidates dynamically and routes them through unconditional dropout paths to prevent the model from learning bad phonetic alignments.
+- Diagnostics are automatically printed every 1,000 steps.
 
-**Multi-GPU (example: 2 GPUs):**
+### Voice Conversion (VC) Checks
 
-```bash
-cd training
-uv run torchrun --nproc_per_node=2 src/train_text_to_latent.py --config configs/tts.json \
-    --ae_checkpoint pt_weights/blue_codec.safetensors \
-    --stats_path pt_weights/stats_multilingual.pt \
-    --checkpoint_dir pt_weights
-```
-
-**Finetune mode:**
-To fine-tune from our pretrained Text-to-Latent weights (`vf_estimator.safetensors`, which includes the `reference_encoder`, `text_encoder`, and `vf_estimator`), place the checkpoint in your target folder (e.g. `pt_weights/`) and specify the paths:
-
-```bash
-cd training
-uv run python src/train_text_to_latent.py --config configs/tts.json --finetune \
-    --lr 5e-4 --spfm_warmup 40000 \
-    --ae_checkpoint pt_weights/blue_codec.safetensors \
-    --stats_path pt_weights/stats_multilingual.pt \
-    --checkpoint_dir pt_weights
-```
-
-- **Method:** Flow matching with classifier-free guidance.
-- **Input:** AE checkpoint and stats paths configured in training code (e.g., `blue_codec.safetensors`, `stats_multilingual.pt`).
-- **Dataset:** Same metadata CSV convention as the DP script.
-- **Output:** Checkpoints under `pt_weights/` or `checkpoints/text2latent/` (e.g. `ckpt_step_X.pt`).
-- **Options:** `--finetune`, `--lr`, `--spfm_warmup`, `--Ke`, `--accumulation_steps`, `--ae_checkpoint`, `--stats_path`, `--checkpoint_dir`.
-
----
-
-## 🎙️ 7. Inference
-
-```bash
-python inference_tts.py
-```
-
-This entrypoint is **not** present in this repository yet; add or use your own inference script that loads the trained checkpoints, runs synthesis, compares CFG scales, and toggles the duration predictor. Intended behavior: write outputs under `debug_inference/`.
-
----
-
-More detail (architecture, autoencoder stage, hyperparameter tables, config snippets, citation) lives in [`training/docs/`](docs/).
+During validation steps (every 1,000 iterations), the `t2l` trainer attempts to run Inference using internal pre-configured sentences across multiple languages (Hebrew, English, German, Italian, Spanish) and logs Voice Conversion checks against `reference.wav` to ensure speaker identity cloning stays intact.

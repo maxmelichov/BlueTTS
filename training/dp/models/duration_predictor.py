@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from models.text2latent.text_encoder import (
+from training.t2l.models.text_encoder import (
     AttnEncoder,
     TextEmbedderWrapper,
     ConvNeXtWrapper,
