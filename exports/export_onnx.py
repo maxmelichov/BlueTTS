@@ -20,11 +20,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from bluecodec import LatentDecoder1D
-from models.text2latent.dp_network import DPNetwork
-from models.text2latent.text_encoder import TextEncoder
-from models.text2latent.vf_estimator import VectorFieldEstimator
-from models.text2latent.reference_encoder import ReferenceEncoder
-from models.utils import load_ttl_config
+from training.dp.models.dp_network import DPNetwork
+from training.t2l.models.text_encoder import TextEncoder
+from training.t2l.models.vf_estimator import VectorFieldEstimator
+from training.t2l.models.reference_encoder import ReferenceEncoder
+from training.utils import load_ttl_config
 
 
 # ── checkpoint helpers ────────────────────────────────────────────────────────

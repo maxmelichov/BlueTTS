@@ -68,7 +68,7 @@ if _TRAINING not in sys.path:
     sys.path.insert(0, _TRAINING)
 
 from bluecodec.autoencoder.latent_encoder import LatentEncoder
-from models.utils import LinearMelSpectrogram, compress_latents, load_ttl_config
+from training.utils import LinearMelSpectrogram, compress_latents, load_ttl_config
 
 # Expected file sizes (bytes) for ``notmax123/blue`` main branch — sanity check only.
 HF_REPO_ID = "notmax123/blue"
@@ -300,7 +300,7 @@ def main() -> None:
     # --- style_ttl (TTL reference encoder) ---
     style_ttl: np.ndarray | None = None
     try:
-        from models.text2latent.reference_encoder import ReferenceEncoder
+        from training.t2l.models.reference_encoder import ReferenceEncoder
 
         ttl_path = resolve_ttl_checkpoint(args.ttl_ckpt)
         if not os.path.exists(ttl_path):
@@ -335,7 +335,7 @@ def main() -> None:
     style_dp: np.ndarray | None = None
     try:
         if args.dp_ckpt and os.path.isfile(args.dp_ckpt):
-            from models.text2latent.dp_network import DPNetwork
+            from training.dp.models.dp_network import DPNetwork
 
             tok = cfg["dp_style_tokens"] if cfg else 8
             dim = cfg["dp_style_dim"] if cfg else 16

@@ -6,6 +6,7 @@ import random
 import numpy as np
 import soundfile as sf
 from typing import Optional
+# Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import torch
@@ -18,16 +19,17 @@ from torch.utils.data import DataLoader, WeightedRandomSampler, DistributedSampl
 from torch.optim import AdamW
 from tqdm import tqdm
 
-from data.text2latent_dataset import Text2LatentDataset, collate_text2latent
-from data.audio_utils import ensure_sr
-from data.text_vocab import text_to_indices, text_to_indices_multilang, VOCAB_SIZE, normalize_text
-from models.autoencoder.latent_encoder import LatentEncoder
-from models.autoencoder.latent_decoder import LatentDecoder1D
-from models.utils import LinearMelSpectrogram, compress_latents, decompress_latents
-from models.text2latent.text_encoder import TextEncoder
-from models.text2latent.vf_estimator import VectorFieldEstimator
-from models.text2latent.reference_encoder import ReferenceEncoder
-from models.text2latent.dp_network import DPNetwork
+from training.data.text2latent_dataset import Text2LatentDataset, collate_text2latent
+from training.t2l.data_module import Text2LatentDataset, collate_text2latent
+from training.data.audio_utils import ensure_sr
+from training.data.text_vocab import text_to_indices, text_to_indices_multilang, VOCAB_SIZE, normalize_text
+from bluecodec import LatentEncoder, LatentDecoder1D
+from training.utils import LinearMelSpectrogram, compress_latents, decompress_latents
+from training.t2l.models.text_encoder import TextEncoder
+from training.t2l.models.vf_estimator import VectorFieldEstimator
+from training.t2l.models.reference_encoder import ReferenceEncoder
+from training.dp.models.dp_network import DPNetwork
+from training.t2l.builders import build_models
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -38,47 +40,18 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 def build_reference_only(z_ref_input, valid_z_ref_len, device, max_frames=72):
-    """
-    Inference-only helper to left-align reference latents.
-    Crops to max_frames (default 72 ≈ 5s at 14.35 Hz) to match training distribution.
-    Returns z_ref_left, ref_mask_left.
-    """
     B, C, T_ref = z_ref_input.shape
-
     if max_frames is not None and T_ref > max_frames:
         z_ref_input = z_ref_input[:, :, :max_frames]
         T_ref = max_frames
-
     arange_T = torch.arange(T_ref, device=device).unsqueeze(0)
     valid_len = valid_z_ref_len.clamp(min=0, max=T_ref).unsqueeze(1)
-
     ref_mask_left = (arange_T < valid_len).unsqueeze(1).float()
-
     z_ref_left = z_ref_input * ref_mask_left
-
     return z_ref_left, ref_mask_left
 
 def build_reference_from_latents(z_1, valid_z_len, z_ref_input, valid_z_ref_len, is_self_ref, device, chunk_compress_factor=6):
-    """
-    Samples a reference segment from z_ref_input.
-
-    Args:
-        z_1: Target latents [B, C, T]
-        valid_z_len: Target valid lengths [B]
-        z_ref_input: Reference source latents [B, C, T_ref] (can be same as z_1 or different)
-        valid_z_ref_len: Reference valid lengths [B]
-        is_self_ref: Boolean tensor [B], True if z_ref_input[i] is effectively z_1[i]
-        device: Torch device
-        chunk_compress_factor: Temporal compression factor (from ttl config)
-
-    Returns:
-        z_ref_left: Left-aligned reference segment [B, C, T] (padded)
-        ref_mask_left: Mask for z_ref_left [B, 1, T]
-        train_T_lat: Same as valid_z_len (passed through)
-        target_loss_mask: Mask for target loss (m in paper) [B, 1, T]
-    """
     B, C, T = z_1.shape
-
     _, _, T_ref_in = z_ref_input.shape
 
     sr = 44100
@@ -91,39 +64,30 @@ def build_reference_from_latents(z_1, valid_z_len, z_ref_input, valid_z_ref_len,
     z_ref_left = torch.zeros(B, C, T, device=device)
     ref_mask_left = torch.zeros(B, 1, T, device=device)
     target_loss_mask = torch.ones(B, 1, T, device=device)
-
     train_T_lat = valid_z_len.clone()
 
     for i in range(B):
         sample_T = int(valid_z_len[i].item())
-
         ref_T = int(valid_z_ref_len[i].item())
         ref_T = min(ref_T, T_ref_in)
 
         if is_self_ref[i]:
-            sample_T = int(valid_z_len[i].item())
-
             half_len = max(1, sample_T // 2)
             upper_bound = min(max_frames, half_len)
-
             upper_bound = max(1, upper_bound)
 
             if upper_bound < min_frames:
                  length = int(torch.randint(1, upper_bound + 1, (1,), device=device).item())
             else:
                  length = int(torch.randint(min_frames, upper_bound + 1, (1,), device=device).item())
-
             length = min(length, sample_T)
             if length < 1: length = 1
-
             max_start = max(0, sample_T - length)
             start = int(torch.randint(0, max_start + 1, (1,), device=device).item())
 
             mask_start = start
             mask_end = min(start + length, sample_T)
-
             target_loss_mask[i, :, mask_start:mask_end] = 0.0
-
             copy_len = min(length, T)
             z_ref_left[i, :, :copy_len] = z_1[i, :, mask_start:mask_start + copy_len]
             ref_mask_left[i, :, :copy_len] = 1.0
@@ -140,45 +104,27 @@ def build_reference_from_latents(z_1, valid_z_len, z_ref_input, valid_z_ref_len,
             if length < 1: length = 1
             max_start = max(0, ref_T - length)
             start = int(torch.randint(0, max_start + 1, (1,), device=device).item())
-
             copy_len = min(length, T)
             z_ref_left[i, :, :copy_len] = z_ref_input[i, :, start:start+copy_len]
             ref_mask_left[i, :, :copy_len] = 1.0
 
     return z_ref_left, ref_mask_left, train_T_lat, target_loss_mask
 
-
 def length_to_mask(lengths: torch.Tensor, max_len: Optional[int] = None) -> torch.Tensor:
-    """
-    Convert lengths to binary mask.
-
-    Args:
-        lengths: (B,)
-        max_len: int
-
-    Returns:
-        mask: (B, 1, max_len)
-    """
     max_len = max_len or int(lengths.max().item())
     ids = torch.arange(0, max_len, device=lengths.device)
     mask = (ids < lengths.unsqueeze(1)).float()
     return mask.unsqueeze(1)
 
-def get_latent_mask(
-    wav_lengths: torch.Tensor, base_chunk_size: int, chunk_compress_factor: int
-) -> torch.Tensor:
+def get_latent_mask(wav_lengths: torch.Tensor, base_chunk_size: int, chunk_compress_factor: int) -> torch.Tensor:
     latent_size = base_chunk_size * chunk_compress_factor
     latent_lengths = (wav_lengths + latent_size - 1) // latent_size
     latent_mask = length_to_mask(latent_lengths)
     return latent_mask
 
 def sample_noisy_latent(
-    duration: torch.Tensor,
-    sample_rate: int,
-    base_chunk_size: int,
-    chunk_compress_factor: int,
-    latent_dim: int,
-    device: torch.device
+    duration: torch.Tensor, sample_rate: int, base_chunk_size: int,
+    chunk_compress_factor: int, latent_dim: int, device: str | torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
     bsz = len(duration)
     wav_len_max = duration.max() * sample_rate
@@ -188,9 +134,7 @@ def sample_noisy_latent(
     latent_channels = latent_dim * chunk_compress_factor
 
     noisy_latent = torch.randn(bsz, latent_channels, latent_len, device=device)
-    latent_mask = get_latent_mask(
-        wav_lengths, base_chunk_size, chunk_compress_factor
-    )
+    latent_mask = get_latent_mask(wav_lengths, base_chunk_size, chunk_compress_factor)
 
     if latent_mask.shape[2] < latent_len:
         latent_mask = torch.nn.functional.pad(latent_mask, (0, latent_len - latent_mask.shape[2]))
@@ -214,17 +158,17 @@ def sample_audio(
     std,
     duration_predictor=None,
     steps=32,
-    device='cuda',
+    device: str | torch.device = 'cuda',
     debug_label=None,
     speed=1.0,
     style_ttl=None,
     style_dp=None,
+    uncond_params=None,
+    cfg_scale=1.0,
+    # Config-derived params (from ttl section of tts.json)
     latent_dim=24,
     chunk_compress_factor=6,
     normalizer_scale=1.0,
-    cfg_scale: float = 1.0,
-    u_text=None,
-    u_ref=None,
 ):
     """
     Plain flow-matching sampling:
@@ -242,13 +186,20 @@ def sample_audio(
         print(f"[{debug_label}] Starting sampling...")
 
     B = text_ids.shape[0]
-    C = latent_dim * chunk_compress_factor
+    C = latent_dim * chunk_compress_factor  # e.g. 24 * 6 = 144
 
+    # -------------------------
+    # 1. Encode style / reference
+    # -------------------------
+    # ref_values: [B, 50, 256] (speaker-specific style values)
     if style_ttl is not None:
         ref_values = style_ttl
     else:
         ref_values = reference_encoder(z_ref, mask=ref_enc_mask)
 
+    # -------------------------
+    # 2. Duration / target length
+    # -------------------------
     if duration_predictor is not None:
         dur_pred = duration_predictor(
             text_ids,
@@ -260,19 +211,20 @@ def sample_audio(
         )
 
         duration = torch.exp(dur_pred) / speed
-
+        
         sample_rate = 44100
         base_chunk_size = 512
-
+        
         xt, latent_mask = sample_noisy_latent(
             duration, sample_rate, base_chunk_size, chunk_compress_factor, latent_dim, device
         )
-
+        
         if debug_label:
              print(f"[{debug_label}] DP latent_lengths max: {latent_mask.shape[2]}")
 
         T = latent_mask.shape[2]
     else:
+        dur_pred = None
         if z_ref is not None:
             T = z_ref.shape[2]
         else:
@@ -287,87 +239,111 @@ def sample_audio(
         print("[DBG] duration_predictor is None")
     else:
         print("[DBG] duration_predictor is set")
-        print("[DBG] dur_pred  =", dur_pred.detach().cpu().numpy())
+        print("[DBG] dur_pred  =", dur_pred.detach().cpu().numpy() if dur_pred is not None else None)
         print("[DBG] latent_lengths    =", latent_mask.sum(dim=2).squeeze(1).detach().cpu().numpy())
 
     print("[DBG] T chosen =", T)
     print("[DBG] latent_mask sum =", latent_mask.sum().item())
 
+    # -------------------------
+    # 3. Encode text conditioned on style
+    # -------------------------
+    # TextEncoder returns:
+    #   h_text:    [B, 256, T_txt]
+    #   style_key: [B, 50, 256] (baked-in constant) - accessed via property
     h_text = text_encoder(
         text_ids,
         ref_values,
         text_mask=text_mask,
     )
-
+    
     T_txt = h_text.shape[2]
 
+    # -------------------------
+    # 4. Sampler init
+    # -------------------------
     x = xt
     dt = 1.0 / steps
 
-    # Classifier-free guidance (SupertonicTTS §3.4, arxiv 2503.23108):
-    #   v = v_uncond + cfg_scale * (v_cond - v_uncond)
-    use_cfg = float(cfg_scale) != 1.0 and u_text is not None and u_ref is not None
-    if use_cfg:
-        u_text_in = u_text.expand(B, -1, h_text.shape[2])
-        u_ref_in = u_ref.expand(B, -1, -1)
-        u_text_mask = torch.ones(B, 1, h_text.shape[2], device=device)
-
+    # -------------------------
+    # 5. Euler integration
+    # -------------------------
     for i in range(steps):
         t_val = i / steps
         t = torch.full((B,), t_val, device=device)
 
-        x_in = x * latent_mask
+        # Conditional velocity
+        x_in = x * latent_mask # Zero out padding before forward for hygiene
         v_cond = vf_estimator(
             noisy_latent=x_in,
-            text_emb=h_text,
-            style_ttl=ref_values,
+            text_emb=h_text,      # [B, 256, T_txt]
+            style_ttl=ref_values, # [B, 50, 256] (values)
             latent_mask=latent_mask,
             text_mask=text_mask,
             current_step=t,
         )
 
-        if use_cfg:
+        if cfg_scale > 1.0 and uncond_params is not None:
+            # Unconditional velocity
+            if hasattr(uncond_params, 'module'):
+                u_text = uncond_params.module.u_text.expand(B, -1, T_txt)
+                u_ref = uncond_params.module.u_ref.expand(B, -1, -1)
+            else:
+                u_text = uncond_params.u_text.expand(B, -1, T_txt)
+                u_ref = uncond_params.u_ref.expand(B, -1, -1)
+                
             v_uncond = vf_estimator(
                 noisy_latent=x_in,
-                text_emb=u_text_in,
-                style_ttl=u_ref_in,
+                text_emb=u_text,
+                style_ttl=u_ref,
                 latent_mask=latent_mask,
-                text_mask=u_text_mask,
+                text_mask=text_mask,
                 current_step=t,
             )
             v = v_uncond + cfg_scale * (v_cond - v_uncond)
         else:
             v = v_cond
-
+        
+        # Stabilize boundaries: apply mask to velocity
         v = v * latent_mask
+
+
         x = x + v * dt
-        x = x * latent_mask
+
+    
+        x = x * latent_mask  # Zero out padded frames per-sample
+    # -------------------------
+    # 6. Decode to waveform
+    # -------------------------
+    # Un-normalize: reverse z_1 = ((z - mean) / std) * normalizer_scale
     if normalizer_scale != 1.0 and normalizer_scale != 0.0:
         z_pred = (x / normalizer_scale) * std + mean
     else:
         z_pred = x * std + mean
-
+    
     print("[DBG] x shape pre-decode:", x.shape)
     print("[DBG] z_pred shape pre-decompress:", z_pred.shape)
-
+    
     z_pred = decompress_latents(
-        z_pred,
-        factor=chunk_compress_factor,
+        z_pred, 
+        factor=chunk_compress_factor, 
         target_channels=latent_dim
-    )
-
+    )                                             # [B, latent_dim, T_dec]
+    
     print("[DBG] z_pred shape post-decompress:", z_pred.shape)
-
-    wav_pred = ae_decoder(z_pred)
-
+    
+    wav_pred = ae_decoder(z_pred)                 # [B, 1, T_wav]
+    
     print("[DBG] wav_pred shape:", wav_pred.shape)
 
+    # 7. Enforce exact length contract
+    # Contract: 1 latent frame = hop_length * chunk_compress_factor samples
     frame_len = 512 * chunk_compress_factor
+    # Truncate to exact expected frames
     wav_pred = wav_pred[..., frame_len:-frame_len]
-
+    
 
     return wav_pred
-
 
 def seed_worker(worker_id):
     np.random.seed(worker_id)
@@ -412,6 +388,8 @@ def _validate_ttl_config(ttl_cfg: dict) -> None:
     ccf = ttl_cfg["chunk_compress_factor"]
     compressed = latent_dim * ccf
 
+    # text_encoder: convnext idim / attn hidden_channels / proj_out must all equal
+    # the char_emb_dim that feeds the stack.
     te = ttl_cfg["text_encoder"]
     char_emb_dim = te["text_embedder"]["char_emb_dim"]
     _eq("text_encoder.convnext.idim", te["convnext"]["idim"], char_emb_dim)
@@ -424,6 +402,9 @@ def _validate_ttl_config(ttl_cfg: dict) -> None:
     _eq("text_encoder.convnext.num_layers == len(dilation_lst)",
         len(te["convnext"]["dilation_lst"]), te["convnext"]["num_layers"])
 
+    # style_encoder: proj_in in-channels come from (ldim * chunk_compress_factor)
+    # and must match the global compressed_channels; style_token_layer widths
+    # must agree with the conv trunk.
     se = ttl_cfg["style_encoder"]
     se_in = se["proj_in"]["ldim"] * se["proj_in"]["chunk_compress_factor"]
     _eq("style_encoder.proj_in in_channels", se_in, compressed)
@@ -436,12 +417,14 @@ def _validate_ttl_config(ttl_cfg: dict) -> None:
     _eq("style_encoder.convnext.num_layers == len(dilation_lst)",
         len(se["convnext"]["dilation_lst"]), se["convnext"]["num_layers"])
 
+    # speech_prompted_text_encoder: must match TextEncoder d_model + style values.
     spte = ttl_cfg["speech_prompted_text_encoder"]
     _eq("speech_prompted_text_encoder.text_dim", spte["text_dim"], char_emb_dim)
     _eq("speech_prompted_text_encoder.n_units", spte["n_units"], char_emb_dim)
     _eq("speech_prompted_text_encoder.style_dim",
         spte["style_dim"], stl["style_value_dim"])
 
+    # uncond_masker: unconditional tokens mirror the text / style dims.
     um = ttl_cfg["uncond_masker"]
     _eq("uncond_masker.text_dim", um["text_dim"], char_emb_dim)
     _eq("uncond_masker.n_style", um["n_style"], stl["n_style"])
@@ -450,6 +433,8 @@ def _validate_ttl_config(ttl_cfg: dict) -> None:
     _eq("uncond_masker.style_key_dim",
         um["style_key_dim"], stl["style_key_dim"])
 
+    # vector_field: proj_in/out channels + every sub-block idim must be
+    # consistent with the hidden width.
     vf = ttl_cfg["vector_field"]
     vf_in = vf["proj_in"]["ldim"] * vf["proj_in"]["chunk_compress_factor"]
     vf_out = vf["proj_out"]["ldim"] * vf["proj_out"]["chunk_compress_factor"]
@@ -484,6 +469,7 @@ def _validate_ttl_config(ttl_cfg: dict) -> None:
 
 
 def train(
+    metadata_path="generated_audio/combined_dataset_cleaned_real_data.csv",
     checkpoint_dir="checkpoints/text2latent",
     ae_checkpoint="checkpoints/ae/ae_latest.pt",
     stats_path="stats_multilingual.pt",
@@ -497,6 +483,7 @@ def train(
     finetune=False,
     accumulation_steps=1,
     resume_from=None,
+    inference_ref_wav: Optional[str] = None,
 ):
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         dist.init_process_group("nccl")
@@ -518,26 +505,14 @@ def train(
         log_dir = os.path.join(checkpoint_dir, "logs")
         os.makedirs(log_dir, exist_ok=True)
         print(f"Initializing training on {device}...")
-        print(f"checkpoint_dir={checkpoint_dir}")
-        if resume_from:
-            print(f"resume_from={resume_from} (used if no ckpt in checkpoint_dir)")
     else:
         log_dir = os.path.join(checkpoint_dir, "logs")
 
-    if finetune:
-        lr = 2.5e-4
-        spfm_start_override = 10_000
-        if rank == 0:
-            print(f"[Finetune Mode] lr={lr}, SPFM warm-up={spfm_start_override} steps")
-    else:
-        spfm_start_override = None
-
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+    spfm_start_override = 10_000 if finetune else None
+    if finetune: lr = 2.5e-4
 
     with open(config_path, 'r') as f:
         full_config = json.load(f)
-
     ttl_cfg = full_config["ttl"]
     ae_cfg_json = full_config.get("ae", {})
 
@@ -545,366 +520,116 @@ def train(
 
     latent_dim = ttl_cfg["latent_dim"]
     chunk_compress_factor = ttl_cfg["chunk_compress_factor"]
-    compressed_channels = latent_dim * chunk_compress_factor
-
-    se_in_channels = (
-        ttl_cfg["style_encoder"]["proj_in"]["ldim"]
-        * ttl_cfg["style_encoder"]["proj_in"]["chunk_compress_factor"]
-    )
-    vf_in_channels = (
-        ttl_cfg["vector_field"]["proj_in"]["ldim"]
-        * ttl_cfg["vector_field"]["proj_in"]["chunk_compress_factor"]
-    )
-    vf_out_channels = (
-        ttl_cfg["vector_field"]["proj_out"]["ldim"]
-        * ttl_cfg["vector_field"]["proj_out"]["chunk_compress_factor"]
-    )
-
     cfg_Ke = ttl_cfg["batch_expander"]["n_batch_expand"]
-    if Ke is None:
-        Ke = cfg_Ke
+    Ke = Ke if Ke is not None else cfg_Ke
 
     normalizer_scale = ttl_cfg["normalizer"]["scale"]
-
     sigma_min = ttl_cfg["flow_matching"]["sig_min"]
-
-    te_cfg = ttl_cfg["text_encoder"]
-    te_d_model = te_cfg["text_embedder"]["char_emb_dim"]
-    te_convnext_layers = te_cfg["convnext"]["num_layers"]
-    te_convnext_intermediate = te_cfg["convnext"]["intermediate_dim"]
-    te_expansion_factor = te_convnext_intermediate // te_d_model
-    te_attn_n_heads = te_cfg["attn_encoder"]["n_heads"]
-    te_attn_n_layers = te_cfg["attn_encoder"]["n_layers"]
-    te_attn_filter_channels = te_cfg["attn_encoder"]["filter_channels"]
-    te_attn_p_dropout = te_cfg["attn_encoder"]["p_dropout"]
-
-    se_cfg = ttl_cfg["style_encoder"]
-    se_d_model = se_cfg["proj_in"]["odim"]
-    se_hidden_dim = se_cfg["convnext"]["intermediate_dim"]
-    se_num_blocks = se_cfg["convnext"]["num_layers"]
-    se_n_style = se_cfg["style_token_layer"]["n_style"]
-    se_n_heads = se_cfg["style_token_layer"]["n_heads"]
-    se_prototype_dim = se_cfg["style_token_layer"].get("prototype_dim", 256)
-    se_n_units = se_cfg["style_token_layer"].get("n_units", 256)
-    se_style_value_dim = se_cfg["style_token_layer"].get("style_value_dim", 256)
-
-    spte_cfg = ttl_cfg["speech_prompted_text_encoder"]
-    spte_n_heads = spte_cfg["n_heads"]
-    spte_text_dim = spte_cfg.get("text_dim", 256)
-    spte_style_dim = spte_cfg.get("style_dim", 256)
-    spte_n_units = spte_cfg.get("n_units", 256)
-    spte_n_style = se_n_style
 
     um_cfg = ttl_cfg["uncond_masker"]
     prob_both_uncond = um_cfg["prob_both_uncond"]
     prob_text_uncond = um_cfg["prob_text_uncond"]
-    uncond_init_std = um_cfg["std"]
-    um_text_dim = um_cfg["text_dim"]
-    um_n_style = um_cfg["n_style"]
-    um_style_value_dim = um_cfg["style_value_dim"]
-
     if puncond is None:
         puncond = prob_both_uncond + prob_text_uncond
 
-    vf_cfg = ttl_cfg["vector_field"]
-    vf_hidden = vf_cfg["proj_in"]["odim"]
-    vf_time_dim = vf_cfg["time_encoder"]["time_dim"]
-    vf_time_hdim = vf_cfg["time_encoder"].get("hdim", 256)
-    vf_n_blocks = vf_cfg["main_blocks"]["n_blocks"]
-    vf_text_dim = vf_cfg["main_blocks"]["text_cond_layer"]["text_dim"]
-    vf_text_n_heads = vf_cfg["main_blocks"]["text_cond_layer"]["n_heads"]
-    vf_style_dim = vf_cfg["main_blocks"]["style_cond_layer"]["style_dim"]
-    vf_rotary_scale = vf_cfg["main_blocks"]["text_cond_layer"]["rotary_scale"]
-    vf_use_residual = vf_cfg["main_blocks"]["text_cond_layer"].get("use_residual", True)
-    vf_rotary_base = vf_cfg["main_blocks"]["text_cond_layer"].get("rotary_base", 10000.0)
-
-    te_ksz = te_cfg["convnext"].get("ksz", 5)
-    te_dilation_lst = te_cfg["convnext"].get("dilation_lst", [1] * te_convnext_layers)
-
-    se_ksz = se_cfg["convnext"].get("ksz", 5)
-    se_dilation_lst = se_cfg["convnext"].get("dilation_lst", [1] * se_num_blocks)
-
-    vf_main_blocks_cfg = vf_cfg.get("main_blocks", {})
-    vf_last_convnext_cfg = vf_cfg.get("last_convnext", {})
-
-    if rank == 0:
-        print(f"\n{'='*60}")
-        print(f"TTL Config loaded from: {config_path}")
-        print(f"  Version: {full_config.get('tts_version', 'unknown')}")
-        print(f"  Split: {full_config.get('split', 'unknown')}")
-        print(f"  latent_dim={latent_dim}, chunk_compress_factor={chunk_compress_factor}")
-        print(f"  compressed_channels={compressed_channels}")
-        print(f"  Ke={Ke} (config: {cfg_Ke})")
-        print(f"  normalizer_scale={normalizer_scale}")
-        print(f"  sigma_min={sigma_min}")
-        print(f"  TextEncoder: d_model={te_d_model}, conv_layers={te_convnext_layers}, "
-              f"attn_layers={te_attn_n_layers}, p_dropout={te_attn_p_dropout}")
-        print(f"  ReferenceEncoder: d_model={se_d_model}, blocks={se_num_blocks}, "
-              f"n_style={se_n_style}, n_heads={se_n_heads}")
-        print(f"  VF Estimator: hidden={vf_hidden}, blocks={vf_n_blocks}, "
-              f"time_dim={vf_time_dim}, rotary_scale={vf_rotary_scale}")
-        print(f"  Uncond: prob_both={prob_both_uncond}, prob_text={prob_text_uncond}, "
-              f"init_std={uncond_init_std}, total_puncond={puncond}")
-        print(f"{'='*60}\n")
-
-    if not os.path.exists(stats_path):
-        print(f"Error: Stats file {stats_path} not found. Run compute_latent_stats.py first.")
-        return
-
     stats = torch.load(stats_path, map_location=device)
     if "mean" in stats and stats["mean"].dim() == 3:
-        mean = stats["mean"].to(device)
-        std = stats["std"].to(device)
+        mean, std = stats["mean"].to(device), stats["std"].to(device)
     else:
-        mean = stats['mean'].to(device).view(1, -1, 1)
-        std = stats['std'].to(device).view(1, -1, 1)
+        mean, std = stats['mean'].to(device).view(1, -1, 1), stats['std'].to(device).view(1, -1, 1)
 
-    ref_wav_path_v1 = "/home/maxm/AE_training_data_all/slow_44K/data/real_data/yoav_times/recording_id002/chunk_0002_7.4-19.6s.wav"
-    if os.path.exists(ref_wav_path_v1):
-        print(f"Loading inference reference for Voice 1 from {ref_wav_path_v1}")
-        ref_wav_np, sr = sf.read(ref_wav_path_v1)
-        ref_wav_torch_v1 = torch.from_numpy(ref_wav_np).float().to(device)
-        if ref_wav_torch_v1.dim() > 1: ref_wav_torch_v1 = ref_wav_torch_v1.mean(dim=1)
+    # Optional reference audio for multi-language logging inference (Voice 1). Set
+    # --inference_ref_wav or the T2L_INFERENCE_REF_WAV environment variable.
+    ref_wav_path_v1 = (inference_ref_wav or os.environ.get("T2L_INFERENCE_REF_WAV") or "").strip()
+    ref_wav_torch_v1 = None
+    if ref_wav_path_v1:
+        if os.path.exists(ref_wav_path_v1):
+            print(f"Loading inference reference for Voice 1 from {ref_wav_path_v1}")
+            ref_wav_np, sr = sf.read(ref_wav_path_v1)
+            ref_wav_torch_v1 = torch.from_numpy(ref_wav_np).float().to(device)
+            if ref_wav_torch_v1.dim() > 1:
+                ref_wav_torch_v1 = ref_wav_torch_v1.mean(dim=1)  # mono
 
-        if sr != 44100:
-            ref_wav_torch_v1 = ensure_sr(ref_wav_torch_v1, sr, 44100, device=device)
+            # Resample to 44.1kHz using high-quality resampler
+            if sr != 44100:
+                ref_wav_torch_v1 = ensure_sr(ref_wav_torch_v1, sr, 44100, device=device)
+            else:
+                ref_wav_torch_v1 = ref_wav_torch_v1.unsqueeze(0)  # [1, T]
+
+            # enforce [1, T]
+            if ref_wav_torch_v1.dim() == 2 and ref_wav_torch_v1.size(0) != 1:
+                ref_wav_torch_v1 = ref_wav_torch_v1.mean(dim=0, keepdim=True)
+            elif ref_wav_torch_v1.dim() == 1:
+                ref_wav_torch_v1 = ref_wav_torch_v1.unsqueeze(0)
         else:
-            ref_wav_torch_v1 = ref_wav_torch_v1.unsqueeze(0)
+            print(f"Warning: Inference reference for Voice 1 {ref_wav_path_v1} not found.")
+            ref_wav_torch_v1 = None
 
-        if ref_wav_torch_v1.dim() == 2 and ref_wav_torch_v1.size(0) != 1:
-            ref_wav_torch_v1 = ref_wav_torch_v1.mean(dim=0, keepdim=True)
-        elif ref_wav_torch_v1.dim() == 1:
-            ref_wav_torch_v1 = ref_wav_torch_v1.unsqueeze(0)
-    else:
-        print(f"Warning: Inference reference for Voice 1 {ref_wav_path_v1} not found.")
-        ref_wav_torch_v1 = None
-
-    ae_enc_arch = ae_cfg_json['encoder']
-    ae_spec_cfg = ae_enc_arch.get('spec_processor', {})
-    hop_length = ae_spec_cfg.get('hop_length', 512)
     ae_sample_rate = ae_cfg_json.get('sample_rate', 44100)
-    mel_spec = LinearMelSpectrogram(
-        sample_rate=ae_spec_cfg.get('sample_rate', 44100),
-        n_fft=ae_spec_cfg.get('n_fft', 2048),
-        win_length=ae_spec_cfg.get('win_length', ae_spec_cfg.get('n_fft', 2048)),
-        hop_length=ae_spec_cfg.get('hop_length', 512),
-        n_mels=ae_spec_cfg.get('n_mels', 228),
-    ).to(device)
-    ae_encoder = LatentEncoder(cfg=ae_enc_arch).to(device)
 
-    ae_decoder = LatentDecoder1D(cfg=ae_cfg_json['decoder']).to(device)
+    text_encoder, reference_encoder, vf_estimator, uncond_params, dp_model, ae_encoder, ae_decoder, mel_spec, hop_length = build_models(
+        ttl_cfg, ae_cfg_json, ae_sample_rate, device
+    )
 
     if os.path.exists(ae_checkpoint):
-        print(f"Loading AE checkpoint from {ae_checkpoint}")
         ckpt = torch.load(ae_checkpoint, map_location='cpu')
-        if 'encoder' in ckpt:
-            ae_encoder.load_state_dict(ckpt['encoder'])
-        elif 'state_dict' in ckpt:
-            ae_encoder.load_state_dict(ckpt['state_dict'], strict=False)
-        else:
-            try: ae_encoder.load_state_dict(ckpt)
-            except: print("Warning: Could not load AE Encoder weights cleanly.")
+        ae_encoder.load_state_dict(ckpt.get('encoder', ckpt.get('state_dict', ckpt)), strict=False)
+        if 'decoder' in ckpt: ae_decoder.load_state_dict(ckpt['decoder'])
 
-        if 'decoder' in ckpt:
-            ae_decoder.load_state_dict(ckpt['decoder'])
-        else:
-            print("Warning: 'decoder' key not found in AE checkpoint.")
-    else:
-        print("Warning: AE Checkpoint not found!")
-
-    ae_encoder.eval()
-    ae_encoder.requires_grad_(False)
-    ae_decoder.eval()
-    ae_decoder.requires_grad_(False)
+    ae_encoder.eval().requires_grad_(False)
+    ae_decoder.eval().requires_grad_(False)
     mel_spec.eval()
 
-    text_encoder = TextEncoder(
-        vocab_size=VOCAB_SIZE,
-        d_model=te_d_model,
-        n_conv_layers=te_convnext_layers,
-        n_attn_layers=te_attn_n_layers,
-        expansion_factor=te_expansion_factor,
-        p_dropout=te_attn_p_dropout,
-        kernel_size=te_ksz,
-        dilation_lst=te_dilation_lst,
-        attn_n_heads=te_attn_n_heads,
-        attn_filter_channels=te_attn_filter_channels,
-        spte_n_heads=spte_n_heads,
-        spte_text_dim=spte_text_dim,
-        spte_style_dim=spte_style_dim,
-        spte_n_units=spte_n_units,
-        spte_n_style=spte_n_style,
-    ).to(device)
+    u_text, u_ref = uncond_params.u_text, uncond_params.u_ref
 
-    reference_encoder = ReferenceEncoder(
-        in_channels=se_in_channels,
-        d_model=se_d_model,
-        hidden_dim=se_hidden_dim,
-        num_blocks=se_num_blocks,
-        num_tokens=se_n_style,
-        num_heads=se_n_heads,
-        kernel_size=se_ksz,
-        dilation_lst=se_dilation_lst,
-        prototype_dim=se_prototype_dim,
-        n_units=se_n_units,
-        style_value_dim=se_style_value_dim,
-    ).to(device)
-
-    vf_estimator = VectorFieldEstimator(
-        in_channels=vf_in_channels,
-        out_channels=vf_out_channels,
-        hidden_channels=vf_hidden,
-        text_dim=vf_text_dim,
-        style_dim=vf_style_dim,
-        num_style_tokens=se_n_style,
-        num_superblocks=vf_n_blocks,
-        time_embed_dim=vf_time_dim,
-        rope_gamma=float(vf_rotary_scale),
-        main_blocks_cfg=vf_main_blocks_cfg,
-        last_convnext_cfg=vf_last_convnext_cfg,
-        text_n_heads=vf_text_n_heads,
-        time_hdim=vf_time_hdim,
-        use_residual=vf_use_residual,
-        rotary_base=vf_rotary_base,
-    ).to(device)
-
-    uncond_params = UncondParams(
-        text_dim=um_text_dim,
-        n_style=um_n_style,
-        style_value_dim=um_style_value_dim,
-        init_std=uncond_init_std,
-    ).to(device)
-    u_text = uncond_params.u_text
-    u_ref = uncond_params.u_ref
-
-    dp_model = None
-    dp_ckpt_path = "checkpoints/duration_predictor/duration_predictor_final.pt"
-    if os.path.exists(dp_ckpt_path):
-        try:
-            print(f"Loading Duration Predictor from {dp_ckpt_path}...")
-            dp_model = DPNetwork(vocab_size=VOCAB_SIZE).to(device)
-            dp_state = torch.load(dp_ckpt_path, map_location=device)
-            model_state = dp_model.state_dict()
-            filtered_state = {}
-            for k, v in dp_state.items():
-                if k in model_state:
-                    if v.shape != model_state[k].shape:
-                        if "char_embedder.weight" in k and v.shape[0] > model_state[k].shape[0]:
-                            filtered_state[k] = v[:model_state[k].shape[0], :]
-                        else:
-                            print(f"Skipping DP {k} due to shape mismatch: {v.shape} vs {model_state[k].shape}")
-                        continue
-                    filtered_state[k] = v
-            dp_model.load_state_dict(filtered_state, strict=False)
-            dp_model.eval()
-            dp_model.requires_grad_(False)
-        except Exception as e:
-            print(f"Failed to load DP: {e}")
-
-    params = (
-        list(text_encoder.parameters()) +
-        list(reference_encoder.parameters()) +
-        list(vf_estimator.parameters()) +
-        list(uncond_params.parameters())
-    )
+    params = list(text_encoder.parameters()) + list(reference_encoder.parameters()) + \
+             list(vf_estimator.parameters()) + list(uncond_params.parameters())
     optimizer = AdamW(params, lr=lr)
-    max_steps = 1_000_000
 
     global_step = 0
-
     scheduler_state = None
     latest_ckpt = _latest_ckpt_in_dir(checkpoint_dir)
     if latest_ckpt is None and resume_from:
         latest_ckpt = _latest_ckpt_in_dir(resume_from)
-        if latest_ckpt is not None and rank == 0:
-            print(
-                f"No ckpt in checkpoint_dir; loading weights from resume_from: {latest_ckpt}"
-            )
-    if latest_ckpt is not None:
-        print(f"Found checkpoint: {latest_ckpt}. Resuming...")
-        checkpoint = torch.load(latest_ckpt, map_location=device)
 
+    if latest_ckpt is not None:
+        print(f"Resuming from {latest_ckpt}")
+        checkpoint = torch.load(latest_ckpt, map_location=device)
         shapes_changed = False
-        if 'vf_estimator' in checkpoint:
-            model_state = vf_estimator.state_dict()
-            ckpt_state = checkpoint['vf_estimator']
-            filtered_state = {}
-            for k, v in ckpt_state.items():
-                if k in model_state:
-                    if v.shape != model_state[k].shape:
-                        print(f"Skipping {k} due to shape mismatch: {v.shape} vs {model_state[k].shape}")
-                        shapes_changed = True
-                        continue
-                    filtered_state[k] = v
-            vf_estimator.load_state_dict(filtered_state, strict=False)
-        if 'text_encoder' in checkpoint:
-            model_state = text_encoder.state_dict()
-            ckpt_state = checkpoint['text_encoder']
-            filtered_state = {}
-            for k, v in ckpt_state.items():
-                if k in model_state:
-                    if v.shape != model_state[k].shape:
+        for mod, name in [(vf_estimator, 'vf_estimator'), (text_encoder, 'text_encoder')]:
+            if name in checkpoint:
+                model_state, ckpt_state = mod.state_dict(), checkpoint[name]
+                filtered_state = {}
+                for k, v in ckpt_state.items():
+                    if k in model_state and v.shape != model_state[k].shape:
                         if "char_embedder.weight" in k and v.shape[0] > model_state[k].shape[0]:
                             filtered_state[k] = v[:model_state[k].shape[0], :]
                         else:
-                            print(f"Skipping text_encoder {k} due to shape mismatch: {v.shape} vs {model_state[k].shape}")
                             shapes_changed = True
                         continue
                     filtered_state[k] = v
-            text_encoder.load_state_dict(filtered_state, strict=False)
-        if 'reference_encoder' in checkpoint:
-            reference_encoder.load_state_dict(checkpoint['reference_encoder'], strict=False)
-        if 'u_text' in checkpoint:
-            u_text.data = checkpoint['u_text']
-        if 'u_ref' in checkpoint:
-            u_ref.data = checkpoint['u_ref']
+                mod.load_state_dict(filtered_state, strict=False)
+        if 'reference_encoder' in checkpoint: reference_encoder.load_state_dict(checkpoint['reference_encoder'], strict=False)
+        if 'u_text' in checkpoint: u_text.data = checkpoint['u_text']
+        if 'u_ref' in checkpoint: u_ref.data = checkpoint['u_ref']
 
         optimizer = AdamW(params, lr=lr)
-
-        if 'optimizer' in checkpoint:
-            if finetune:
-                print(f"Finetune mode: Skipping optimizer state load to use fresh lr={lr}")
-            elif shapes_changed:
-                print("Warning: Model shapes changed. Skipping optimizer state load to avoid runtime errors.")
-            else:
-                try:
-                    optimizer.load_state_dict(checkpoint['optimizer'])
-                except Exception as e:
-                    print(f"Warning: Failed to load optimizer state: {e}. Continuing with fresh optimizer.")
-
+        if 'optimizer' in checkpoint and not (finetune or shapes_changed):
+            try: optimizer.load_state_dict(checkpoint['optimizer'])
+            except: pass
         if 'global_step' in checkpoint:
             global_step = checkpoint['global_step']
-            if finetune:
-                spfm_start_override = global_step + spfm_start_override
-                print(f"Finetune mode: global_step halved to {global_step} and spfm_start_override set to {spfm_start_override}")
-
-
-        if 'scheduler' in checkpoint and not shapes_changed:
-            scheduler_state = checkpoint['scheduler']
-
-        print(f"Resuming from Step {global_step}")
-    else:
-        print("No checkpoint found. Starting from scratch.")
+            if finetune: spfm_start_override = global_step + spfm_start_override
+        if 'scheduler' in checkpoint and not shapes_changed: scheduler_state = checkpoint['scheduler']
 
     scheduler_last_epoch = -1 if finetune else (global_step - 1)
-
     if scheduler_last_epoch != -1:
-        for pg in optimizer.param_groups:
-            if 'initial_lr' not in pg:
-                pg['initial_lr'] = pg['lr']
+        for pg in optimizer.param_groups: pg.setdefault('initial_lr', pg['lr'])
 
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer,
-        milestones=[300_000, 600_000],
-        gamma=0.5,
-        last_epoch=scheduler_last_epoch
-    )
-
-    if scheduler_state is not None and not finetune:
-        try:
-            scheduler.load_state_dict(scheduler_state)
-        except Exception as e:
-            print(f"Warning: Failed to load scheduler state: {e}")
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[300_000, 600_000], gamma=0.5, last_epoch=scheduler_last_epoch)
+    if scheduler_state and not finetune:
+        try: scheduler.load_state_dict(scheduler_state)
+        except: pass
 
     if dist.is_initialized():
         text_encoder = DDP(text_encoder, device_ids=[local_rank], find_unused_parameters=True)
@@ -912,47 +637,60 @@ def train(
         vf_estimator = DDP(vf_estimator, device_ids=[local_rank], find_unused_parameters=True)
         uncond_params = DDP(uncond_params, device_ids=[local_rank], find_unused_parameters=True)
 
-    metadata_path = "generated_audio/combined_dataset_cleaned_real_data.csv"
+    val_z_ref = None
+    val_ref_enc_mask = None
+    val_wavs = None
+    val_text_ids = None
+    val_text_masks = None
+    val_ref_wavs = None
+    val_ref_lengths = None
+    
+    # Dataset
     dataset = Text2LatentDataset(
-        metadata_path,
+        metadata_path, 
         sample_rate=ae_sample_rate,
         max_wav_len=ae_sample_rate * 20,
         max_text_len=300,
+        cross_ref_prob=0.0,  # 0% cross-ref for zero-shot speaker generalization
     )
     if rank == 0:
         print(f"Dataset loaded with {len(dataset)} samples.")
 
+    # Sampler Setup
     if dist.is_initialized():
         sampler = DistributedSampler(dataset, shuffle=True)
     else:
+        # Calculate inverse-frequency weights for balanced speaker sampling
         speaker_ids = dataset.speaker_ids
         unique_speakers, counts = np.unique(speaker_ids, return_counts=True)
         freq = dict(zip(unique_speakers, counts))
         print(f"Speaker counts: {freq}")
-
+        
         sample_weights = np.array([1.0 / freq[sid] for sid in speaker_ids])
         sample_weights = sample_weights / sample_weights.sum()
-        weights = torch.from_numpy(sample_weights).double()
+        weights = sample_weights.tolist()
         sampler = WeightedRandomSampler(weights, num_samples=len(dataset), replacement=True)
-
+    
     dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        sampler=sampler,
-        num_workers=4,
+        dataset, 
+        batch_size=batch_size, 
+        sampler=sampler, 
+        num_workers=4, 
         collate_fn=collate_text2latent,
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=2,
         worker_init_fn=seed_worker
     )
-
+    
+    # Validation Batch
     try:
         val_batch = next(iter(dataloader))
+        # Handle unpacking dynamically for validation too
         if len(val_batch) == 9:
             val_wavs, val_text_ids, val_text_masks, val_lengths, _, val_ref_wavs, val_ref_lengths, val_is_self, _ = val_batch
         else:
-             val_wavs, val_text_ids, val_text_masks, val_lengths, _, val_ref_wavs, val_ref_lengths, val_is_self = val_batch
+            val_wavs, val_text_ids, val_text_masks, val_lengths, _, val_ref_wavs, val_ref_lengths, val_is_self = val_batch
 
         val_wavs = val_wavs[:4].to(device)
         val_text_ids = val_text_ids[:4].to(device)
@@ -960,18 +698,20 @@ def train(
         val_ref_wavs = val_ref_wavs[:4].to(device)
         val_ref_lengths = val_ref_lengths[:4].to(device)
         val_is_self = val_is_self[:4].to(device)
-
+        
         with torch.no_grad():
             val_mel = mel_spec(val_wavs.squeeze(1))
             val_z = ae_encoder(val_mel)
             val_z = compress_latents(val_z, factor=chunk_compress_factor)
             val_z_1 = ((val_z - mean) / std) * normalizer_scale
-
+            
             B_val, C, T_val = val_z_1.shape
-
+            
+            # Use valid lengths for validation to match training
             valid_mel_len_val = val_lengths[:4].to(device).float() / hop_length
             valid_z_len_val = (valid_mel_len_val / chunk_compress_factor).ceil().long().clamp(min=1, max=T_val)
 
+            # Encode Ref
             val_mel_ref = mel_spec(val_ref_wavs.squeeze(1))
             val_z_ref_full_enc = ae_encoder(val_mel_ref)
             val_z_ref_full_enc = compress_latents(val_z_ref_full_enc, factor=chunk_compress_factor)
@@ -979,35 +719,31 @@ def train(
 
             valid_mel_len_ref = val_ref_lengths[:4].to(device).float() / hop_length
             valid_z_len_ref = (valid_mel_len_ref / chunk_compress_factor).ceil().long().clamp(min=1, max=val_z_ref_full.shape[2])
-
+            
+            # Use build_reference_only for correct inference behavior
             val_z_ref, val_ref_enc_mask = build_reference_only(
                 val_z_ref_full, valid_z_len_ref, device, max_frames=256
             )
-
+            
     except Exception as e:
         if rank == 0:
             print(f"Validation batch init failed: {e}")
         val_batch = None
 
-    if rank == 0:
-        print("Starting training loop...")
-
+    max_steps = 1_000_000
     epoch = 0
+
     while global_step < max_steps:
-        if dist.is_initialized():
-            sampler.set_epoch(epoch)
+        if dist.is_initialized() and hasattr(sampler, 'set_epoch'): sampler.set_epoch(epoch)
         epoch += 1
 
         text_encoder.train()
         reference_encoder.train()
         vf_estimator.train()
 
-        mode_tag = "[FT] " if finetune else ""
-        progress_bar = tqdm(dataloader, desc=f"{mode_tag}Step {global_step}")
-
+        progress_bar = tqdm(dataloader, desc=f"{'[FT] ' if finetune else ''}Step {global_step}")
         epoch_loss = 0.0
         num_batches = 0
-
         spfm_dirty_total = 0
         spfm_total_samples = 0
         spfm_score_sum = 0.0
@@ -1017,12 +753,11 @@ def train(
             if global_step >= max_steps: break
 
             if len(batch) == 9:
-                 wavs, text_ids, text_masks, lengths, speaker_ids, ref_wavs, ref_lengths, is_self_ref, ref_speaker_ids = batch
-                 ref_speaker_ids = ref_speaker_ids.to(device)
+                wavs, text_ids, text_masks, lengths, speaker_ids, ref_wavs, ref_lengths, is_self_ref, ref_speaker_ids = batch
             else:
-                 wavs, text_ids, text_masks, lengths, speaker_ids, ref_wavs, ref_lengths, is_self_ref = batch
-                 ref_speaker_ids = speaker_ids
-
+                wavs, text_ids, text_masks, lengths, speaker_ids, ref_wavs, ref_lengths, is_self_ref = batch
+                ref_speaker_ids = speaker_ids
+            
             wavs = wavs.to(device)
             text_ids = text_ids.to(device)
             text_masks = text_masks.to(device)
@@ -1030,14 +765,25 @@ def train(
             ref_lengths = ref_lengths.to(device)
             is_self_ref = is_self_ref.to(device)
             speaker_ids = speaker_ids.to(device)
-
+            if ref_speaker_ids is None:
+                ref_speaker_ids = speaker_ids
+            
+            # Sanity Check Logging (every 100 steps)
             if global_step % 100 == 0:
                 same_speaker = (speaker_ids == ref_speaker_ids).float().mean().item()
                 self_ref_ratio = is_self_ref.float().mean().item()
-
+                
+                # Check for "Self Ref but Diff Indices" (dataset logic error)
+                # Currently we don't have indices in batch, but is_self_ref implies we used wav.clone().
+                # So if is_self_ref is true, the content is identical by definition in __getitem__.
+                # But let's log if same_speaker is low.
+                
                 if same_speaker < 0.99:
                      print(f"WARNING: Speaker Mismatch! Same-speaker ratio: {same_speaker:.2f}")
-
+                
+                # Check if is_self_ref is consistent (only for same speaker)
+                # We can't strictly check "same utterance" without indices, but we trust dataset logic.
+                
                 if global_step % 1000 == 0:
                      cross_ref_ratio = 1.0 - self_ref_ratio
                      print(f"[Ref Check] Step {global_step} | Self-Ref: {self_ref_ratio:.2f} | Cross-Ref: {cross_ref_ratio:.2f} | Same-Spk: {same_speaker:.2f}")
@@ -1055,7 +801,7 @@ def train(
                 z_ref_full_enc = compress_latents(z_ref_full_enc, factor=chunk_compress_factor)
                 z_ref_full = ((z_ref_full_enc - mean) / std) * normalizer_scale
 
-            B, C, T = z_1.shape
+            _, C, T = z_1.shape
             valid_mel_len = lengths.to(device).float() / hop_length
             valid_z_len = (valid_mel_len / chunk_compress_factor).ceil().long().clamp(min=1, max=T)
 
@@ -1074,54 +820,50 @@ def train(
                 chunk_compress_factor=chunk_compress_factor
             )
 
-            if global_step == 0:
-                 pass
-
             ref_values = reference_encoder(z_ref, mask=ref_enc_mask)
+            h_text = text_encoder(text_ids, ref_values, text_mask=text_masks)
+            
+            # Compute valid/padding mask ONCE for base batch (used by SPFM + FM)
+            # (latent_mask already computed above)
+            valid_len_mask = latent_mask 
+            # latent_mask = valid_len_mask  # [B, 1, T]
+            
+            # Zero out padded regions in z_1 for stability
+            # z_1 = z_1 * latent_mask # ALREADY DONE ABOVE
 
-            if global_step % 1000 == 0:
-                with torch.no_grad():
-                     z_ref_noise = z_ref.clone()
-                     inv_mask = (1.0 - ref_enc_mask)
-                     z_ref_noise = z_ref_noise + inv_mask * torch.randn_like(z_ref) * 10.0
+            _, D_text, T_txt = h_text.shape 
 
-                     ref_vals_noise = reference_encoder(z_ref_noise, mask=ref_enc_mask)
-                     diff = (ref_vals_noise - ref_values).abs().max().item()
-                     if diff > 1e-5:
-                         print(f"WARNING: ReferenceEncoder is sensitive to padded values! Max Diff: {diff}")
-                     else:
-                         pass
-
-            h_text = text_encoder(
-                text_ids,
-                ref_values,
-                text_mask=text_masks,
-            )
-
-            valid_len_mask = latent_mask
-
-            _, D_text, T_txt = h_text.shape
-
-            spfm_mask = torch.ones(B, 1, 1, device=device)
+            # ---------------------------------------------
+            # SPFM: Self-Purifying Flow Matching (paper-aligned)
+            # ---------------------------------------------
+            spfm_mask = torch.ones(B, 1, 1, device=device)  # keep all by default
             spfm_start = spfm_start_override if spfm_start_override is not None else 40_000
             end_spfm = max_steps
+            # spfm_every = 4        # Run periodically for speed and stability
 
             if global_step >= spfm_start and global_step <= end_spfm:
-
+                # Optimized SPFM: Use existing tensors (cheaper)
+                # No eval() switch, no re-computation
+                
                 with torch.no_grad():
+                    # Reuse computed conditions
                     h_text_spfm = h_text
                     ref_values_spfm = ref_values
 
                     _, D_text_spfm, T_txt_spfm = h_text_spfm.shape
 
+                    # Probe time t' = Fixed 0.5 (Paper recommendation)
                     t_spfm = torch.full((B,), 0.5, device=device)
                     t_b = t_spfm.view(B, 1, 1)
 
+                    # Fresh noise x0
                     x0 = torch.randn(B, C, T, device=device)
 
+                    # Same interpolation rule (sigma_min from config: ttl.flow_matching.sig_min)
                     x_t = (1 - (1 - sigma_min) * t_b) * x0 + t_b * z_1
                     v_target_spfm = z_1 - (1 - sigma_min) * x0
 
+                    # Mask x_t before VF to avoid padding noise affecting the decision
                     x_t_in = x_t * latent_mask
 
                     v_cond = vf_estimator(
@@ -1133,6 +875,7 @@ def train(
                         current_step=t_spfm,
                     )
 
+                    # Unconditional tensors
                     u_text_spfm = u_text.expand(B, D_text_spfm, 1)
                     u_ref_spfm  = u_ref.expand(B, -1, -1)
                     u_text_mask_spfm = torch.ones(B, 1, 1, device=device)
@@ -1146,10 +889,12 @@ def train(
                         current_step=t_spfm,
                     )
 
-                    final_mask_spfm = latent_mask * target_loss_mask
-                    mask_ct = final_mask_spfm.expand(-1, C, -1)
-                    denom = (final_mask_spfm.sum(dim=(1,2)) * C).clamp_min(1)
+                    # Loss mask: padding AND self-ref hole
+                    final_mask_spfm = latent_mask * target_loss_mask          # [B,1,T]
+                    mask_ct = final_mask_spfm.expand(-1, C, -1)               # [B,C,T]
+                    denom = (final_mask_spfm.sum(dim=(1,2)) * C).clamp_min(1) # [B]
 
+                    # MSE for Decision (Paper-aligned)
                     err_c2 = (v_cond   - v_target_spfm).pow(2)
                     err_u2 = (v_uncond - v_target_spfm).pow(2)
 
@@ -1159,20 +904,23 @@ def train(
                     is_dirty_candidate = (L_cond > L_uncond)
                     spfm_score = L_cond - L_uncond
 
+                    # No Top-K filtering on detection (Pure "honest" detection)
                     spfm_mask = torch.ones(B, 1, 1, device=device)
                     dirty_indices = torch.where(is_dirty_candidate)[0]
-
+                    
                     if dirty_indices.numel() > 0:
                          spfm_mask[dirty_indices] = 0.0
 
+                    # Log raw dirty count for visibility
                     raw_dirty_count = dirty_indices.numel()
-
+                    
                     if global_step % 1000 == 0:
                         print(f"[SPFM] Detected Dirty: {raw_dirty_count}/{B}")
 
+                # 4) Diagnostics: use TEXT length and LATENT length (not waveform length)
                 dirty_bool = (spfm_mask.squeeze(-1).squeeze(-1) < 0.5)
                 dirty_count = dirty_bool.sum().item()
-
+                
                 spfm_dirty_total += dirty_count
                 spfm_total_samples += B
                 spfm_score_sum += spfm_score.mean().item()
@@ -1181,14 +929,14 @@ def train(
                 if global_step % 1000 == 0 and rank == 0:
                     clean_bool = ~dirty_bool
 
-                    txt_len = text_masks.sum(dim=(1, 2)).float()
-                    lat_len = valid_z_len.float()
+                    txt_len = text_masks.sum(dim=(1, 2)).float()   # tokens
+                    lat_len = valid_z_len.float()                  # latent frames
 
                     avg_txt_clean = txt_len[clean_bool].mean().item() if clean_bool.any() else 0.0
                     avg_txt_dirty = txt_len[dirty_bool].mean().item() if dirty_bool.any() else 0.0
                     avg_lat_clean = lat_len[clean_bool].mean().item() if clean_bool.any() else 0.0
                     avg_lat_dirty = lat_len[dirty_bool].mean().item() if dirty_bool.any() else 0.0
-
+                    
                     print(
                         f"\n[SPFM Diag] Step {global_step} | Dirty: {dirty_count}/{B} ({dirty_count/B:.1%}) | "
                         f"Score mean: {spfm_score.mean().item():.3f} | "
@@ -1202,10 +950,9 @@ def train(
             text_masks_base_exp = text_masks.repeat_interleave(Ke, dim=0)
             latent_mask_exp = latent_mask.repeat_interleave(Ke, dim=0)
             target_loss_mask_exp = target_loss_mask.repeat_interleave(Ke, dim=0)
-            spfm_mask_exp   = spfm_mask.repeat_interleave(Ke, dim=0)
+            spfm_mask_exp = spfm_mask.repeat_interleave(Ke, dim=0)
 
             B_eff = B * Ke
-
             t = torch.rand(B_eff, device=device)
             with torch.no_grad():
                 x_0 = torch.randn(B_eff, C, T, device=device)
@@ -1214,11 +961,8 @@ def train(
                 v_target = z_1_exp - (1 - sigma_min) * x_0
 
             cfg_rand = torch.rand(B_eff, device=device)
-            drop_both = cfg_rand < prob_both_uncond
-            drop_text_only = (cfg_rand >= prob_both_uncond) & (cfg_rand < puncond)
-            force_text_uncond = drop_both | drop_text_only
-            force_style_uncond = drop_both.clone()
-
+            force_text_uncond = cfg_rand < puncond
+            force_style_uncond = cfg_rand < prob_both_uncond
             if spfm_mask_exp is not None:
                 is_dirty = (spfm_mask_exp.view(B_eff) < 0.5)
                 force_text_uncond = force_text_uncond | is_dirty
@@ -1229,8 +973,7 @@ def train(
             mask_style_uncond = force_style_uncond.view(-1, 1, 1).float()
             mask_style_cond = 1.0 - mask_style_uncond
 
-            u_text_padded = F.pad(u_text, (0, T_txt - 1))
-            u_text_batch = u_text_padded.expand(B_eff, -1, -1)
+            u_text_batch = F.pad(u_text, (0, T_txt - 1)).expand(B_eff, -1, -1)
             h_context = h_text_exp * mask_text_cond + u_text_batch * mask_text_uncond
 
             mask_uncond_valid = torch.zeros_like(text_masks_base_exp)
@@ -1240,43 +983,16 @@ def train(
             u_ref_batch = u_ref.expand(B_eff, -1, -1)
             ref_values_final = ref_values_exp * mask_style_cond + u_ref_batch * mask_style_uncond
 
-            x_t_in = x_t * latent_mask_exp
-
             v_pred = vf_estimator(
-                noisy_latent=x_t_in,
-                text_emb=h_context,
-                style_ttl=ref_values_final,
-                latent_mask=latent_mask_exp,
-                text_mask=text_mask_final,
-                current_step=t
+                noisy_latent=x_t * latent_mask_exp, text_emb=h_context, style_ttl=ref_values_final,
+                latent_mask=latent_mask_exp, text_mask=text_mask_final, current_step=t
             )
 
             final_mask = latent_mask_exp * target_loss_mask_exp
-
             loss_raw = F.l1_loss(v_pred, v_target, reduction='none')
             mask_ct = final_mask.expand(-1, C, -1)
             loss = (loss_raw * mask_ct).sum() / (mask_ct.sum() + 1e-8)
-
             loss = loss / accumulation_steps
-
-            if global_step % 1000 == 0 and rank == 0:
-                with torch.no_grad():
-                    dirty_rate = (spfm_mask_exp < 0.5).float().mean().item()
-                    p_text_uncond_eff = force_text_uncond.float().mean().item()
-                    p_style_uncond_eff = force_style_uncond.float().mean().item()
-
-                    print(
-                        f"\nStep {global_step} Debug:",
-                        f"z1 std: {z_1_exp.std().item():.3f}",
-                        f"x0 std: {x_0.std().item():.3f}",
-                        f"v_target std: {v_target.std().item():.3f}",
-                        f"v_pred std: {v_pred.std().item():.3f}",
-                        f"\nfinal_mask_mean: {final_mask.mean().item():.3f}",
-                        f"dirty_rate: {dirty_rate:.3f}",
-                        f"eff_text_uncond: {p_text_uncond_eff:.3f}",
-                        f"eff_style_uncond: {p_style_uncond_eff:.3f}"
-                    )
-
             loss.backward()
 
             if (batch_idx + 1) % accumulation_steps == 0:
@@ -1284,51 +1000,39 @@ def train(
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
-
                 global_step += 1
 
             epoch_loss += loss.item() * accumulation_steps
             num_batches += 1
-            avg_loss = epoch_loss / num_batches
-            postfix = dict(loss=avg_loss, step=global_step, lr=scheduler.get_last_lr()[0])
-            if finetune:
-                postfix["mode"] = "FT"
-            progress_bar.set_postfix(**postfix)
+            progress_bar.set_postfix(loss=epoch_loss / num_batches, step=global_step, lr=scheduler.get_last_lr()[0])
 
             if global_step % 1000 == 0 and rank == 0:
                 ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{global_step}.pt")
-
-                vf_state = vf_estimator.module.state_dict() if isinstance(vf_estimator, DDP) else vf_estimator.state_dict()
-                te_state = text_encoder.module.state_dict() if isinstance(text_encoder, DDP) else text_encoder.state_dict()
-                re_state = reference_encoder.module.state_dict() if isinstance(reference_encoder, DDP) else reference_encoder.state_dict()
-
                 torch.save({
-                    'vf_estimator': vf_state,
-                    'text_encoder': te_state,
-                    'reference_encoder': re_state,
-                    'u_text': u_text.data,
-                    'u_ref': u_ref.data,
-                    'optimizer': optimizer.state_dict(),
-                    'scheduler': scheduler.state_dict(),
+                    'vf_estimator': vf_estimator.module.state_dict() if isinstance(vf_estimator, DDP) else vf_estimator.state_dict(),
+                    'text_encoder': text_encoder.module.state_dict() if isinstance(text_encoder, DDP) else text_encoder.state_dict(),
+                    'reference_encoder': reference_encoder.module.state_dict() if isinstance(reference_encoder, DDP) else reference_encoder.state_dict(),
+                    'u_text': u_text.data, 'u_ref': u_ref.data,
+                    'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(),
                     'global_step': global_step
                 }, ckpt_path)
-                print(f"Saved checkpoint to {ckpt_path}")
 
-                print("Running Inference...")
-
+                # Unwrap for inference to avoid DDP sync issues on single rank
                 vf_infer = vf_estimator.module if isinstance(vf_estimator, DDP) else vf_estimator
                 te_infer = text_encoder.module if isinstance(text_encoder, DDP) else text_encoder
                 re_infer = reference_encoder.module if isinstance(reference_encoder, DDP) else reference_encoder
-
+                
                 vf_infer.eval()
                 te_infer.eval()
                 re_infer.eval()
-
+                
                 try:
+                    # Hebrew sentences (pre-computed IPA)
                     hebrew_sentences = [
                         "ʃalˈom janˈon kˈaχa niʃmˈa hamˈodel heχadˈaʃ mˈa daʔtχˈa ? lifʔamˈim tsaʁˈiχ baχajˈim lelatˈeʃ ʁaʔjˈon ʃˈuv vaʃˈuv ʔˈad ʃehˈu matslˈiaχ"
                     ]
 
+                    # English sentences — phonemize with espeak at inference time
                     english_sentences_raw = [
                         "Hello, how does the new model sound to you? Sometimes in life you need to push an idea again and again until it succeeds."
                     ]
@@ -1348,6 +1052,7 @@ def train(
                         print(f"[Inference] English phonemization failed: {_e}")
                         english_sentences = []
 
+                    # German sentences
                     german_sentences_raw = [
                         "Hallo, wie klingt das neue Modell für dich? Manchmal muss man eine Idee immer wieder versuchen, bis sie endlich funktioniert."
                     ]
@@ -1366,6 +1071,7 @@ def train(
                         print(f"[Inference] German phonemization failed: {_e}")
                         german_sentences = []
 
+                    # Italian sentences
                     italian_sentences_raw = [
                         "Ciao, come suona il nuovo modello per te? A volte nella vita bisogna insistere su un'idea ancora e ancora finché non riesce."
                     ]
@@ -1384,6 +1090,7 @@ def train(
                         print(f"[Inference] Italian phonemization failed: {_e}")
                         italian_sentences = []
 
+                    # Spanish sentences
                     spanish_sentences_raw = [
                         "Hola, ¿cómo suena el nuevo modelo para ti? A veces en la vida hay que insistir en una idea una y otra vez hasta que funciona."
                     ]
@@ -1402,6 +1109,8 @@ def train(
                         print(f"[Inference] Spanish phonemization failed: {_e}")
                         spanish_sentences = []
 
+                    # Computes style_ttl + style_dp once from the reference wav,
+                    # then reuses them across all sentences — matches ONNX inference pattern.
                     def run_inference_for_ref(ref_wav_torch, suffix, sentences, lang, label):
                         if ref_wav_torch is None or not sentences:
                             return
@@ -1416,11 +1125,12 @@ def train(
                             valid_z_len_ref = torch.tensor([T_ref], device=device)
                             ref_z, ref_mask = build_reference_only(ref_z_norm, valid_z_len_ref, device, max_frames=256)
 
-                            style_ttl = re_infer(ref_z, mask=ref_mask)
+                            # Extract style tokens once — reused for all sentences
+                            style_ttl = re_infer(ref_z, mask=ref_mask)      # [1, 50, 256]
                             style_dp = None
                             if dp_model is not None:
-                                style_dp = dp_model.ref_encoder(ref_z, mask=ref_mask)
-                                style_dp = style_dp.reshape(B_ref, 8, 16)
+                                style_dp = dp_model.ref_encoder(ref_z, mask=ref_mask)  # [1, 128]
+                                style_dp = style_dp.reshape(B_ref, 8, 16)              # [1, 8, 16]
 
                         for i, text in enumerate(sentences):
                             ids = text_to_indices_multilang(text, base_lang=lang)
@@ -1434,20 +1144,20 @@ def train(
                                 mean=mean, std=std,
                                 duration_predictor=dp_model,
                                 steps=16,
-                                device=device,
+                                device=str(device) if isinstance(device, torch.device) else device,
                                 debug_label=f"{label}_{suffix}",
                                 latent_dim=latent_dim,
                                 chunk_compress_factor=chunk_compress_factor,
                                 normalizer_scale=normalizer_scale,
                                 style_ttl=style_ttl,
                                 style_dp=style_dp,
-                                cfg_scale=float(os.environ.get("BLUE_CFG_SCALE", 3.0)),
-                                u_text=u_text.detach(),
-                                u_ref=u_ref.detach(),
+                                uncond_params=uncond_params,
+                                cfg_scale=3.0,
                             )
                             wav = wav_out.squeeze().cpu().numpy()
                             sf.write(os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_{suffix}.wav"), wav, ae_sample_rate)
 
+                    # Run for Voice 1
                     if 'ref_wav_torch_v1' in locals():
                         run_inference_for_ref(ref_wav_torch_v1, "voice1", hebrew_sentences, "he", "hebrew")
                         run_inference_for_ref(ref_wav_torch_v1, "voice1", english_sentences, "en", "english")
@@ -1455,14 +1165,15 @@ def train(
                         run_inference_for_ref(ref_wav_torch_v1, "voice1", italian_sentences, "it", "italian")
                         run_inference_for_ref(ref_wav_torch_v1, "voice1", spanish_sentences, "es", "spanish")
 
-                    if val_batch is not None:
+                    # Run for Validation Batch
+                    if val_batch is not None and val_wavs is not None and val_text_ids is not None and val_text_masks is not None and val_ref_wavs is not None and val_ref_lengths is not None and val_z_ref is not None and val_ref_enc_mask is not None:
                         with torch.no_grad():
-                            ref_z_val = val_z_ref[0:1]
-                            ref_mask_val = val_ref_enc_mask[0:1]
-                            val_style_ttl = re_infer(ref_z_val, mask=ref_mask_val)
+                            ref_z_val = val_z_ref[0:1] if val_z_ref is not None else None
+                            ref_mask_val = val_ref_enc_mask[0:1] if val_ref_enc_mask is not None else None
+                            val_style_ttl = re_infer(ref_z_val, mask=ref_mask_val) if ref_z_val is not None else None  # [1, 50, 256]
                             val_style_dp = None
-                            if dp_model is not None:
-                                val_style_dp = dp_model.ref_encoder(ref_z_val, mask=ref_mask_val)
+                            if dp_model is not None and ref_z_val is not None:
+                                val_style_dp = dp_model.ref_encoder(ref_z_val, mask=ref_mask_val)  # [1, 128]
                                 val_style_dp = val_style_dp.reshape(1, 8, 16)
 
                         for lang, sentences, label in [
@@ -1484,37 +1195,41 @@ def train(
                                     mean=mean, std=std,
                                     duration_predictor=dp_model,
                                     steps=16,
-                                    device=device,
+                                    device=str(device) if isinstance(device, torch.device) else device,
                                     debug_label=f"{label}_val_sample",
                                     latent_dim=latent_dim,
                                     chunk_compress_factor=chunk_compress_factor,
-                                    normalizer_scale=normalizer_scale,
-                                    style_ttl=val_style_ttl,
-                                    style_dp=val_style_dp,
-                                cfg_scale=float(os.environ.get("BLUE_CFG_SCALE", 3.0)),
-                                u_text=u_text.detach(),
-                                u_ref=u_ref.detach(),
-                                )
+                                normalizer_scale=normalizer_scale,
+                                style_ttl=val_style_ttl,
+                                style_dp=val_style_dp,
+                                uncond_params=uncond_params,
+                                cfg_scale=3.0,
+                            )
                                 wav = wav_out.squeeze().cpu().numpy()
                                 sf.write(os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_val_sample.wav"), wav, ae_sample_rate)
 
+                    # VC Check: val_batch[0] content → reference.wav speaker
+                    # Saves source audio + converted output so content preservation can be verified.
                     vc_ref_path = "reference.wav"
                     if val_batch is not None and os.path.exists(vc_ref_path):
                         try:
+                            # Save source for comparison
                             sf.write(
                                 os.path.join(log_dir, f"step_{global_step}_vc_source.wav"),
-                                val_wavs[0].squeeze().cpu().numpy(),
+                                val_wavs[0].squeeze().cpu().numpy() if val_wavs is not None else None,
                                 ae_sample_rate,
                             )
 
+                            # Load reference.wav
                             vc_ref_np, vc_ref_sr = sf.read(vc_ref_path)
                             vc_ref_wav = torch.from_numpy(vc_ref_np).float()
                             if vc_ref_wav.dim() > 1:
                                 vc_ref_wav = vc_ref_wav.mean(dim=-1)
                             vc_ref_wav = ensure_sr(vc_ref_wav, vc_ref_sr, ae_sample_rate, device=device)
                             if vc_ref_wav.dim() == 1:
-                                vc_ref_wav = vc_ref_wav.unsqueeze(0)
+                                vc_ref_wav = vc_ref_wav.unsqueeze(0)  # [1, T]
 
+                            # Build reference latent
                             with torch.no_grad():
                                 vc_ref_mel = mel_spec(vc_ref_wav)
                                 vc_ref_z = ae_encoder(vc_ref_mel)
@@ -1527,6 +1242,7 @@ def train(
                                     max_frames=256
                                 )
 
+                            # Pre-extract target speaker style values
                             with torch.no_grad():
                                 vc_style_ttl = re_infer(vc_ref_z_built, mask=vc_ref_mask)
                                 vc_style_dp = None
@@ -1536,20 +1252,20 @@ def train(
 
                             wav_vc = sample_audio(
                                 vf_infer, te_infer, re_infer, ae_decoder,
-                                val_text_ids[0:1], val_text_masks[0:1],
+                                val_text_ids[0:1] if val_text_ids is not None else None, 
+                                val_text_masks[0:1] if val_text_masks is not None else None,
                                 z_ref=None, ref_enc_mask=None,
                                 mean=mean, std=std,
                                 duration_predictor=dp_model,
                                 steps=16,
-                                device=device, debug_label="vc",
+                                device=str(device) if isinstance(device, torch.device) else device, debug_label="vc",
                                 latent_dim=latent_dim,
                                 chunk_compress_factor=chunk_compress_factor,
                                 normalizer_scale=normalizer_scale,
                                 style_ttl=vc_style_ttl,
                                 style_dp=vc_style_dp,
-                                cfg_scale=float(os.environ.get("BLUE_CFG_SCALE", 3.0)),
-                                u_text=u_text.detach(),
-                                u_ref=u_ref.detach(),
+                                uncond_params=uncond_params,
+                                cfg_scale=3.0,
                             )
                             sf.write(
                                 os.path.join(log_dir, f"step_{global_step}_vc_output.wav"),
@@ -1563,11 +1279,12 @@ def train(
                     print(f"Inference failed: {e}")
                     import traceback
                     traceback.print_exc()
-
+                
                 vf_estimator.train()
                 text_encoder.train()
                 reference_encoder.train()
 
+        # Flush remaining gradients if dataloader length is not divisible by accumulation_steps
         if num_batches % accumulation_steps != 0:
             torch.nn.utils.clip_grad_norm_(params, 10.0)
             optimizer.step()
@@ -1577,10 +1294,11 @@ def train(
 
         if spfm_call_batches > 0:
             if dist.is_initialized():
+                # Aggregate SPFM stats across all GPUs
                 spfm_stats = torch.tensor([
-                    spfm_dirty_total,
-                    spfm_total_samples,
-                    spfm_score_sum,
+                    spfm_dirty_total, 
+                    spfm_total_samples, 
+                    spfm_score_sum, 
                     spfm_call_batches
                 ], dtype=torch.float64, device=device)
                 dist.all_reduce(spfm_stats, op=dist.ReduceOp.SUM)
@@ -1605,7 +1323,7 @@ def train(
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--finetune", action="store_true",
+    parser.add_argument("--finetune", action="store_true", 
                         help="Finetune mode: lr=5e-4, SPFM starts after warm-up")
     parser.add_argument("--config", type=str, default="configs/tts.json",
                         help="Path to tts.json config file (default: configs/tts.json)")
@@ -1631,6 +1349,12 @@ if __name__ == "__main__":
         default=None,
         help="Path to unicode_indexer.json. If provided, switches to character-level mode.",
     )
+    parser.add_argument(
+        "--inference_ref_wav",
+        type=str,
+        default=None,
+        help="WAV for Voice 1 validation inference logs (or set T2L_INFERENCE_REF_WAV).",
+    )
     args = parser.parse_args()
 
     set_seed(42)
@@ -1641,4 +1365,5 @@ if __name__ == "__main__":
         accumulation_steps=args.accumulation_steps,
         checkpoint_dir=args.checkpoint_dir,
         resume_from=args.resume_from,
+        inference_ref_wav=args.inference_ref_wav,
     )

@@ -3,7 +3,7 @@ import numpy as np
 import os
 import argparse
 
-from models.utils import load_ttl_config
+from training.utils import load_ttl_config
 
 def main():
     parser = argparse.ArgumentParser(description="Convert .pt stats to .npz for ONNX inference")
