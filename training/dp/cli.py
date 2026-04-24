@@ -1,20 +1,11 @@
 import argparse
 import torch
-import random
-import numpy as np
 
 from training.dp.trainer import train_duration_predictor
-
-def set_seed(seed: int = 42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
+from training.utils import seed_all
 
 def main():
-    set_seed(42)
+    seed_all(42, deterministic=False)
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/tts.json")
     parser.add_argument("--data", type=str, default="generated_audio/combined_dataset_cleaned_real_data.csv")
