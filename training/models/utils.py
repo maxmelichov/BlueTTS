@@ -18,14 +18,20 @@ def decompress_latents(z: torch.Tensor, factor: int = 6, target_channels: int = 
     return z.view(B, target_channels, factor, T_low).permute(0, 1, 3, 2).flatten(2, 3)
 
 
-def _resolve_vocab_size(char_dict_path, default=384):
+def _resolve_vocab_size(char_dict_path, default=256):
     import json as _json
     import os as _os
     if char_dict_path and _os.path.exists(char_dict_path):
         try:
             with open(char_dict_path, "r") as f:
                 cd = _json.load(f)
-            return max(cd.values()) + 1 if isinstance(cd, dict) else len(cd)
+            if isinstance(cd, dict) and "vocab_size" in cd:
+                return int(cd["vocab_size"])
+            if isinstance(cd, dict) and "char_to_id" in cd and isinstance(cd["char_to_id"], dict):
+                return max(cd["char_to_id"].values()) + 1
+            if isinstance(cd, dict):
+                return max(cd.values()) + 1 if cd else default
+            return len(cd)
         except Exception:
             pass
     return default
@@ -47,7 +53,7 @@ def load_ttl_config(config_path="configs/tts.json"):
 
     # ---- Vocab sizes ----
     char_dict_path = te.get("char_dict_path", te.get("text_embedder", {}).get("char_dict_path"))
-    vocab_size = _resolve_vocab_size(char_dict_path, default=384)
+    vocab_size = _resolve_vocab_size(char_dict_path, default=256)
 
     dp_char_dict_path = (
         dp.get("sentence_encoder", {}).get("char_dict_path")
