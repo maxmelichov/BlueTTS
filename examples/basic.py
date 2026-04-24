@@ -1,28 +1,32 @@
 import sys
+from pathlib import Path
 import soundfile as sf
 
 sys.path.append(".")
-from src.blue_onnx import BlueTTS
+from src.blue_onnx import load_text_to_speech, load_voice_style
 
-tts = BlueTTS(
-    onnx_dir="onnx_models",
-    style_json="voices/female1.json"
-)
+tts = load_text_to_speech(onnx_dir="onnx_slim")
+style = load_voice_style(["voices/reference_pt.json"])
+OUT = Path("examples/out"); OUT.mkdir(parents=True, exist_ok=True)
 
-per_lang = [
+
+def save(text: str, lang: str, name: str):
+    audio, _ = tts(text, lang=lang, style=style, total_step=16, cfg_scale=3.0)
+    if audio.ndim == 2: audio = audio[0]
+    sf.write(OUT / name, audio, tts.sample_rate)
+    print(f"Saved {OUT / name}  ({len(audio)/tts.sample_rate:.2f}s)")
+
+
+for code, text in [
     ("he", "שלום, זהו מודל דיבור בעברית."),
     ("en", "Hello, this is a short English test."),
     ("es", "Hola, esta es una prueba breve en español."),
     ("it", "Ciao, questa è una prova breve in italiano."),
-    ("ge", "Hallo, das ist ein kurzer deutscher Test."),
-]
+    ("de", "Hallo, das ist ein kurzer deutscher Test."),
+]:
+    save(text, code, f"basic_{code}.wav")
 
-for code, text in per_lang:
-    audio, sr = tts.synthesize(text, lang=code)
-    sf.write(f"sample_{code}.wav", audio, sr)
-    print(f"Saved sample_{code}.wav")
-
-mixed = "שלום לכולם, <en>welcome to the demo</en>, <es>gracias por escuchar</es>."
-audio, sr = tts.synthesize(mixed, lang="he")
-sf.write("sample_mixed.wav", audio, sr)
-print("Saved sample_mixed.wav")
+save(
+    "שלום לכולם, <en>welcome to the demo</en>, <es>gracias por escuchar</es>.",
+    "he", "basic_mixed.wav",
+)

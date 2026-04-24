@@ -308,7 +308,8 @@ class TextToSpeech:
         chunk_size = self.base_chunk_size * self.chunk_compress_factor
         latent_len = ((wav_len_max + chunk_size - 1) / chunk_size).astype(np.int32)
         latent_dim = self.ldim * self.chunk_compress_factor
-        noisy_latent = np.random.randn(bsz, latent_dim, latent_len).astype(np.float32)
+        rng = np.random.default_rng(42)
+        noisy_latent = rng.standard_normal((bsz, latent_dim, latent_len)).astype(np.float32)
         latent_mask = get_latent_mask(
             wav_lengths, self.base_chunk_size, self.chunk_compress_factor
         )
@@ -385,6 +386,11 @@ class TextToSpeech:
             else:
                 xt, *_ = self.vector_est_ort.run(None, cond)
         wav, *_ = self.vocoder_ort.run(None, {"latent": xt})
+        frame_len = self.base_chunk_size * self.chunk_compress_factor
+        if wav.shape[-1] > 2 * frame_len:
+            wav = wav[..., frame_len:-frame_len]
+        if wav.ndim == 3 and wav.shape[1] == 1:
+            wav = wav[:, 0, :]
         return wav, dur_onnx
 
     def __call__(
@@ -499,31 +505,44 @@ def load_onnx_all(
     return dp_ort, text_enc_ort, vector_est_ort, vocoder_ort
 
 
-def load_cfgs(onnx_dir: str) -> dict:
-    cfg_path = os.path.join(onnx_dir, "tts.json")
+def load_cfgs(onnx_dir: str, config_path: str = "config/tts.json") -> dict:
+    # Prefer an explicit config next to the onnx files; otherwise fall back
+    # to the single repo-level config/tts.json.
+    local = os.path.join(onnx_dir, "tts.json")
+    cfg_path = local if os.path.exists(local) else config_path
     with open(cfg_path, "r") as f:
-        cfgs = json.load(f)
-    return cfgs
+        return json.load(f)
 
 
 def load_text_processor(onnx_dir: str = "") -> UnicodeProcessor:
     return UnicodeProcessor(os.path.join(os.path.dirname(__file__), "..", "vocab.json"))
 
 
-def load_text_to_speech(onnx_dir: str, use_gpu: bool = False) -> TextToSpeech:
+def load_text_to_speech(
+    onnx_dir: str, use_gpu: bool = False, config_path: str = "config/tts.json",
+) -> TextToSpeech:
     opts = ort.SessionOptions()
+    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    # ORT over-subscribes on many-core CPUs (NUMA/SMT contention).
+    # Empirically 4–8 intra-op threads is optimal for this model on CPU.
+    n_threads = int(os.environ.get("ORT_NUM_THREADS", min(8, os.cpu_count() or 1)))
+    opts.intra_op_num_threads = n_threads
+    opts.inter_op_num_threads = 1
     if use_gpu:
         raise NotImplementedError("GPU mode is not fully tested")
     else:
         providers = ["CPUExecutionProvider"]
-        print("Using CPU for inference")
-    cfgs = load_cfgs(onnx_dir)
+        print(f"Using CPU for inference (intra_op_threads={n_threads})")
+    cfgs = load_cfgs(onnx_dir, config_path)
     dp_ort, text_enc_ort, vector_est_ort, vocoder_ort = load_onnx_all(
         onnx_dir, opts, providers
     )
     text_processor = load_text_processor(onnx_dir)
+    g2p = TextProcessor()
     return TextToSpeech(
-        cfgs, text_processor, dp_ort, text_enc_ort, vector_est_ort, vocoder_ort
+        cfgs, text_processor, dp_ort, text_enc_ort, vector_est_ort, vocoder_ort,
+        g2p=g2p,
     )
 
 
