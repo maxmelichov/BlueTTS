@@ -18,16 +18,10 @@ from ..blue_onnx import (
     load_text_processor as _load_text_processor_onnx,
 )
 
-# Resolve training models on sys.path (imports below depend on it).
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_TRAINING = os.path.join(os.path.dirname(os.path.dirname(_HERE)), "training")
-if _TRAINING not in sys.path:
-    sys.path.insert(0, _TRAINING)
-
-from models.text2latent.text_encoder import TextEncoder  # noqa: E402
-from models.text2latent.vf_estimator import VectorFieldEstimator  # noqa: E402
-from models.text2latent.dp_network import DPNetwork  # noqa: E402
-from models.utils import load_ttl_config  # noqa: E402
+from training.t2l.models.text_encoder import TextEncoder  # noqa: E402
+from training.t2l.models.vf_estimator import VectorFieldEstimator  # noqa: E402
+from training.dp.models.dp_network import DPNetwork  # noqa: E402
+from training.utils import load_ttl_config  # noqa: E402
 from bluecodec import LatentDecoder1D  # noqa: E402
 from bluecodec.utils import decompress_latents  # noqa: E402
 
