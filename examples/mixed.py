@@ -15,8 +15,16 @@ text = (
     "<it>Ciao a tutti. Adesso facciamo una breve sosta in italiano, con un tono naturale e scorrevole.</it> "
     "<de>Hallo zusammen. Und zum Schluss besuchen wir noch das Deutsche mit einem kurzen, klaren Satz.</de>"
 )
+text_is_phonemes = False
 
-audio, _ = tts(text, lang="he", style=style, total_step=16, cfg_scale=3.0)
+audio, _ = tts(
+    text,
+    lang="he",
+    style=style,
+    total_step=5,
+    cfg_scale=3.0,
+    text_is_phonemes=text_is_phonemes,
+)
 if audio.ndim == 2: audio = audio[0]
 out = Path("examples/out/mixed.wav"); out.parent.mkdir(parents=True, exist_ok=True)
 sf.write(out, audio, tts.sample_rate)
