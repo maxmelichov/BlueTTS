@@ -1,5 +1,5 @@
 {
-    "tts_version": "v1.0.0",
+    "tts_version": "v2.0.0",
     "ttl": {
         "latent_dim": 24,
         "chunk_compress_factor": 6,
@@ -10,9 +10,9 @@
             "scale": 0.25
         },
         "text_encoder": {
-            "char_dict_path": "",
+            "char_dict_path": "src/vocab.json",
             "text_embedder": {
-                "char_dict_path": "",
+                "char_dict_path": "src/vocab.json",
                 "char_emb_dim": 256
             },
             "convnext": {
@@ -256,9 +256,9 @@
         },
         "sentence_encoder": {
             "char_emb_dim": 64,
-            "char_dict_path": "",
+            "char_dict_path": "src/vocab.json",
             "text_embedder": {
-                "char_dict_path": "",
+                "char_dict_path": "src/vocab.json",
                 "char_emb_dim": 64
             },
             "convnext": {
