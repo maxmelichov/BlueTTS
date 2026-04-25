@@ -310,8 +310,7 @@ class TextToSpeech:
         chunk_size = self.base_chunk_size * self.chunk_compress_factor
         latent_len = ((wav_len_max + chunk_size - 1) / chunk_size).astype(np.int32)
         latent_dim = self.ldim * self.chunk_compress_factor
-        rng = np.random.default_rng(42)
-        noisy_latent = rng.standard_normal((bsz, latent_dim, latent_len)).astype(np.float32)
+        noisy_latent = np.random.randn(bsz, latent_dim, latent_len).astype(np.float32)
         latent_mask = get_latent_mask(
             wav_lengths, self.base_chunk_size, self.chunk_compress_factor
         )
@@ -324,7 +323,7 @@ class TextToSpeech:
         lang_list: list[str],
         style: Style,
         total_step: int,
-        speed: float = 1.0,
+        speed: float = 1.05,
         cfg_scale: float = 3.0,
     ) -> tuple[np.ndarray, np.ndarray]:
         assert (
@@ -458,6 +457,16 @@ class TextToSpeech:
                 wav_cat = np.concatenate([wav_cat, silence, wav], axis=1)
                 dur_cat = dur_cat + dur_onnx + silence_duration
         return wav_cat, dur_cat
+
+    def batch(
+        self,
+        text_list: list[str],
+        lang_list: list[str],
+        style: Style,
+        total_step: int,
+        speed: float = 1.05,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return self._infer(text_list, lang_list, style, total_step, speed)
 
 
 def length_to_mask(lengths: np.ndarray, max_len: Optional[int] = None) -> np.ndarray:
