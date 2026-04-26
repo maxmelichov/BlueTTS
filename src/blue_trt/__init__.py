@@ -18,6 +18,7 @@ from ..blue_onnx import (
     TextProcessor,
     blend_duration_pace,
     chunk_text,
+    strip_lang_tags_from_phoneme_string,
     text_to_indices,
 )
 
@@ -306,7 +307,8 @@ class BlueTRT:
             else (DEFAULT_MIXED_PACE_BLEND if has_inline else 0.0)
         )
         cfg = self.cfg_scale if cfg_scale is None else float(cfg_scale)
-        chunks = chunk_text(phonemes, self.chunk_len)
+        phonemes_flat = strip_lang_tags_from_phoneme_string(phonemes)
+        chunks = chunk_text(phonemes_flat, self.chunk_len)
         silence = np.zeros(int(self.silence_sec * self.sample_rate), dtype=np.float32)
         parts: List[np.ndarray] = []
         for i, chunk in enumerate(chunks):
@@ -348,7 +350,9 @@ class BlueTRT:
             feed[inp_names[1]] = mask
 
         out = self._ref_enc.run(feed)
-        ref_values = out.get("ref_values") or next(iter(out.values()))
+        ref_values = out.get("ref_values")
+        if ref_values is None:
+            ref_values = next(iter(out.values()))
         return ref_values, out.get("ref_keys")
 
     def _infer_chunk(
@@ -400,7 +404,9 @@ class BlueTRT:
         if "ref_values" in te_in: te_feed["ref_values"] = ref_values
         if "ref_keys" in te_in: te_feed["ref_keys"] = ref_keys
         te_out = self._text_enc.run(te_feed)
-        text_emb = te_out.get("text_emb") or next(iter(te_out.values()))
+        text_emb = te_out.get("text_emb")
+        if text_emb is None:
+            text_emb = next(iter(te_out.values()))
 
         # Duration.
         T_lat = self._predict_duration(
@@ -470,6 +476,7 @@ class BlueTRT:
         text_mask: torch.Tensor,
         latent_mask: torch.Tensor,
         step: int,
+        cfg_scale: float,
     ) -> Dict[str, torch.Tensor]:
         vf_in = set(self._vf.input_names())
         total_t = torch.tensor([float(self.steps)], dtype=torch.float32, device=self.device)
@@ -485,6 +492,10 @@ class BlueTRT:
             feed["style_mask"] = torch.ones(1, 1, ref_values.shape[1], dtype=torch.float32, device=self.device)
         if "current_step" in vf_in: feed["current_step"] = step_t
         if "total_step" in vf_in: feed["total_step"] = total_t
+        if "cfg_scale" in vf_in:
+            feed["cfg_scale"] = torch.tensor(
+                [float(cfg_scale)], dtype=torch.float32, device=self.device
+            )
         return feed
 
     def _flow_matching(
@@ -503,11 +514,25 @@ class BlueTRT:
         u_text_mask = torch.ones(1, 1, 1, dtype=torch.float32, device=self.device) if use_cfg else None
 
         for s in range(self.steps):
-            cond = self._vf.run(self._vf_feed(x, text_emb, ref_values, text_mask, latent_mask, s))
+            cond = self._vf.run(
+                self._vf_feed(
+                    x, text_emb, ref_values, text_mask, latent_mask, s, cfg_scale
+                )
+            )
             cond_next = cond["denoised_latent"] if self._vf_has_denoised else x + cond["velocity"] / float(self.steps)
 
             if use_cfg:
-                uncond = self._vf.run(self._vf_feed(x, self._u_text, self._u_ref, u_text_mask, latent_mask, s))
+                uncond = self._vf.run(
+                    self._vf_feed(
+                        x,
+                        self._u_text,
+                        self._u_ref,
+                        u_text_mask,
+                        latent_mask,
+                        s,
+                        cfg_scale,
+                    )
+                )
                 uncond_next = uncond["denoised_latent"] if self._vf_has_denoised else x + uncond["velocity"] / float(self.steps)
                 # SupertonicTTS §3.4 CFG (linearity makes mixing denoiseds equivalent to mixing velocities).
                 x = uncond_next + cfg_scale * (cond_next - uncond_next)
@@ -517,17 +542,12 @@ class BlueTRT:
         return x
 
     def _decode(self, latent: torch.Tensor) -> np.ndarray:
-        # Denormalize in 144-ch, then time-axis pixel-shuffle to 24-ch.
-        z = (latent / float(self.normalizer_scale)) * self.std + self.mean
-        B, _, T = z.shape
-        z_dec = (
-            z.view(B, self.latent_dim, self.chunk_compress_factor, T)
-             .permute(0, 1, 3, 2)
-             .reshape(B, self.latent_dim, T * self.chunk_compress_factor)
-        )
-
-        voc_out = self._vocoder.run({"latent": z_dec})
-        wav = voc_out.get("waveform") or next(iter(voc_out.values()))
+        # Vocoder engine matches `exports/export_onnx.py` VocoderWithStats: in-graph
+        # denorm + 144ch→24ch time shuffle; pass flow output [1, 144, T] only.
+        voc_out = self._vocoder.run({"latent": latent})
+        wav = voc_out.get("waveform")
+        if wav is None:
+            wav = next(iter(voc_out.values()))
 
         frame_len = self.hop_length * self.chunk_compress_factor
         if wav.shape[-1] > 2 * frame_len:
