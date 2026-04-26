@@ -20,6 +20,7 @@ from ..blue_onnx import (
     blend_duration_pace,
     chunk_text,
     load_text_processor as _load_text_processor_onnx,
+    strip_lang_tags_from_phoneme_string,
 )
 
 from training.t2l.models.text_encoder import TextEncoder  # noqa: E402
@@ -226,6 +227,7 @@ class TextToSpeech:
             )
             if phonemize and self.g2p is not None:
                 text = [self.g2p.phonemize(t, lang=l) for t, l in zip(text, lang)]
+            text = [strip_lang_tags_from_phoneme_string(t) for t in text]
             return self._infer(
                 text,
                 lang,
@@ -243,6 +245,7 @@ class TextToSpeech:
         ), "Single speaker text to speech only supports single style"
         if phonemize and self.g2p is not None:
             text = self.g2p.phonemize(text, lang=lang)
+        text = strip_lang_tags_from_phoneme_string(text)
         max_len = 120 if lang == "ko" else 300
         text_list = chunk_text(text, max_len=max_len)
 
