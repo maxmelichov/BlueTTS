@@ -6,12 +6,12 @@ import sys
 import logging
 import argparse
 
-# Allow `uv run python scripts/create_tensorrt.py` from the repository root.
+# Allow `uv run python exports/create_tensorrt.py` from the repository root.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from scripts.utils import load_ttl_config  # noqa: E402
+from exports.utils import load_ttl_config  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("EngineBuilder")
