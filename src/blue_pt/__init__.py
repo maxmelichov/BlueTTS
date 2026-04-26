@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -12,8 +13,11 @@ import torch
 
 from ..blue_onnx import (
     AVAILABLE_LANGS,
+    DEFAULT_MIXED_PACE_BLEND,
+    DURATION_PACE_DPT_REF,
     TextProcessor,
     UnicodeProcessor,
+    blend_duration_pace,
     chunk_text,
     load_text_processor as _load_text_processor_onnx,
 )
@@ -24,6 +28,8 @@ from training.dp.models.dp_network import DPNetwork  # noqa: E402
 from training.utils import load_ttl_config  # noqa: E402
 from bluecodec import LatentDecoder1D  # noqa: E402
 from bluecodec.utils import decompress_latents  # noqa: E402
+
+_INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)(?:</\1>|<\1>)", re.DOTALL)
 
 
 class Style:
@@ -101,6 +107,8 @@ class TextToSpeech:
         total_step: int,
         speed: float = 1.0,
         cfg_scale: float = 3.0,
+        pace_blend: float = 0.0,
+        pace_dpt_ref: Optional[float] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         assert (
             len(text_list) == style.ttl.shape[0]
@@ -116,7 +124,12 @@ class TextToSpeech:
             raise ValueError("Style must contain style_dp for the PT duration predictor.")
         dur = self.dp_model(
             text_ids, text_mask=text_mask, style_dp=style.dp, return_log=False
-        ).view(bsz).float() / max(speed, 1e-6)
+        ).view(bsz).float()
+        dur_np = dur.detach().cpu().numpy()
+        tm_np = text_mask.detach().cpu().numpy()
+        ref = float(pace_dpt_ref) if pace_dpt_ref is not None else DURATION_PACE_DPT_REF
+        dur_np = blend_duration_pace(dur_np, tm_np, pace_blend, ref)
+        dur = torch.from_numpy(dur_np).to(dur.device) / max(float(speed), 1e-6)
 
         # Text encoding.
         h_text = self.text_encoder(text_ids, style.ttl, text_mask=text_mask)
@@ -185,22 +198,44 @@ class TextToSpeech:
         speed: float = 1.0,
         cfg_scale: float = 3.0,
         silence_duration: float = 0.0,
-        phonemize: bool = True,
         text_is_phonemes: bool = False,
+        pace_blend: Optional[float] = None,
+        pace_dpt_ref: Optional[float] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Synthesize speech (see ``blue_onnx.TextToSpeech.__call__``).
 
-        Set ``text_is_phonemes=True`` when ``text`` already contains phonemes; this
-        skips G2P while keeping the normal tokenizer/chunking path.
+        Set ``text_is_phonemes=True`` when ``text`` already contains phonemes to skip
+        G2P while keeping the normal tokenizer/chunking path.
+
+        See :meth:`src.blue_onnx.TextToSpeech.__call__` for ``pace_blend`` and
+        ``pace_dpt_ref`` (more consistent ``speed`` across languages).
         """
-        phonemize = phonemize and not text_is_phonemes
+        phonemize = not text_is_phonemes
+        if isinstance(text, list):
+            has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text)
+        else:
+            has_inline_lang = _INLINE_LANG_PAIR.search(text) is not None
+        pace_blend_eff = (
+            float(pace_blend)
+            if pace_blend is not None
+            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
+        )
         if isinstance(text, list):
             assert isinstance(lang, list) and len(text) == len(lang), (
                 "Batch mode requires `lang` to be a list of the same length as `text`."
             )
             if phonemize and self.g2p is not None:
                 text = [self.g2p.phonemize(t, lang=l) for t, l in zip(text, lang)]
-            return self._infer(text, lang, style, total_step, speed, cfg_scale)
+            return self._infer(
+                text,
+                lang,
+                style,
+                total_step,
+                speed,
+                cfg_scale,
+                pace_blend=pace_blend_eff,
+                pace_dpt_ref=pace_dpt_ref,
+            )
 
         assert isinstance(lang, str), "Single-text mode requires `lang` to be a str."
         assert (
@@ -215,7 +250,14 @@ class TextToSpeech:
         dur_cat = None
         for chunk in text_list:
             wav, dur = self._infer(
-                [chunk], [lang], style, total_step, speed, cfg_scale
+                [chunk],
+                [lang],
+                style,
+                total_step,
+                speed,
+                cfg_scale,
+                pace_blend=pace_blend_eff,
+                pace_dpt_ref=pace_dpt_ref,
             )
             if wav_cat is None:
                 wav_cat = wav
