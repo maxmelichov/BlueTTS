@@ -8,6 +8,23 @@ Install the export dependencies first:
 uv sync --extra export
 ```
 
+## Weights (safetensors) — **required** for new voice and ONNX
+
+Exporting a **voice** from a reference clip or **ONNX** graphs from PyTorch both load the same trained checkpoints. Those weights live as **`.safetensors`** files (plus stats) in the [notmax123/blue-v2](https://huggingface.co/notmax123/blue-v2) model repo. Download them once, for example into `pt_models/`:
+
+```bash
+uv run hf download notmax123/blue-v2 --repo-type model --local-dir ./pt_models
+```
+
+You will need (filenames as on the Hub, paths passed via flags):
+
+- `blue_codec.safetensors` — autoencoder (`--ae_ckpt`)
+- `vf_estimetor.safetensors` — voice-flow stack (`--ttl_ckpt`)
+- `duration_predictor_final.safetensors` — duration model (`--dp_ckpt`)
+- `stats_multilingual.safetensors` — running-mean / stats (`--stats`)
+
+Without these files, `export_new_voice.py` and `export_onnx.py` cannot run.
+
 ## Export A New Voice
 
 Use one clean reference WAV. The script downmixes to mono and resamples to the model sample rate.
@@ -18,9 +35,9 @@ uv run python exports/export_new_voice.py \
   --out voices/my_voice.json \
   --config config/tts.json \
   --ae_ckpt pt_models/blue_codec.safetensors \
-  --ttl_ckpt pt_models/vf_estimator.safetensors \
-  --dp_ckpt pt_models/duration_predictor.safetensors \
-  --stats pt_models/stats_multilingual.pt
+  --ttl_ckpt pt_models/vf_estimetor.safetensors \
+  --dp_ckpt pt_models/duration_predictor_final.safetensors \
+  --stats pt_models/stats_multilingual.safetensors
 ```
 
 The output JSON can be used anywhere a voice/style JSON is expected:
@@ -45,10 +62,10 @@ Use this when you have PyTorch checkpoints and want an ONNX inference folder.
 uv run python exports/export_onnx.py \
   --config config/tts.json \
   --onnx_dir onnx_models \
-  --ttl_ckpt pt_models/vf_estimator.safetensors \
+  --ttl_ckpt pt_models/vf_estimetor.safetensors \
   --ae_ckpt pt_models/blue_codec.safetensors \
-  --dp_ckpt pt_models/duration_predictor.safetensors \
-  --stats pt_models/stats_multilingual.pt \
+  --dp_ckpt pt_models/duration_predictor_final.safetensors \
+  --stats pt_models/stats_multilingual.safetensors \
   --slim
 ```
 
