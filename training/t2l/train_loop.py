@@ -116,6 +116,7 @@ def train(
     stats_path="stats_multilingual.pt",
     config_path="configs/tts.json",
     epochs=1000,
+    max_steps=1_000_000,
     batch_size=14,
     lr=5e-4,
     Ke=None,
@@ -238,9 +239,29 @@ def train(
     )
 
     if os.path.exists(ae_checkpoint):
-        ckpt = torch.load(ae_checkpoint, map_location='cpu')
-        ae_encoder.load_state_dict(ckpt.get('encoder', ckpt.get('state_dict', ckpt)), strict=False)
-        if 'decoder' in ckpt: ae_decoder.load_state_dict(ckpt['decoder'])
+        if ae_checkpoint.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            ckpt = load_file(ae_checkpoint, device="cpu")
+        else:
+            ckpt = torch.load(ae_checkpoint, map_location='cpu')
+        if "encoder" in ckpt:
+            ae_encoder.load_state_dict(ckpt["encoder"], strict=False)
+        elif "state_dict" in ckpt:
+            ae_encoder.load_state_dict(ckpt["state_dict"], strict=False)
+        elif any(k.startswith("encoder.") for k in ckpt.keys()):
+            ae_encoder.load_state_dict(
+                {k.removeprefix("encoder."): v for k, v in ckpt.items() if k.startswith("encoder.")},
+                strict=False,
+            )
+        else:
+            ae_encoder.load_state_dict(ckpt, strict=False)
+        if "decoder" in ckpt:
+            ae_decoder.load_state_dict(ckpt["decoder"], strict=False)
+        elif any(k.startswith("decoder.") for k in ckpt.keys()):
+            ae_decoder.load_state_dict(
+                {k.removeprefix("decoder."): v for k, v in ckpt.items() if k.startswith("decoder.")},
+                strict=False,
+            )
 
     ae_encoder.eval().requires_grad_(False)
     ae_decoder.eval().requires_grad_(False)
@@ -334,7 +355,6 @@ def train(
         sample_rate=ae_sample_rate,
         max_wav_len=ae_sample_rate * 20,
         max_text_len=300,
-        cross_ref_prob=0.0,  # 0% cross-ref for zero-shot speaker generalization
     )
     if rank == 0:
         print(f"Dataset loaded with {len(dataset)} samples.")
@@ -416,7 +436,6 @@ def train(
     if rank == 0:
         print("Starting training loop...")
 
-    max_steps = 1_000_000
     epoch = 0
 
     while global_step < max_steps:

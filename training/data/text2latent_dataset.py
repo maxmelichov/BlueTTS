@@ -35,20 +35,14 @@ class Text2LatentDataset(Dataset):
         metadata_path: str,
         sample_rate: int = 44100,
         hop_length: int = 512,
-        max_wav_len: int = None,      # e.g., 44100 * 20
-        max_text_len: int = None,
-        cross_speaker_prob: float = 0.0,  # Probability of reference from a DIFFERENT speaker
+        max_wav_len: int | None = None,      # e.g., 44100 * 20
+        max_text_len: int | None = None,
         default_lang: str = "he",         # Fallback language if CSV has no 'lang' column
     ):
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_wav_len = max_wav_len
         self.max_text_len = max_text_len
-        self.cross_speaker_prob = cross_speaker_prob
-        if cross_speaker_prob > 1.0:
-            raise ValueError(
-                f"cross_speaker_prob ({cross_speaker_prob}) must be <= 1.0"
-            )
         self.default_lang = default_lang
 
         # --- 1. Load Metadata ---
@@ -166,7 +160,7 @@ class Text2LatentDataset(Dataset):
             print(f"[Dataset] WER Filter dropped {len_before - len(self.df)} samples.")
 
         # --- 5. Indexing ---
-        # Map speaker_id -> indices (useful for potential future cross-ref curriculum)
+        # Map speaker_id -> indices for same-speaker references.
         self.speaker_to_indices = {k: v for k, v in self.df.groupby('speaker_id').indices.items()}
         print(f"[Dataset] Loaded {len(self.df)} samples across {len(self.speaker_to_indices)} speakers.")
 
@@ -185,7 +179,7 @@ class Text2LatentDataset(Dataset):
 
         for lang_code in self.df.loc[mask, 'lang'].unique():
             lang_mask = mask & (self.df['lang'] == lang_code)
-            espeak_lang = _ESPEAK_LANG.get(lang_code, lang_code)
+            espeak_lang = str(_ESPEAK_LANG.get(lang_code, lang_code))
             texts = self.df.loc[lang_mask, 'text'].tolist()
 
             print(f"[Dataset] Batch phonemizing {len(texts)} '{lang_code}' samples with espeak ({espeak_lang})...")
@@ -198,7 +192,7 @@ class Text2LatentDataset(Dataset):
             ipa_texts = backend.phonemize(
                 texts, 
                 separator=sep, 
-                njobs=os.cpu_count() # <--- ADD THIS
+                njobs=os.cpu_count() or 1,
             )
             self.df.loc[lang_mask, 'text'] = ipa_texts
 
