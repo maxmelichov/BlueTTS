@@ -59,6 +59,18 @@ _INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)</\1>", re.DOTALL)
 _LANG_TAG_RE = re.compile(r"</?\w+>")
 
 
+def strip_lang_tags_from_phoneme_string(s: str) -> str:
+    """Remove ``<lang>…</lang>`` markers from a phoneme string.
+
+    G2P wraps spans with these tags; :meth:`UnicodeProcessor._encode` strips them
+    before tokenization anyway. Removing them *before* :func:`chunk_text` keeps
+    sentence splits from tearing tag pairs apart (orphan ``<en>`` / ``</he>``),
+    which could confuse preprocessing or leave odd artifacts at boundaries.
+    """
+    t = _LANG_TAG_RE.sub("", s)
+    return re.sub(r"\s+", " ", t).strip()
+
+
 class TextProcessor:
     """Renikud for Hebrew; espeak for everything else. Preserves ``<lang>…</lang>`` spans.
 
@@ -486,6 +498,7 @@ class TextToSpeech:
             )
             if phonemize and self.g2p is not None:
                 text = [self.g2p.phonemize(t, lang=l) for t, l in zip(text, lang)]
+            text = [strip_lang_tags_from_phoneme_string(t) for t in text]
             return self._infer(
                 text,
                 lang,
@@ -503,6 +516,7 @@ class TextToSpeech:
         ), "Single speaker text to speech only supports single style"
         if phonemize and self.g2p is not None:
             text = self.g2p.phonemize(text, lang=lang)
+        text = strip_lang_tags_from_phoneme_string(text)
         max_len = 120 if lang == "ko" else 300
         text_list = chunk_text(text, max_len=max_len)
         wav_cat = None
@@ -545,6 +559,7 @@ class TextToSpeech:
             if pace_blend is not None
             else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
         )
+        text_list = [strip_lang_tags_from_phoneme_string(t) for t in text_list]
         return self._infer(
             text_list,
             lang_list,
