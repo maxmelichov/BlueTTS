@@ -1,4 +1,5 @@
 {
+  "_note": "Most users do not need this file. Prefer direct commands like: uv run python combine_datasets.py --libritts /path/to/LibriTTS_R --splits train-clean-360 --lang en --output generated_audio/libritts.csv --clean-output generated_audio/libritts_cleaned.csv",
   "output":       "combined_dataset.csv",
   "clean_output": "combined_dataset_cleaned.csv",
 

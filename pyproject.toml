@@ -1,6 +1,6 @@
 [project]
 name = "blue-onnx"
-version = "0.2.4"
+version = "0.2.5"
 description = "Hebrew Text-to-Speech inference using ONNX and TensorRT"
 license = "MIT"
 readme = "README.md"
@@ -42,6 +42,9 @@ export = [
     "torch>=2.1.0",
     "torchaudio>=2.1.0",
 ]
+
+# Training CLIs: use `uv run python -m training.t2l.cli` / `training.dp.cli` from the full repo, not the PyPI wheel
+# (the published package is inference-only).
 
 [tool.uv]
 # Repo is scripts + src packages, not a single importable `blue` package tree (avoids uv_build errors).

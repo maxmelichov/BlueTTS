@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import argparse
+from collections.abc import Mapping
 
 from tqdm import tqdm
 import torch
@@ -26,9 +27,23 @@ def main():
         default=None,
         help="Path to the AE checkpoint",
     )
+    parser.add_argument(
+        "--metadata",
+        required=True,
+        help="Combined/cleaned metadata CSV produced by combine_datasets.py",
+    )
+    parser.add_argument(
+        "--output",
+        required=True,
+        help="Where to write stats_multilingual.pt for this dataset",
+    )
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--device", default=None, help="Torch device, e.g. cuda:0 or cpu")
+    parser.add_argument("--overwrite", action="store_true", help="Allow replacing --output")
     args = parser.parse_args()
 
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device or ("cuda:1" if torch.cuda.is_available() else "cpu"))
     print(f"Using device: {device}")
 
     # ---- Load config ----
@@ -54,11 +69,9 @@ def main():
 
     print(f"Using TTS config: {tts_json_path}")
 
-    # ---- Locate metadata ----
-    metadata_candidates = ["combined_dataset_cleaned.csv", "generated_audio/combined_dataset_cleaned_real_data.csv"]
-    metadata_path = next((p for p in metadata_candidates if os.path.exists(p)), None)
-    if metadata_path is None:
-        print("ERROR: No metadata CSV found.")
+    metadata_path = args.metadata
+    if not os.path.exists(metadata_path):
+        print(f"ERROR: Metadata CSV not found: {metadata_path}")
         return
     print(f"Using metadata: {metadata_path}")
 
@@ -70,7 +83,12 @@ def main():
         if not checkpoint_path or checkpoint_path == "unknown.pt":
             checkpoint_path = "checkpoints/ae/ae_latest_newer.pt"
 
-    output_path = "stats_real_data.pt"
+    output_path = args.output
+    if os.path.exists(output_path) and not args.overwrite:
+        print(f"ERROR: Refusing to overwrite existing stats file: {output_path}")
+        print("Pass --overwrite or choose a new --output path.")
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
     # ---- Build model configs ----
     mel_args = {
@@ -104,9 +122,9 @@ def main():
     )
     dataloader = DataLoader(
         dataset,
-        batch_size=64,
+        batch_size=args.batch_size,
         shuffle=False,
-        num_workers=8,
+        num_workers=args.num_workers,
         collate_fn=collate_text2latent,
     )
 
@@ -122,10 +140,12 @@ def main():
         else:
             ckpt = torch.load(checkpoint_path, map_location="cpu")
         
-        if "encoder" in ckpt:
-            encoder.load_state_dict(ckpt["encoder"])
-        elif "state_dict" in ckpt:
-            encoder.load_state_dict(ckpt["state_dict"], strict=False)
+        encoder_state = ckpt.get("encoder")
+        state_dict = ckpt.get("state_dict")
+        if isinstance(encoder_state, Mapping):
+            encoder.load_state_dict(dict(encoder_state))
+        elif isinstance(state_dict, Mapping):
+            encoder.load_state_dict(dict(state_dict), strict=False)
         else:
             # Check if keys start with 'encoder.'
             if any(k.startswith("encoder.") for k in ckpt.keys()):
