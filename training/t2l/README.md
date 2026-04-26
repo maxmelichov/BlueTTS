@@ -21,11 +21,13 @@ data/sample/wavs/3.wav,"מזג אוויר יפה היום",spk1,he
 ```
 
 ## Running Training
-You can start training with the `blue-train` CLI provided by `pyproject.toml`:
+From the **main repository root**, with a venv that includes the training stack (Python deps for `training/`, e.g. PyTorch and pandas, per your `uv` setup):
 
 ```bash
-uv run blue-train --config configs/tts.json --data generated_audio/combined_dataset_cleaned_real_data.csv --out runs/exp1
+uv run python -m training.t2l.cli --config config/tts.json --data generated_audio/combined_dataset_cleaned_real_data.csv --out runs/exp1
 ```
+
+Adjust config and paths to your layout. The `blue-onnx` PyPI package is inference-only and does not install this CLI; use a full clone for training.
 
 ## Config knobs
 The `configs/tts.json` has several settings:
