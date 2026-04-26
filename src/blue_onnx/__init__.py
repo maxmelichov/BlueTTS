@@ -14,6 +14,39 @@ import onnxruntime as ort
 
 AVAILABLE_LANGS = ["en", "es", "de", "it", "he"]
 BLUE_SYNTH_MAX_CHUNK_LEN = 300
+# When ``pace_blend > 0``, duration is nudged toward this many seconds of audio per
+# text input token, so the same ``speed`` value tracks more closely across languages.
+DURATION_PACE_DPT_REF = 0.0625
+# Default blend automatically applied when inline ``<lang>...`` spans are present.
+DEFAULT_MIXED_PACE_BLEND = 0.25
+
+
+def blend_duration_pace(
+    dur: np.ndarray,
+    text_mask: np.ndarray,
+    pace_blend: float,
+    pace_dpt_ref: float,
+) -> np.ndarray:
+    """Blend seconds-per-text-token toward ``pace_dpt_ref`` to reduce language bias.
+
+    The duration head tends to use different time-per-token for different
+    languages; mixing ``<lang>…</lang>`` segments in one string keeps one
+    ``speed``, but the predicted total seconds can still lean on those biases.
+    Blending softens that before ``duration / speed`` so ``speed`` is a more
+    consistent stretch factor across languages.
+    """
+    b = min(max(float(pace_blend), 0.0), 1.0)
+    if b <= 0.0:
+        return np.asarray(dur, dtype=np.float32).reshape(-1)
+    d = np.asarray(dur, dtype=np.float64).reshape(-1)
+    n = np.maximum(
+        np.asarray(text_mask, dtype=np.float64).sum(axis=(1, 2)),
+        1.0,
+    ).reshape(-1)
+    dpt = d / n
+    dpt2 = (1.0 - b) * dpt + b * float(pace_dpt_ref)
+    return (dpt2 * n).astype(np.float32)
+
 
 _ESPEAK_MAP = {
     "en": "en-us", "en-us": "en-us",
@@ -22,7 +55,7 @@ _ESPEAK_MAP = {
 }
 _TEXT_TO_INDICES_PROCESSOR: Optional["UnicodeProcessor"] = None
 
-_INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)(?:</\1>|<\1>)", re.DOTALL)
+_INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)</\1>", re.DOTALL)
 _LANG_TAG_RE = re.compile(r"</?\w+>")
 
 
@@ -80,7 +113,8 @@ class TextProcessor:
             return text
 
     def _phonemize_segment(self, content: str, lang: str) -> str:
-        content = content.strip()
+        # Guard against malformed/unmatched tags leaking into phonemizer input.
+        content = _LANG_TAG_RE.sub("", content).strip()
         if not content:
             return ""
         has_hebrew = any("\u0590" <= c <= "\u05ff" for c in content)
@@ -325,6 +359,8 @@ class TextToSpeech:
         total_step: int,
         speed: float = 1.05,
         cfg_scale: float = 3.0,
+        pace_blend: float = 0.0,
+        pace_dpt_ref: Optional[float] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         assert (
             len(text_list) == style.ttl.shape[0]
@@ -334,7 +370,10 @@ class TextToSpeech:
         dur_onnx, *_ = self.dp_ort.run(
             None, {"text_ids": text_ids, "style_dp": style.dp, "text_mask": text_mask}
         )
-        dur_onnx = dur_onnx / speed
+        dur_onnx = np.asarray(dur_onnx, dtype=np.float32).reshape(-1)
+        ref = float(pace_dpt_ref) if pace_dpt_ref is not None else DURATION_PACE_DPT_REF
+        dur_onnx = blend_duration_pace(dur_onnx, text_mask, pace_blend, ref)
+        dur_onnx = dur_onnx / max(float(speed), 1e-6)
         text_emb_onnx, *_ = self.text_enc_ort.run(
             None,
             {"text_ids": text_ids, "style_ttl": style.ttl, "text_mask": text_mask},
@@ -403,8 +442,9 @@ class TextToSpeech:
         speed: float = 1.0,
         cfg_scale: float = 3.0,
         silence_duration: float = 0.0,
-        phonemize: bool = True,
         text_is_phonemes: bool = False,
+        pace_blend: Optional[float] = None,
+        pace_dpt_ref: Optional[float] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Synthesize speech.
 
@@ -417,21 +457,45 @@ class TextToSpeech:
         available (loaded from ``uncond.npz`` by :func:`load_text_to_speech`) or when
         the vector estimator natively accepts a ``cfg_scale`` input.
 
-        If ``phonemize=True`` and a :class:`TextProcessor` was wired in via
+        If ``text_is_phonemes=False`` and a :class:`TextProcessor` was wired in via
         :func:`load_text_to_speech`, text is phonemized first (renikud for Hebrew,
         espeak for Latin langs), preserving inline ``<lang>…</lang>`` spans.
 
-        Set ``text_is_phonemes=True`` when ``text`` already contains phonemes; this
-        skips G2P while keeping the normal tokenizer/chunking path.
+        Set ``text_is_phonemes=True`` when ``text`` already contains phonemes to skip
+        G2P while keeping the normal tokenizer/chunking path.
+
+        ``pace_blend`` in ``(0, 1]`` pulls predicted duration toward a fixed
+        seconds-per-text-token (``pace_dpt_ref`` or :data:`DURATION_PACE_DPT_REF`)
+        so the same ``speed`` behaves more consistently across languages and in
+        mixed inline-``<lang>`` text. If omitted (``None``), mixed text defaults
+        to :data:`DEFAULT_MIXED_PACE_BLEND`, while single-language defaults to 0.
         """
-        phonemize = phonemize and not text_is_phonemes
+        phonemize = not text_is_phonemes
+        if isinstance(text, list):
+            has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text)
+        else:
+            has_inline_lang = _INLINE_LANG_PAIR.search(text) is not None
+        pace_blend_eff = (
+            float(pace_blend)
+            if pace_blend is not None
+            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
+        )
         if isinstance(text, list):
             assert isinstance(lang, list) and len(text) == len(lang), (
                 "Batch mode requires `lang` to be a list of the same length as `text`."
             )
             if phonemize and self.g2p is not None:
                 text = [self.g2p.phonemize(t, lang=l) for t, l in zip(text, lang)]
-            return self._infer(text, lang, style, total_step, speed, cfg_scale)
+            return self._infer(
+                text,
+                lang,
+                style,
+                total_step,
+                speed,
+                cfg_scale,
+                pace_blend=pace_blend_eff,
+                pace_dpt_ref=pace_dpt_ref,
+            )
 
         assert isinstance(lang, str), "Single-text mode requires `lang` to be a str."
         assert (
@@ -445,7 +509,14 @@ class TextToSpeech:
         dur_cat = None
         for chunk in text_list:
             wav, dur_onnx = self._infer(
-                [chunk], [lang], style, total_step, speed, cfg_scale
+                [chunk],
+                [lang],
+                style,
+                total_step,
+                speed,
+                cfg_scale,
+                pace_blend=pace_blend_eff,
+                pace_dpt_ref=pace_dpt_ref,
             )
             if wav_cat is None:
                 wav_cat = wav
@@ -465,8 +536,25 @@ class TextToSpeech:
         style: Style,
         total_step: int,
         speed: float = 1.05,
+        pace_blend: Optional[float] = None,
+        pace_dpt_ref: Optional[float] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        return self._infer(text_list, lang_list, style, total_step, speed)
+        has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text_list)
+        pace_blend_eff = (
+            float(pace_blend)
+            if pace_blend is not None
+            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
+        )
+        return self._infer(
+            text_list,
+            lang_list,
+            style,
+            total_step,
+            speed,
+            cfg_scale=3.0,
+            pace_blend=pace_blend_eff,
+            pace_dpt_ref=pace_dpt_ref,
+        )
 
 
 def length_to_mask(lengths: np.ndarray, max_len: Optional[int] = None) -> np.ndarray:
