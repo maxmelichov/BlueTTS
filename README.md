@@ -153,3 +153,7 @@ Hebrew G2P uses [renikud](https://github.com/thewh1teagle/renikud). Thanks to [t
 ## License
 
 MIT
+
+## Voice cloning and responsibility
+
+This software can produce speech that mimics a reference voice. **The maintainers and contributors are not responsible** for what you do with it—compliance with law, consent from voice owners, and ethical use are **entirely your responsibility**. Do not use it to deceive, impersonate without permission, or infringe anyone’s rights.
