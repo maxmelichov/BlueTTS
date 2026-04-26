@@ -111,7 +111,7 @@ uv run python examples/mixed.py
 uv run python examples/app.py --lang en --text "Hello world."
 ```
 
-With **`pip install "blue-onnx==0.2.5"`** (and the same `onnx_models` + `voices/`), the same files use `import blue_onnx` automatically; a dev tree without the package falls back to `src.blue_onnx`. If your graphs live somewhere else, set `ONNX_DIR` for `basic.py` / `mixed.py`, or pass `--onnx-dir` to `app.py`. Default `app` output: `examples/out/app_output.wav`.
+With **`pip install "blue-onnx"`** (and the same `onnx_models` + `voices/`), the same files use `import blue_onnx` automatically; a dev tree without the package falls back to `src.blue_onnx`. If your graphs live somewhere else, set `ONNX_DIR` for `basic.py` / `mixed.py`, or pass `--onnx-dir` to `app.py`. Default `app` output: `examples/out/app_output.wav`.
 
 Edit voice JSON paths or `ONNX_DIR` if your layout differs. See [examples/voices.md](examples/voices.md) for `app.py` and voice selection.
 
