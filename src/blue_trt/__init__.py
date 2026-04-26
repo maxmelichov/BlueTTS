@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,10 +13,16 @@ import torch
 
 from ..blue_onnx import (
     BLUE_SYNTH_MAX_CHUNK_LEN,
+    DEFAULT_MIXED_PACE_BLEND,
+    DURATION_PACE_DPT_REF,
     TextProcessor,
+    blend_duration_pace,
     chunk_text,
     text_to_indices,
 )
+
+# Keep in sync with ``src.blue_onnx._INLINE_LANG_PAIR`` (mixed inline-language detection).
+_INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)</\1>", re.DOTALL)
 
 
 # ─── TRT logger + engine wrapper ──────────────────────────────────────────────
@@ -274,17 +281,43 @@ class BlueTRT:
         lang: str = "he",
         cfg_scale: Optional[float] = None,
         text_is_phonemes: bool = False,
+        pace_blend: Optional[float] = None,
+        pace_dpt_ref: Optional[float] = None,
     ) -> Tuple[np.ndarray, int]:
         phonemes = text if text_is_phonemes else self._text_proc.phonemize(text, lang=lang)
-        return self.create(phonemes, cfg_scale=cfg_scale)
+        return self.create(
+            phonemes,
+            cfg_scale=cfg_scale,
+            pace_blend=pace_blend,
+            pace_dpt_ref=pace_dpt_ref,
+        )
 
-    def create(self, phonemes: str, cfg_scale: Optional[float] = None) -> Tuple[np.ndarray, int]:
+    def create(
+        self,
+        phonemes: str,
+        cfg_scale: Optional[float] = None,
+        pace_blend: Optional[float] = None,
+        pace_dpt_ref: Optional[float] = None,
+    ) -> Tuple[np.ndarray, int]:
+        has_inline = _INLINE_LANG_PAIR.search(phonemes) is not None
+        pace_blend_eff = (
+            float(pace_blend)
+            if pace_blend is not None
+            else (DEFAULT_MIXED_PACE_BLEND if has_inline else 0.0)
+        )
         cfg = self.cfg_scale if cfg_scale is None else float(cfg_scale)
         chunks = chunk_text(phonemes, self.chunk_len)
         silence = np.zeros(int(self.silence_sec * self.sample_rate), dtype=np.float32)
         parts: List[np.ndarray] = []
         for i, chunk in enumerate(chunks):
-            parts.append(self._infer_chunk(chunk, cfg_scale=cfg))
+            parts.append(
+                self._infer_chunk(
+                    chunk,
+                    cfg_scale=cfg,
+                    pace_blend=pace_blend_eff,
+                    pace_dpt_ref=pace_dpt_ref,
+                )
+            )
             if i < len(chunks) - 1:
                 parts.append(silence)
         wav = np.concatenate(parts) if parts else np.array([], dtype=np.float32)
@@ -318,7 +351,13 @@ class BlueTRT:
         ref_values = out.get("ref_values") or next(iter(out.values()))
         return ref_values, out.get("ref_keys")
 
-    def _infer_chunk(self, phonemes: str, cfg_scale: float) -> np.ndarray:
+    def _infer_chunk(
+        self,
+        phonemes: str,
+        cfg_scale: float,
+        pace_blend: float = 0.0,
+        pace_dpt_ref: Optional[float] = None,
+    ) -> np.ndarray:
         if self.mean is None or self.std is None:
             raise ValueError("stats not loaded.")
         if self._style is None:
@@ -364,7 +403,14 @@ class BlueTRT:
         text_emb = te_out.get("text_emb") or next(iter(te_out.values()))
 
         # Duration.
-        T_lat = self._predict_duration(text_ids, text_mask, z_ref_norm, style_dp)
+        T_lat = self._predict_duration(
+            text_ids,
+            text_mask,
+            z_ref_norm,
+            style_dp,
+            pace_blend=pace_blend,
+            pace_dpt_ref=pace_dpt_ref,
+        )
 
         # Flow matching with optional CFG.
         latent = self._flow_matching(text_emb, ref_values, text_mask, T_lat, cfg_scale)
@@ -378,8 +424,12 @@ class BlueTRT:
         text_mask: torch.Tensor,
         z_ref_norm: Optional[torch.Tensor],
         style_dp: Optional[torch.Tensor],
+        pace_blend: float = 0.0,
+        pace_dpt_ref: Optional[float] = None,
     ) -> int:
         T_lat: Optional[int] = None
+        ref = float(pace_dpt_ref) if pace_dpt_ref is not None else DURATION_PACE_DPT_REF
+        tm_np = text_mask.detach().cpu().numpy()
 
         if style_dp is not None and self._dp_style is not None:
             if style_dp.dim() == 2:
@@ -387,6 +437,10 @@ class BlueTRT:
             out = self._dp_style.run({"text_ids": text_ids, "style_dp": style_dp, "text_mask": text_mask})
             val = float(out["duration"].sum())
             if np.isfinite(val):
+                d = blend_duration_pace(
+                    np.array([val], dtype=np.float32), tm_np, pace_blend, ref
+                )
+                val = float(d[0])
                 T_lat = int(np.round(val / max(self.speed, 1e-6)))
 
         if T_lat is None and z_ref_norm is not None and self._dp is not None:
@@ -394,6 +448,10 @@ class BlueTRT:
             out = self._dp.run({"text_ids": text_ids, "z_ref": z_ref_norm, "text_mask": text_mask, "ref_mask": ref_mask})
             val = float(out["duration"].sum())
             if np.isfinite(val):
+                d = blend_duration_pace(
+                    np.array([val], dtype=np.float32), tm_np, pace_blend, ref
+                )
+                val = float(d[0])
                 T_lat = int(np.round(val / max(self.speed, 1e-6)))
 
         if T_lat is None:
