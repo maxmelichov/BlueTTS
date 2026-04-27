@@ -39,8 +39,7 @@ _PHRASE_ROWS: list[tuple[str, str | None, str, list[str]]] = [
         None,
         "hebrew",
         [
-            "ʃalˈom moʃˈe kˈaχa niʃmˈa hamˈodel heχadˈaʃ mˈa daʔtχˈa ? "
-            "lifʔamˈim tsaʁˈiχ baχajˈim lelatˈeʃ ʁaʔjˈon ʃˈuv vaʃˈuv ʔˈad ʃehˈu matslˈiaχ"
+            "ʃalˈom moʃˈe kˈaχa niʃmˈa hamˈodel heχadˈaʃ mˈa daʔtχˈa ?"
         ],
     ),
     (
@@ -48,8 +47,7 @@ _PHRASE_ROWS: list[tuple[str, str | None, str, list[str]]] = [
         "en-us",
         "english",
         [
-            "Hello, how does the new model sound to you? Sometimes in life you need to "
-            "push an idea again and again until it succeeds."
+            "Hello, how does the new model sound to you?"
         ],
     ),
     (
@@ -57,8 +55,7 @@ _PHRASE_ROWS: list[tuple[str, str | None, str, list[str]]] = [
         "de",
         "german",
         [
-            "Hallo, wie klingt das neue Modell für dich? Manchmal muss man eine Idee "
-            "immer wieder versuchen, bis sie endlich funktioniert."
+            "Hallo, wie klingt das neue Modell für dich?"
         ],
     ),
     (
@@ -66,8 +63,7 @@ _PHRASE_ROWS: list[tuple[str, str | None, str, list[str]]] = [
         "it",
         "italian",
         [
-            "Ciao, come suona il nuovo modello per te? A volte nella vita bisogna "
-            "insistere su un'idea ancora e ancora finché non riesce."
+            "Ciao, come suona il nuovo modello per te?"
         ],
     ),
     (
@@ -75,8 +71,7 @@ _PHRASE_ROWS: list[tuple[str, str | None, str, list[str]]] = [
         "es",
         "spanish",
         [
-            "Hola, ¿cómo suena el nuevo modelo para ti? A veces en la vida hay que "
-            "insistir en una idea una y otra vez hasta que funciona."
+            "Hola, ¿cómo suena el nuevo modelo para ti?"
         ],
     ),
 ]
@@ -115,7 +110,6 @@ def train(
     ae_checkpoint="checkpoints/ae/ae_latest.pt",
     stats_path="stats_multilingual.pt",
     config_path="configs/tts.json",
-    epochs=1000,
     max_steps=1_000_000,
     batch_size=14,
     lr=5e-4,
@@ -482,16 +476,8 @@ def train(
                 same_speaker = (speaker_ids == ref_speaker_ids).float().mean().item()
                 self_ref_ratio = is_self_ref.float().mean().item()
                 
-                # Check for "Self Ref but Diff Indices" (dataset logic error)
-                # Currently we don't have indices in batch, but is_self_ref implies we used wav.clone().
-                # So if is_self_ref is true, the content is identical by definition in __getitem__.
-                # But let's log if same_speaker is low.
-                
                 if same_speaker < 0.99:
                      print(f"WARNING: Speaker Mismatch! Same-speaker ratio: {same_speaker:.2f}")
-                
-                # Check if is_self_ref is consistent (only for same speaker)
-                # We can't strictly check "same utterance" without indices, but we trust dataset logic.
                 
                 if global_step % 1000 == 0:
                      cross_ref_ratio = 1.0 - self_ref_ratio
