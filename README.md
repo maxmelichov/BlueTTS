@@ -124,10 +124,10 @@ uv sync --extra tensorrt
 uv pip install tensorrt-cu12   # separate install; see astral-sh/uv#14313
 ```
 
-2. Build engines (details in `scripts/README.md`):
+2. Build engines (see also [exports/README.md](exports/README.md#build-tensorrt-engines)):
 
 ```bash
-uv run python scripts/create_tensorrt.py \
+uv run python exports/create_tensorrt.py \
   --onnx_dir onnx_models --engine_dir trt_engines --precision fp32 --config config/tts.json
 ```
 

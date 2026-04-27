@@ -69,6 +69,8 @@ uv run python exports/export_onnx.py \
   --slim
 ```
 
+`export_onnx.py` loads stats with `torch.load` (mean/std tensors). Use the `.pt` stats file from the same Hub repo, not the `.safetensors` copy.
+
 This writes:
 
 - `onnx_models/text_encoder.onnx`
