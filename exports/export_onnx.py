@@ -353,7 +353,7 @@ def main():
     text_emb = torch.randn(B, d_model, T_text)
     cur_step = torch.tensor([0.0])
     tot_step = torch.tensor([1.0])
-    cfg_scale = torch.tensor([3.0])
+    cfg_scale = torch.tensor([4.0])
     style_dp_s = torch.randn(B, cfg["dp_style_tokens"], cfg["dp_style_dim"])
     z_pred = torch.randn(B, compressed, T_lat)
 

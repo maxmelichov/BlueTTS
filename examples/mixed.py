@@ -24,7 +24,7 @@ audio, _ = tts(
     lang="he",
     style=style,
     total_step=5,
-    cfg_scale=3,
+    cfg_scale=4.0,
     text_is_phonemes=text_is_phonemes,
     speed=1.0,
 )

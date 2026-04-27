@@ -22,7 +22,7 @@ audio, _ = tts(
     lang=args.lang,
     style=style,
     total_step=5,
-    cfg_scale=3.0,
+    cfg_scale=4.0,
     text_is_phonemes=args.text_is_phonemes,
 )
 if audio.ndim == 2:
