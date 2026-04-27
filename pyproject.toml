@@ -7,6 +7,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "numpy",
+    "librosa",
     "onnxruntime",
     "soundfile",
     "huggingface-hub>=0.26.0",
@@ -35,7 +36,6 @@ tensorrt = [
 ]
 export = [
     "bluecodec",
-    "librosa",
     "onnx>=1.17.0",
     "onnxslim>=0.1.0",
     "safetensors>=0.4.0",
@@ -47,8 +47,6 @@ export = [
 # (the published package is inference-only).
 
 [tool.uv]
-# Repo is scripts + src packages, not a single importable `blue` package tree (avoids uv_build errors).
-package = false
 # Do not install `[dependency-groups] dev` on every `uv sync` (matches behavior before a proper `dev` group existed).
 default-groups = []
 # Default `onnxruntime` and `onnxruntime-gpu` / `onnxruntime-openvino` are mutually exclusive at import time.
