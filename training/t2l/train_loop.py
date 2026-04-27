@@ -722,7 +722,7 @@ def train(
                                 style_ttl=style_ttl,
                                 style_dp=style_dp,
                                 uncond_params=uncond_params,
-                                cfg_scale=3.0,
+                                cfg_scale=4.0,
                             )
                             wav = wav_out.squeeze().cpu().numpy()
                             sf.write(os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_{suffix}.wav"), wav, ae_sample_rate)
@@ -763,7 +763,7 @@ def train(
                                 style_ttl=val_style_ttl,
                                 style_dp=val_style_dp,
                                 uncond_params=uncond_params,
-                                cfg_scale=3.0,
+                                cfg_scale=4.0,
                             )
                                 wav = wav_out.squeeze().cpu().numpy()
                                 sf.write(os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_val_sample.wav"), wav, ae_sample_rate)
@@ -825,7 +825,7 @@ def train(
                                 style_ttl=vc_style_ttl,
                                 style_dp=vc_style_dp,
                                 uncond_params=uncond_params,
-                                cfg_scale=3.0,
+                                cfg_scale=4.0,
                             )
                             sf.write(
                                 os.path.join(log_dir, f"step_{global_step}_vc_output.wav"),

@@ -193,7 +193,7 @@ L_TTL = E[ || m ⊙ (v̂(z_t, z_ref, c, t) - (z_1 - (1-σ_min)·z_0)) ||₁ ]
 
 `m` = mask (e.g. 0 on reference crop, 1 on target region). **p_uncond = 0.05** for classifier-free guidance.
 
-**CFG at inference:** `v_guided = v_uncond + cfg * (v_cond - v_uncond)`, **cfg = 3**.
+**CFG at inference:** `v_guided = v_uncond + cfg * (v_cond - v_uncond)`; the library default is **cfg = 4** (`DEFAULT_CFG_SCALE` in `src/blue_onnx/__init__.py`; same numeric default in PyTorch and TensorRT frontends).
 
 **Euler:** `z_0 ~ N(0,I)`; for `s = 0..NFE-1`, `t = s/NFE`, `z += (1/NFE) * v̂`.
 
