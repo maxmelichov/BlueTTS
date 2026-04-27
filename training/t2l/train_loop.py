@@ -39,7 +39,7 @@ _PHRASE_ROWS: list[tuple[str, str | None, str, list[str]]] = [
         None,
         "hebrew",
         [
-            "ʃalˈom janˈon kˈaχa niʃmˈa hamˈodel heχadˈaʃ mˈa daʔtχˈa ? "
+            "ʃalˈom moʃˈe kˈaχa niʃmˈa hamˈodel heχadˈaʃ mˈa daʔtχˈa ? "
             "lifʔamˈim tsaʁˈiχ baχajˈim lelatˈeʃ ʁaʔjˈon ʃˈuv vaʃˈuv ʔˈad ʃehˈu matslˈiaχ"
         ],
     ),
