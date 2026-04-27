@@ -19,6 +19,8 @@ BLUE_SYNTH_MAX_CHUNK_LEN = 300
 DURATION_PACE_DPT_REF = 0.0625
 # Default blend automatically applied when inline ``<lang>...`` spans are present.
 DEFAULT_MIXED_PACE_BLEND = 0.25
+# Default classifier-free guidance scale (vector field).
+DEFAULT_CFG_SCALE = 4.0
 
 
 def blend_duration_pace(
@@ -370,7 +372,7 @@ class TextToSpeech:
         style: Style,
         total_step: int,
         speed: float = 1.05,
-        cfg_scale: float = 3.0,
+        cfg_scale: float = DEFAULT_CFG_SCALE,
         pace_blend: float = 0.0,
         pace_dpt_ref: Optional[float] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -452,7 +454,7 @@ class TextToSpeech:
         style: Style,
         total_step: int,
         speed: float = 1.0,
-        cfg_scale: float = 3.0,
+        cfg_scale: float = DEFAULT_CFG_SCALE,
         silence_duration: float = 0.0,
         text_is_phonemes: bool = False,
         pace_blend: Optional[float] = None,
@@ -566,7 +568,7 @@ class TextToSpeech:
             style,
             total_step,
             speed,
-            cfg_scale=3.0,
+            cfg_scale=DEFAULT_CFG_SCALE,
             pace_blend=pace_blend_eff,
             pace_dpt_ref=pace_dpt_ref,
         )

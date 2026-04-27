@@ -107,7 +107,7 @@ class TextToSpeech:
         style: Style,
         total_step: int,
         speed: float = 1.0,
-        cfg_scale: float = 3.0,
+        cfg_scale: float = 4.0,
         pace_blend: float = 0.0,
         pace_dpt_ref: Optional[float] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
@@ -197,7 +197,7 @@ class TextToSpeech:
         style: Style,
         total_step: int,
         speed: float = 1.0,
-        cfg_scale: float = 3.0,
+        cfg_scale: float = 4.0,
         silence_duration: float = 0.0,
         text_is_phonemes: bool = False,
         pace_blend: Optional[float] = None,
