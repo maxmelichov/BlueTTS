@@ -24,6 +24,8 @@ The PyPI package is **inference only** (ONNX TTS in Python). It does not ship tr
 pip install "blue-onnx"
 ```
 
+For Rust ONNX inference, see [blue-rs](https://github.com/thewh1teagle/blue-rs).
+
 **Inference with pip in three steps:** (1) install as above, (2) put ONNX in `./onnx_models` (see [Models](#models) — `hf download` from `notmax123/blue-onnx-v2`), (3) copy a style JSON (e.g. from [voices/](https://github.com/maxmelichov/BlueTTS/tree/main/voices)) and Hebrew G2P `model.onnx` (see [Models](#models)), then use this from your project:
 
 ```python
