@@ -215,7 +215,7 @@ class BlueTRT:
         config_path: str = "tts.json",
         style_json: Optional[str] = None,
         steps: int = 5,
-        cfg_scale: float = 3.0,
+        cfg_scale: float = 4.0,
         speed: float = 1.0,
         seed: int = 42,
         chunk_len: int = BLUE_SYNTH_MAX_CHUNK_LEN,
