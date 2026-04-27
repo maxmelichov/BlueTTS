@@ -21,10 +21,10 @@ audio, _ = tts(
     text,
     lang="he",
     style=style,
-    total_step=16,
-    cfg_scale=3.0,
+    total_step=5,
+    cfg_scale=3,
     text_is_phonemes=text_is_phonemes,
-    speed=0.9,
+    speed=1.0,
 )
 if audio.ndim == 2: audio = audio[0]
 out = Path("examples/out/mixed.wav"); out.parent.mkdir(parents=True, exist_ok=True)
