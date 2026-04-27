@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 import soundfile as sf
@@ -5,7 +6,8 @@ import soundfile as sf
 sys.path.append(".")
 from src.blue_onnx import load_text_to_speech, load_voice_style
 
-tts = load_text_to_speech(onnx_dir="onnx_slim")
+onnx_dir = os.environ.get("ONNX_DIR", "onnx_models")
+tts = load_text_to_speech(onnx_dir=onnx_dir)
 style = load_voice_style(["voices/female1.json"])
 
 text = (
