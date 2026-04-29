@@ -24,7 +24,7 @@ The PyPI package is **inference only** (ONNX TTS in Python). It does not ship tr
 pip install "blue-onnx"
 ```
 
-**Inference with pip in three steps:** (1) install as above, (2) put ONNX in `./onnx_models` (see [Models](#models) — `hf download` from `notmax123/blue-onnx-v2`), (3) copy a style JSON (e.g. from [voices/](https://github.com/maxmelichov/BlueTTS/tree/main/voices)) and Hebrew G2P `model.onnx` (see [Models](#models)), then use this from your project:
+**Inference with pip in three steps:** (1) install as above, (2) put ONNX in `./onnx_models` (see [Models](#models) — `hf download` from [`blue-onnx-v2`](https://huggingface.co/notmax123/blue-onnx-v2), or the experimental [INT8 bundle](https://huggingface.co/notmax123/bluev2-onnx-int8) into another folder), (3) copy a style JSON (e.g. from [voices/](https://github.com/maxmelichov/BlueTTS/tree/main/voices)) and Hebrew G2P `model.onnx` (see [Models](#models)), then use this from your project:
 
 ```python
 import soundfile as sf
@@ -63,13 +63,21 @@ The default environment uses the stock `onnxruntime` CPU wheel. **OpenVINO** and
 
 ## Models
 
-**ONNX bundle** ([notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2)): the published graphs are **onnx-slim**–cleaned, **full precision** (not INT8). Do not substitute a `--int8` export from [exports/export_onnx.py](exports/export_onnx.py); that path is experimental and not recommended for quality.
+**FP32 bundle (recommended)** — [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2): **onnxslim**–cleaned, **full precision**. Includes the four core graphs (`text_encoder`, `vector_estimator`, `vocoder`, `duration_predictor`), runtime **`tts.json`** / **`vocab.json`**, and ONNX graphs for **zero-shot voice conversion** from a reference clip (`codec_encoder`, `style_encoder`, `duration_style_encoder`).
 
 ```bash
 uv run hf download notmax123/blue-onnx-v2 --repo-type model --local-dir ./onnx_models
 ```
 
-The Hub bundle does **not** include per-voice **style JSON**; use the sample `voices/*.json` from **this repository** (or on [GitHub](https://github.com/maxmelichov/BlueTTS/tree/main/voices)), or **export a new voice** from a reference clip (see [exports/README.md](exports/README.md), PyTorch weights below). If you use `pip` without `uv`, the same CLI is available after install because `blue-onnx` depends on `huggingface-hub` — run `hf download ...` with the same arguments and point `style_json` at a file under `voices/` (e.g. `voices/female1.json`).
+**INT8 bundle (experimental)** — [notmax123/bluev2-onnx-int8](https://huggingface.co/notmax123/bluev2-onnx-int8): weight-only quantized graphs for a smaller footprint; **not** slimmed after export. Same filenames and layout as the FP32 bundle—set `onnx_dir` to the downloaded folder. Prefer FP32 for best quality.
+
+```bash
+uv run hf download notmax123/bluev2-onnx-int8 --repo-type model --local-dir ./onnx_int8
+```
+
+Local export with [exports/export_onnx.py](exports/export_onnx.py): use `--slim` for FP32 (matches the published FP32 style) or `--int8` without `--slim` for INT8; INT8 remains experimental.
+
+The Hub bundles do **not** include per-voice **style JSON**; use the sample `voices/*.json` from **this repository** (or on [GitHub](https://github.com/maxmelichov/BlueTTS/tree/main/voices)), or **export a new voice** from a reference clip (see [exports/README.md](exports/README.md), PyTorch weights below). If you use `pip` without `uv`, the same CLI is available after install because `blue-onnx` depends on `huggingface-hub` — run `hf download ...` with the same arguments and point `style_json` at a file under `voices/` (e.g. `voices/female1.json`).
 
 **Optional**
 
