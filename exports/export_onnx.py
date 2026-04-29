@@ -9,7 +9,9 @@ Produces (in --onnx_dir):
 """
 import argparse
 import os
+import shutil
 import sys
+from typing import cast
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _ROOT not in sys.path:
@@ -25,6 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from bluecodec import LatentDecoder1D
+from bluecodec.autoencoder.latent_encoder import LatentEncoder  # noqa: E402
 from training.dp.models.dp_network import DPNetwork
 from training.t2l.models.text_encoder import TextEncoder
 from training.t2l.models.vf_estimator import VectorFieldEstimator
@@ -85,7 +88,7 @@ class OnnxSafeMultiheadAttention(nn.Module):
         self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim))
         self.out_proj = nn.Linear(embed_dim, embed_dim)
 
-    def forward(self, query, key, value, key_padding_mask=None, attn_mask=None):
+    def forward(self, query, key, value, key_padding_mask=None, attn_mask=None, need_weights=None, **kwargs):
         if not self.batch_first:
             query, key, value = (t.transpose(0, 1) for t in (query, key, value))
         B, T_q, _ = query.shape
@@ -202,6 +205,52 @@ class DPStyleWrapper(nn.Module):
         return self.dp(text_ids=text_ids, text_mask=text_mask, style_dp=style_dp)
 
 
+class CodecEncoderWithStats(nn.Module):
+    """Bakes latent compression and normalization for reference-style extraction."""
+
+    def __init__(self, encoder, mean, std, normalizer_scale, chunk_compress_factor):
+        super().__init__()
+        self.encoder = encoder
+        self.register_buffer("mean", mean.to(torch.float32).view(1, -1, 1))
+        self.register_buffer("std", std.to(torch.float32).view(1, -1, 1))
+        self.scale = float(normalizer_scale)
+        self.factor = int(chunk_compress_factor)
+
+    def forward(self, mel):
+        z = self.encoder(mel)
+        B, C, T = z.shape
+        pad = (self.factor - (T % self.factor)) % self.factor
+        if pad > 0:
+            z = F.pad(z, (0, pad))
+            T = T + pad
+        z = z.view(B, C, T // self.factor, self.factor).permute(0, 1, 3, 2).flatten(1, 2)
+        mean = cast(torch.Tensor, self.mean)
+        std = cast(torch.Tensor, self.std)
+        return ((z - mean) / std) * self.scale
+
+
+class DPReferenceStyleWrapper(nn.Module):
+    def __init__(self, dp):
+        super().__init__()
+        self.ref_encoder = dp.ref_encoder
+
+    def forward(self, z_ref, ref_mask):
+        B = z_ref.shape[0]
+        x = self.ref_encoder.input_proj(z_ref)
+        x = self.ref_encoder.convnext(x, mask=ref_mask)
+        kv = x.transpose(1, 2)
+        key_padding_mask = ref_mask.squeeze(1) == 0
+        q0 = self.ref_encoder.ref_keys.unsqueeze(0).expand(B, -1, -1)
+        q1, _ = self.ref_encoder.attn1(
+            query=q0, key=kv, value=kv, key_padding_mask=key_padding_mask, need_weights=False,
+        )
+        q2 = q0 + q1
+        out, _ = self.ref_encoder.attn2(
+            query=q2, key=kv, value=kv, key_padding_mask=key_padding_mask, need_weights=False,
+        )
+        return out
+
+
 # ── export + verify ──────────────────────────────────────────────────────────
 
 def export_one(model, out_path, inputs, input_names, output_names, dynamic_axes,
@@ -248,6 +297,56 @@ def verify(model, onnx_path, inputs, input_names, label, atol=1e-3, rtol=1e-2):
     return ok
 
 
+def export_style_extractors(
+    *,
+    onnx_dir,
+    ae_encoder,
+    ref_enc,
+    dp,
+    mean,
+    std,
+    cfg,
+    mel,
+    z_ref,
+    ref_mask,
+    do_slim,
+    do_int8,
+    do_verify,
+) -> bool:
+    """Export ONNX-only reference WAV -> style_ttl/style_dp helper graphs."""
+    all_ok = True
+    ccf = cfg["chunk_compress_factor"]
+
+    ae_enc_wrapped = CodecEncoderWithStats(
+        ae_encoder, mean, std, cfg.get("normalizer_scale", 1.0), chunk_compress_factor=ccf,
+    ).eval()
+    ae_enc_path = os.path.join(onnx_dir, "codec_encoder.onnx")
+    export_one(ae_enc_wrapped, ae_enc_path, (mel,), ["mel"], ["z_ref"], {
+        "mel": {2: "T_mel"}, "z_ref": {2: "T_ref"},
+    }, do_slim=do_slim, do_int8=do_int8)
+    if do_verify:
+        all_ok &= verify(ae_enc_wrapped, ae_enc_path, (mel,), ["mel"], "codec_encoder", atol=1e-4, rtol=1e-3)
+
+    se_inputs = (z_ref, ref_mask)
+    se_names = ["z_ref", "ref_mask"]
+    se_path = os.path.join(onnx_dir, "style_encoder.onnx")
+    export_one(ref_enc, se_path, se_inputs, se_names, ["style_ttl"], {
+        "z_ref": {2: "T_ref"}, "ref_mask": {2: "T_ref"},
+    }, do_slim=do_slim, do_int8=do_int8)
+    if do_verify:
+        all_ok &= verify(ref_enc, se_path, se_inputs, se_names, "style_encoder", atol=1e-4, rtol=1e-3)
+
+    dp_ref_wrapped = DPReferenceStyleWrapper(dp).eval()
+    dp_ref_path = os.path.join(onnx_dir, "duration_style_encoder.onnx")
+    export_one(dp_ref_wrapped, dp_ref_path, se_inputs, se_names, ["style_dp"], {
+        "z_ref": {2: "T_ref"}, "ref_mask": {2: "T_ref"},
+    }, do_slim=do_slim, do_int8=do_int8)
+    if do_verify:
+        all_ok &= verify(dp_ref_wrapped, dp_ref_path, se_inputs, se_names, "duration_style_encoder", atol=1e-4, rtol=1e-3)
+
+    return all_ok
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -257,7 +356,7 @@ def main():
     p.add_argument("--ttl_ckpt", required=True, help="text2latent checkpoint (.pt / .safetensors)")
     p.add_argument("--ae_ckpt", required=True, help="audio codec checkpoint")
     p.add_argument("--dp_ckpt", required=True, help="duration predictor checkpoint")
-    p.add_argument("--stats", required=True, help="normalization stats .pt (mean/std)")
+    p.add_argument("--stats", required=True, help="normalization stats .pt/.safetensors (mean/std)")
     p.add_argument("--slim", action="store_true", help="run onnxslim after export")
     p.add_argument("--int8", action="store_true", help="weight-only QUInt8 quantization")
     p.add_argument("--no-verify", dest="no_verify", action="store_true")
@@ -266,6 +365,8 @@ def main():
     cfg = load_ttl_config(args.config)
     print(f"[INFO] config: {args.config} (v{cfg['full_config'].get('tts_version', '?')})")
     os.makedirs(args.onnx_dir, exist_ok=True)
+    shutil.copyfile(args.config, os.path.join(args.onnx_dir, "tts.json"))
+    shutil.copyfile(os.path.join(_ROOT, "src", "vocab.json"), os.path.join(args.onnx_dir, "vocab.json"))
 
     # ---- load checkpoints ---------------------------------------------------
     t2l = _load_state(args.ttl_ckpt)
@@ -277,7 +378,7 @@ def main():
         raise RuntimeError(f"u_text/u_ref missing in {args.ttl_ckpt}; re-export with uncond params.")
     print(f"[INFO] baking uncond: u_text {tuple(u_text.shape)}, u_ref {tuple(u_ref.shape)}")
 
-    stats = torch.load(args.stats, map_location="cpu", weights_only=False)
+    stats = _load_state(args.stats)
     mean = stats["mean"].to(torch.float32)
     std = stats["std"].to(torch.float32)
 
@@ -302,11 +403,10 @@ def main():
 
     ref_enc = ReferenceEncoder(
         in_channels=compressed, d_model=cfg["se_d_model"],
-        hidden_dim=cfg.get("re_hidden_dim", 1024),
-        num_blocks=cfg.get("re_n_blocks", 6),
+        hidden_dim=cfg["se_hidden_dim"],
+        num_blocks=cfg["se_num_blocks"],
         num_tokens=n_style,
-        num_heads=cfg.get("re_n_heads", 2),
-        kernel_size=cfg.get("re_kernel_size", 5),
+        num_heads=cfg["se_n_heads"],
     ).eval()
     _load_into(ref_enc, t2l, "reference_encoder")
     _replace_mha(ref_enc)
@@ -322,6 +422,14 @@ def main():
 
     vocoder = LatentDecoder1D(cfg=cfg["ae_dec_cfg"]).eval()
     _load_into(vocoder, ae, "decoder")
+
+    ae_encoder = LatentEncoder(cfg=cfg["ae_enc_cfg"]).eval()
+    ae_enc_state = _submodule(ae, "encoder")
+    if ae_enc_state is None:
+        ae_enc_state = ae
+    if not isinstance(ae_enc_state, dict):
+        raise TypeError(f"AE encoder state must be a state dict, got {type(ae_enc_state).__name__}")
+    ae_encoder.load_state_dict(ae_enc_state, strict=True)
 
     dp = DPNetwork(
         vocab_size=dp_vocab_size,
@@ -356,6 +464,8 @@ def main():
     cfg_scale = torch.tensor([4.0])
     style_dp_s = torch.randn(B, cfg["dp_style_tokens"], cfg["dp_style_dim"])
     z_pred = torch.randn(B, compressed, T_lat)
+    mel = torch.randn(B, cfg["ae_n_fft"] // 2 + 1 + cfg["ae_n_mels"], 300)
+    ref_mask = torch.ones(B, 1, T_lat)
 
     do_verify = not args.no_verify and not args.int8
     if args.int8 and not args.no_verify:
@@ -409,6 +519,22 @@ def main():
     }, do_slim=args.slim, do_int8=args.int8)
     if do_verify:
         all_ok &= verify(dp_wrapped, dp_path, dp_inputs, dp_names, "duration_predictor", atol=1e-4, rtol=1e-3)
+
+    all_ok &= export_style_extractors(
+        onnx_dir=args.onnx_dir,
+        ae_encoder=ae_encoder,
+        ref_enc=ref_enc,
+        dp=dp,
+        mean=mean,
+        std=std,
+        cfg=cfg,
+        mel=mel,
+        z_ref=z_pred,
+        ref_mask=ref_mask,
+        do_slim=args.slim,
+        do_int8=args.int8,
+        do_verify=do_verify,
+    )
 
     if do_verify:
         print("\n" + ("[PASS] All match." if all_ok else "[FAIL] Mismatch."))
