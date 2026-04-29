@@ -131,10 +131,11 @@ wheels = [
 [[package]]
 name = "blue-onnx"
 version = "0.2.5"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "espeakng-loader" },
     { name = "huggingface-hub" },
+    { name = "librosa" },
     { name = "numpy" },
     { name = "onnx" },
     { name = "onnxruntime" },
@@ -147,7 +148,6 @@ dependencies = [
 [package.optional-dependencies]
 export = [
     { name = "bluecodec" },
-    { name = "librosa" },
     { name = "onnx" },
     { name = "onnxslim" },
     { name = "safetensors" },
@@ -174,7 +174,7 @@ requires-dist = [
     { name = "bluecodec", marker = "extra == 'export'", git = "https://github.com/maxmelichov/blue-codec.git" },
     { name = "espeakng-loader", specifier = ">=0.2.4" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
-    { name = "librosa", marker = "extra == 'export'" },
+    { name = "librosa" },
     { name = "numpy" },
     { name = "onnx", specifier = ">=1.20.1" },
     { name = "onnx", marker = "extra == 'export'", specifier = ">=1.17.0" },
