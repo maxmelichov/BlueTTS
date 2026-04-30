@@ -28,7 +28,9 @@ audio, _ = tts(
     text_is_phonemes=text_is_phonemes,
     speed=1.0,
 )
-if audio.ndim == 2: audio = audio[0]
-out = Path("examples/out/mixed.wav"); out.parent.mkdir(parents=True, exist_ok=True)
+if audio.ndim == 2:
+    audio = audio[0]
+out = Path("examples/out/mixed.wav")
+out.parent.mkdir(parents=True, exist_ok=True)
 sf.write(out, audio, tts.sample_rate)
 print(f"Saved {out}  ({len(audio)/tts.sample_rate:.2f}s)")
