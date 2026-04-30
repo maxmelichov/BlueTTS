@@ -506,7 +506,10 @@ class TextToSpeech:
                 "Batch mode requires `lang` to be a list of the same length as `text`."
             )
             if phonemize and self.g2p is not None:
-                text = [self.g2p.phonemize(t, lang=l) for t, l in zip(text, lang)]
+                text = [
+                    self.g2p.phonemize(t, lang=lang_code)
+                    for t, lang_code in zip(text, lang)
+                ]
             text = [strip_lang_tags_from_phoneme_string(t) for t in text]
             return self._infer(
                 text,
@@ -559,15 +562,32 @@ class TextToSpeech:
         style: Style,
         total_step: int,
         speed: float = 1.05,
+        cfg_scale: float = DEFAULT_CFG_SCALE,
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
+        text_is_phonemes: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
+        """Batched synthesis for a list of strings (no sentence chunking).
+
+        Matches list-mode :meth:`__call__`: runs G2P when ``text_is_phonemes`` is
+        ``False`` and a processor was wired via :func:`load_text_to_speech`, then
+        strips inline ``<lang>…</lang>`` markers before encoding.
+        """
+        assert len(text_list) == len(lang_list), (
+            "`text_list` and `lang_list` must have the same length."
+        )
         has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text_list)
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
             else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
         )
+        phonemize = not text_is_phonemes
+        if phonemize and self.g2p is not None:
+            text_list = [
+                self.g2p.phonemize(t, lang=lang_code)
+                for t, lang_code in zip(text_list, lang_list)
+            ]
         text_list = [strip_lang_tags_from_phoneme_string(t) for t in text_list]
         return self._infer(
             text_list,
@@ -575,7 +595,7 @@ class TextToSpeech:
             style,
             total_step,
             speed,
-            cfg_scale=DEFAULT_CFG_SCALE,
+            cfg_scale,
             pace_blend=pace_blend_eff,
             pace_dpt_ref=pace_dpt_ref,
         )
