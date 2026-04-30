@@ -94,22 +94,29 @@ class TextProcessor:
                     "Hebrew G2P needs `renikud-onnx`. Install: `uv sync`."
                 ) from e
 
+    # Cache EspeakBackend instances per language: the espeak-ng ctypes binding
+    # leaks per backend construction and each init costs ~600 ms, so reuse them.
+    _ESPEAK_BACKENDS: dict = {}
+
     def _espeak(self, text: str, lang: str) -> str:
         espeak_lang = _ESPEAK_MAP.get(lang)
         if espeak_lang is None:
             return text
         try:
-            import espeakng_loader
-            EspeakBackend = import_module("phonemizer.backend").EspeakBackend
-            EspeakWrapper = import_module("phonemizer.backend.espeak.wrapper").EspeakWrapper
             Separator = import_module("phonemizer.separator").Separator
-            EspeakWrapper.set_library(espeakng_loader.get_library_path())
-            if hasattr(EspeakWrapper, "set_data_path"):
-                EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
-            backend = EspeakBackend(
-                espeak_lang, preserve_punctuation=True,
-                with_stress=True, language_switch="remove-flags",
-            )
+            backend = TextProcessor._ESPEAK_BACKENDS.get(espeak_lang)
+            if backend is None:
+                import espeakng_loader
+                EspeakBackend = import_module("phonemizer.backend").EspeakBackend
+                EspeakWrapper = import_module("phonemizer.backend.espeak.wrapper").EspeakWrapper
+                EspeakWrapper.set_library(espeakng_loader.get_library_path())
+                if hasattr(EspeakWrapper, "set_data_path"):
+                    EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
+                backend = EspeakBackend(
+                    espeak_lang, preserve_punctuation=True,
+                    with_stress=True, language_switch="remove-flags",
+                )
+                TextProcessor._ESPEAK_BACKENDS[espeak_lang] = backend
             raw = backend.phonemize(
                 [text], separator=Separator(phone="", word=" ", syllable="")
             )[0]
