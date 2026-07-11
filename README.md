@@ -34,7 +34,7 @@ from blue_onnx import BlueTTS
 
 tts = BlueTTS(
     onnx_dir="onnx_models",
-    style_json="voices/female1.json",
+    style_json="voices/Rotem.json",
     renikud_path="model.onnx",
 )
 s, sr = tts.synthesize("Hello", lang="en")
@@ -79,7 +79,7 @@ uv run hf download notmax123/bluev2-onnx-int8 --repo-type model --local-dir ./on
 
 Local export with [exports/export_onnx.py](exports/export_onnx.py): use `--slim` for FP32 (matches the published FP32 style) or `--int8` without `--slim` for INT8; INT8 remains experimental.
 
-The Hub bundles do **not** include per-voice **style JSON**; use the sample `voices/*.json` from **this repository** (or on [GitHub](https://github.com/maxmelichov/BlueTTS/tree/main/voices)), or **export a new voice** from a reference clip (see [exports/README.md](exports/README.md), PyTorch weights below). If you use `pip` without `uv`, the same CLI is available after install because `blue-onnx` depends on `huggingface-hub` — run `hf download ...` with the same arguments and point `style_json` at a file under `voices/` (e.g. `voices/female1.json`).
+The Hub bundles do **not** include per-voice **style JSON**; use the sample `voices/*.json` from **this repository** (or on [GitHub](https://github.com/maxmelichov/BlueTTS/tree/main/voices)), or **export a new voice** from a reference clip (see [exports/README.md](exports/README.md), PyTorch weights below). If you use `pip` without `uv`, the same CLI is available after install because `blue-onnx` depends on `huggingface-hub` — run `hf download ...` with the same arguments and point `style_json` at a file under `voices/` (e.g. `voices/Rotem.json`).
 
 **Optional**
 
@@ -94,7 +94,7 @@ The Hub bundles do **not** include per-voice **style JSON**; use the sample `voi
 
 ## Usage
 
-Examples below use `voices/female1.json` from this repo, or a JSON you produced with `exports/export_new_voice.py`.
+Examples below use `voices/Rotem.json` or `voices/Roi.json` from this repo, or a JSON you produced with `exports/export_new_voice.py`.
 
 ## Quick start
 

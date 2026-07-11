@@ -37,8 +37,6 @@ def spfm_forward_mask(
     text_masks: torch.Tensor,
     valid_z_len: torch.Tensor,
     vf_estimator: torch.nn.Module,
-    u_text: torch.Tensor,
-    u_ref: torch.Tensor,
     sigma_min: float,
     device: torch.device,
     B: int,
@@ -62,8 +60,6 @@ def spfm_forward_mask(
         )
 
     _, C, T = z_1.shape
-    D_text = h_text.shape[1]
-
     with torch.no_grad():
         t_spfm = torch.full((B,), 0.5, device=device)
         t_b = t_spfm.view(B, 1, 1)
@@ -84,18 +80,17 @@ def spfm_forward_mask(
             return_velocity=True,
         )
 
-        u_text_spfm = u_text.expand(B, D_text, 1)
-        u_ref_spfm = u_ref.expand(B, -1, -1)
-        u_text_mask_spfm = torch.ones(B, 1, 1, device=device)
-
+        drop_all = torch.ones(B, dtype=torch.bool, device=device)
         v_uncond = vf_estimator(
             noisy_latent=x_t_in,
-            text_emb=u_text_spfm,
-            style_ttl=u_ref_spfm,
+            text_emb=h_text,
+            style_ttl=ref_values,
             latent_mask=latent_mask,
-            text_mask=u_text_mask_spfm,
+            text_mask=text_masks,
             current_step=t_spfm,
             total_step=torch.ones_like(t_spfm),
+            drop_text=drop_all,
+            drop_style=drop_all,
             return_velocity=True,
         )
 

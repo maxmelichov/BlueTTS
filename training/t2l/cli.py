@@ -9,8 +9,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--finetune", action="store_true",
                         help="Finetune mode: lr=5e-4, SPFM starts after warm-up")
-    parser.add_argument("--config", type=str, default="configs/tts.json",
-                        help="Path to tts.json config file (default: configs/tts.json)")
+    parser.add_argument("--config", type=str, default="config/tts.json",
+                        help="Path to tts.json config file (default: config/tts.json)")
     parser.add_argument("--data", type=str, default="generated_audio/combined_dataset_cleaned_real_data.csv",
                         help="Path to training metadata CSV")
     parser.add_argument("--out", type=str, default="checkpoints/text2latent",
@@ -19,7 +19,7 @@ def main():
                         help="Path to AE checkpoint")
     parser.add_argument("--stats_path", type=str, default="stats_multilingual.pt",
                         help="Path to latent stats .pt file")
-    parser.add_argument("--max_steps", type=int, default=1_000_000,
+    parser.add_argument("--max_steps", type=int, default=10_000_000,
                         help="Maximum optimization steps")
     parser.add_argument("--batch_size", type=int, default=14,
                         help="Training batch size")

@@ -17,6 +17,56 @@ class UncondParams(nn.Module):
         self.u_text = nn.Parameter(torch.randn(1, text_dim, 1) * init_std)
         self.u_ref = nn.Parameter(torch.randn(1, n_style, style_value_dim) * init_std)
 
+
+def tie_shared_style_key(text_encoder: nn.Module, vf_estimator: nn.Module) -> None:
+    """Make SPTE and vector-field conditioning use one shared style-key bank."""
+    style_key = text_encoder.speech_prompted_text_encoder.style_key
+    vf_estimator.tile = style_key
+
+
+def dedupe_parameters(*modules: nn.Module) -> list[nn.Parameter]:
+    """Return trainable parameters once when modules share parameter objects."""
+    seen: set[int] = set()
+    params: list[nn.Parameter] = []
+    for module in modules:
+        for parameter in module.parameters():
+            if parameter.requires_grad and id(parameter) not in seen:
+                seen.add(id(parameter))
+                params.append(parameter)
+    return params
+
+
+def pop_and_load_uncond_tokens(
+    vf_estimator: nn.Module,
+    checkpoint_state: dict,
+    *,
+    checkpoint: dict,
+    text_encoder: nn.Module | None = None,
+) -> None:
+    """Load legacy standalone CFG tokens into the estimator's token module.
+
+    Older checkpoints stored ``u_text``/``u_ref`` outside ``vf_estimator``.
+    Consume those keys before the normal filtered state-dict load.
+    """
+    uncond = vf_estimator.tts.ttl.uncond_masker
+    legacy = {
+        "u_text": "text_special_token",
+        "u_ref": "style_value_special_token",
+        "u_key": "style_key_special_token",
+    }
+    for old_key, new_name in legacy.items():
+        value = checkpoint.get(old_key)
+        target = getattr(uncond, new_name)
+        if value is not None and value.shape == target.shape:
+            target.data.copy_(value)
+
+    # A shared key could be stored under either module in legacy checkpoints.
+    if text_encoder is not None and "tile" in checkpoint_state:
+        value = checkpoint_state["tile"]
+        target = text_encoder.speech_prompted_text_encoder.style_key
+        if value.shape == target.shape:
+            target.data.copy_(value)
+
 def _validate_ttl_config(ttl_cfg: dict) -> None:
     """Validate every field in `ttl_cfg`."""
     def _eq(label, got, expected):

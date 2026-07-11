@@ -7,9 +7,16 @@ from training.t2l.models.text_encoder import TextEncoder
 from training.t2l.models.vf_estimator import VectorFieldEstimator
 from training.t2l.models.reference_encoder import ReferenceEncoder
 from training.dp.models.dp_network import DPNetwork
-from training.t2l.cfg_utils import UncondParams
+from training.t2l.cfg_utils import tie_shared_style_key
 
-def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="checkpoints/duration_predictor/duration_predictor_final.pt"):
+def build_models(
+    ttl_cfg,
+    ae_cfg_json,
+    ae_sample_rate,
+    device,
+    dp_cfg=None,
+    dp_ckpt_path="checkpoints/duration_predictor/duration_predictor_final.pt",
+):
     te_cfg = ttl_cfg["text_encoder"]
     te_d_model = te_cfg["text_embedder"]["char_emb_dim"]
     te_convnext_layers = te_cfg["convnext"]["num_layers"]
@@ -40,10 +47,6 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
 
     um_cfg = ttl_cfg["uncond_masker"]
     uncond_init_std = um_cfg["std"]
-    um_text_dim = um_cfg["text_dim"]
-    um_n_style = um_cfg["n_style"]
-    um_style_value_dim = um_cfg["style_value_dim"]
-
     vf_cfg = ttl_cfg["vector_field"]
     vf_in_channels = vf_cfg["proj_in"]["ldim"] * vf_cfg["proj_in"]["chunk_compress_factor"]
     vf_out_channels = vf_cfg["proj_out"]["ldim"] * vf_cfg["proj_out"]["chunk_compress_factor"]
@@ -122,21 +125,29 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         text_n_heads=vf_text_n_heads,
         time_hdim=vf_time_hdim,
         rotary_base=vf_rotary_base,
+        cfg_scale=float(vf_cfg.get("cfg_scale", 3.0)),
+        uncond_init_std=uncond_init_std,
     ).to(device)
 
-    uncond_params = UncondParams(
-        text_dim=um_text_dim,
-        n_style=um_n_style,
-        style_value_dim=um_style_value_dim,
-        init_std=uncond_init_std,
-    ).to(device)
+    tie_shared_style_key(text_encoder, vf_estimator)
 
+    dp_cfg = dp_cfg or {}
     dp_model = None
     if os.path.exists(dp_ckpt_path):
         try:
             print(f"Loading Duration Predictor from {dp_ckpt_path}...")
-            dp_model = DPNetwork(vocab_size=VOCAB_SIZE).to(device)
+            predictor_cfg = dp_cfg.get("predictor", {})
+            dp_model = DPNetwork(
+                vocab_size=VOCAB_SIZE,
+                style_dp=int(predictor_cfg.get("n_style", 8)),
+                style_dim=int(predictor_cfg.get("style_dim", 16)),
+                sentence_encoder_cfg=dp_cfg.get("sentence_encoder"),
+                style_encoder_cfg=dp_cfg.get("style_encoder"),
+                predictor_cfg=predictor_cfg,
+            ).to(device)
             dp_state = torch.load(dp_ckpt_path, map_location=device)
+            if isinstance(dp_state, dict) and "state_dict" in dp_state:
+                dp_state = dp_state["state_dict"]
             model_state = dp_model.state_dict()
             filtered_state = {}
             for k, v in dp_state.items():
@@ -154,4 +165,4 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         except Exception as e:
             print(f"Failed to load DP: {e}")
 
-    return text_encoder, reference_encoder, vf_estimator, uncond_params, dp_model, ae_encoder, ae_decoder, mel_spec, hop_length
+    return text_encoder, reference_encoder, vf_estimator, dp_model, ae_encoder, ae_decoder, mel_spec, hop_length

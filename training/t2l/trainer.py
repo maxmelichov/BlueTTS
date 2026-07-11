@@ -11,8 +11,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--finetune", action="store_true",
                         help="Finetune mode: lr=5e-4, SPFM starts after warm-up")
-    parser.add_argument("--config", type=str, default="configs/tts.json",
-                        help="Path to tts.json config file (default: configs/tts.json)")
+    parser.add_argument("--config", type=str, default="config/tts.json",
+                        help="Path to tts.json config file (default: config/tts.json)")
     parser.add_argument("--Ke", type=int, default=None,
                         help="Override batch expansion factor (default: from config)")
     parser.add_argument("--accumulation_steps", type=int, default=1,

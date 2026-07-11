@@ -54,7 +54,9 @@ class EngineBuilder:
         Parse the ONNX graph and create the corresponding TensorRT network definition.
         :param onnx_path: The path to the ONNX graph to load.
         """
-        self.network = self.builder.create_network(1)
+        # TensorRT 10+ always uses explicit batch. A weakly typed network keeps
+        # float32 ONNX exports compatible without injecting FP16 casts.
+        self.network = self.builder.create_network(0)
         self.parser = self._trt.OnnxParser(self.network, self.trt_logger)
 
         onnx_path = os.path.realpath(onnx_path)
@@ -111,14 +113,14 @@ class EngineBuilder:
                         max_shape.append(2048)
                         
                         # ---- Heuristics matching our ONNX exports ----
-                        # Text-related axes (mixed-language IPA + <lang> tags can be >512 tokens)
+                        # Text-related axes
                         if "text" in name:
                             if dim_idx == 1 and len(shape) == 2:  # text_ids [B, T]
-                                opt_shape[-1] = 256
-                                max_shape[-1] = 2048
+                                opt_shape[-1] = 128
+                                max_shape[-1] = 512
                             elif dim_idx == 2:  # text_mask / text_emb time axis
-                                opt_shape[-1] = 256
-                                max_shape[-1] = 2048
+                                opt_shape[-1] = 128
+                                max_shape[-1] = 512
                         
                         # Reference / style axes
                         elif "ref" in name or "style" in name:
@@ -163,14 +165,27 @@ class EngineBuilder:
         os.makedirs(os.path.dirname(engine_path), exist_ok=True)
         log.info("Building {} Engine in {}".format(precision, engine_path))
 
-        # Set precision flags
+        # TensorRT releases differ in whether precision flags are exposed.
+        # Keep TF32 enabled when available and use FP16/INT8 only when both the
+        # flag and platform support are present.
+        if hasattr(self._trt.BuilderFlag, "TF32"):
+            self.config.set_flag(self._trt.BuilderFlag.TF32)
+
         if precision == "fp16":
-            if not self.builder.platform_has_fast_fp16:
+            if not hasattr(self._trt.BuilderFlag, "FP16"):
+                log.warning(
+                    "TensorRT %s has no BuilderFlag.FP16; building with TF32/FP32.",
+                    self._trt.__version__,
+                )
+            elif not getattr(self.builder, "platform_has_fast_fp16", True):
                 log.warning("FP16 is not supported natively on this platform/device")
-            self.config.set_flag(self._trt.BuilderFlag.FP16)
+            else:
+                self.config.set_flag(self._trt.BuilderFlag.FP16)
         
         if use_int8:
-            if not self.builder.platform_has_fast_int8:
+            if not hasattr(self._trt.BuilderFlag, "INT8"):
+                log.warning("TensorRT %s has no BuilderFlag.INT8; ignoring --use_int8", self._trt.__version__)
+            elif not getattr(self.builder, "platform_has_fast_int8", True):
                 log.warning("INT8 is not supported natively on this platform/device")
             else:
                 self.config.set_flag(self._trt.BuilderFlag.INT8)
