@@ -8,15 +8,16 @@ import torchaudio
 import torch.nn.functional as F
 import string
 
-# Ensure these local modules exist in your project structure
-from data.text_vocab import (
+# Package-relative imports keep ``python -m training.t2l.cli`` working from
+# the repository root as documented.
+from training.data.text_vocab import (
     text_to_indices,
     VOCAB_LIST,
     normalize_text,
     NONVERBAL_TOKEN_ID_MIN,
     NONVERBAL_TOKEN_ID_MAX,
 )
-from data.audio_utils import ensure_sr
+from training.data.audio_utils import ensure_sr
 
 # espeak language codes for non-Hebrew languages
 _ESPEAK_LANG = {
