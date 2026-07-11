@@ -14,6 +14,7 @@ import torch
 from ..blue_onnx import (
     BLUE_SYNTH_MAX_CHUNK_LEN,
     DEFAULT_MIXED_PACE_BLEND,
+    DEFAULT_PACE_BLEND,
     DURATION_PACE_DPT_REF,
     TextProcessor,
     blend_duration_pace,
@@ -324,7 +325,7 @@ class BlueTRT:
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
-            else (DEFAULT_MIXED_PACE_BLEND if has_inline else 0.0)
+            else (DEFAULT_MIXED_PACE_BLEND if has_inline else DEFAULT_PACE_BLEND)
         )
         cfg = self.cfg_scale if cfg_scale is None else float(cfg_scale)
         phonemes_flat = strip_lang_tags_from_phoneme_string(phonemes)

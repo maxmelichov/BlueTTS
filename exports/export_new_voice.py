@@ -42,7 +42,7 @@ if _TRAINING not in sys.path:
 from bluecodec.autoencoder.latent_encoder import LatentEncoder  # noqa: E402
 from training.utils import LinearMelSpectrogram, compress_latents, load_ttl_config  # noqa: E402
 
-HF_REPO_ID = "notmax123/blue-v2"
+HF_REPO_ID = "notmax123/BlueV3"
 HF_WEIGHT_SIZES: dict[str, int] = {
     "blue_codec.safetensors": 245_114_104,
     "duration_predictor_final.safetensors": 2_040_744,
