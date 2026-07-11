@@ -14,6 +14,7 @@ import torch
 from ..blue_onnx import (
     AVAILABLE_LANGS,
     DEFAULT_MIXED_PACE_BLEND,
+    DEFAULT_PACE_BLEND,
     DURATION_PACE_DPT_REF,
     TextProcessor,
     UnicodeProcessor,
@@ -58,6 +59,9 @@ class TextToSpeech:
         mean: Optional[torch.Tensor] = None,
         std: Optional[torch.Tensor] = None,
         seed: int = 42,
+        dp_ort=None,
+        vocoder_ort=None,
+        denorm_before_vocoder: bool = False,
     ):
         self.cfgs = cfgs
         self.text_processor = text_processor
@@ -68,6 +72,9 @@ class TextToSpeech:
         self.vocoder = vocoder
         self.device = device
         self.seed = seed
+        self._dp_ort = dp_ort
+        self._vocoder_ort = vocoder_ort
+        self.denorm_before_vocoder = bool(denorm_before_vocoder)
 
         self.sample_rate = int(cfgs.get("ae_sample_rate", cfgs.get("ae", {}).get("sample_rate", 44100)))
         self.base_chunk_size = int(cfgs.get("ae_hop_length", cfgs.get("ae", {}).get("base_chunk_size", 512)))
@@ -110,7 +117,7 @@ class TextToSpeech:
         style: Style,
         total_step: int,
         speed: float = 1.0,
-        cfg_scale: float = 4.0,
+        cfg_scale: float = 3.0,
         pace_blend: float = 0.0,
         pace_dpt_ref: Optional[float] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
@@ -124,58 +131,53 @@ class TextToSpeech:
         text_mask = torch.from_numpy(text_mask_np).float().to(self.device)
 
         # Duration predictor → seconds.
+        # Prefer BlueV3-onnx DP: Hub PT DP is a different (broken/mismatched) checkpoint.
         if style.dp is None:
             raise ValueError("Style must contain style_dp for the PT duration predictor.")
-        dur = self.dp_model(
-            text_ids, text_mask=text_mask, style_dp=style.dp, return_log=False
-        ).view(bsz).float()
-        dur_np = dur.detach().cpu().numpy()
+        if self._dp_ort is not None:
+            dur_np = np.asarray(
+                self._dp_ort.run(
+                    None,
+                    {
+                        "text_ids": text_ids_np.astype(np.int64),
+                        "style_dp": style.dp.detach().cpu().numpy().astype(np.float32),
+                        "text_mask": text_mask_np.astype(np.float32),
+                    },
+                )[0],
+                dtype=np.float32,
+            ).reshape(-1)
+            dur = torch.from_numpy(dur_np).to(self.device)
+        else:
+            dur = self.dp_model(
+                text_ids, text_mask=text_mask, style_dp=style.dp, return_log=False
+            ).view(bsz).float()
+            dur_np = dur.detach().cpu().numpy()
         tm_np = text_mask.detach().cpu().numpy()
         ref = float(pace_dpt_ref) if pace_dpt_ref is not None else DURATION_PACE_DPT_REF
         dur_np = blend_duration_pace(dur_np, tm_np, pace_blend, ref)
-        dur = torch.from_numpy(dur_np).to(dur.device) / max(float(speed), 1e-6)
+        dur = torch.from_numpy(dur_np).to(self.device) / max(float(speed), 1e-6)
 
         # Text encoding.
         h_text = self.text_encoder(text_ids, style.ttl, text_mask=text_mask)
 
-        # Init noisy latent.
+        # Init noisy latent + ONNX-matched VF sampling (internal CFG + Euler).
         xt, latent_mask = self.sample_noisy_latent(dur)
-        dt = 1.0 / total_step
-
-        use_cfg = (
-            cfg_scale != 1.0
-            and self._u_text is not None
-            and self._u_ref is not None
-        )
-        h_text_null: Optional[torch.Tensor] = None
-        h_ref_null: Optional[torch.Tensor] = None
-        u_mask: Optional[torch.Tensor] = None
-        if use_cfg:
-            assert self._u_text is not None and self._u_ref is not None
-            h_text_null = self._u_text.expand(bsz, -1, h_text.shape[2])
-            h_ref_null = self._u_ref.expand(bsz, -1, -1)
-            u_mask = torch.ones(bsz, 1, h_text.shape[2], device=self.device)
+        self.vector_estimator.cfg_scale = float(cfg_scale)
+        total_step_t = torch.full((bsz,), float(total_step), device=self.device)
 
         for step in range(total_step):
-            t = torch.full((bsz,), step / total_step, device=self.device)
-            x_in = xt * latent_mask
-            v_cond = self.vector_estimator(
-                noisy_latent=x_in, text_emb=h_text, style_ttl=style.ttl,
-                latent_mask=latent_mask, text_mask=text_mask, current_step=t,
-                total_step=torch.ones_like(t), return_velocity=True,
+            t = torch.full((bsz,), float(step), device=self.device)
+            xt = self.vector_estimator(
+                noisy_latent=xt * latent_mask,
+                text_emb=h_text,
+                style_ttl=style.ttl,
+                latent_mask=latent_mask,
+                text_mask=text_mask,
+                current_step=t,
+                total_step=total_step_t,
+                return_velocity=False,
             )
-            if use_cfg:
-                v_uncond = self.vector_estimator(
-                    noisy_latent=x_in, text_emb=h_text_null, style_ttl=h_ref_null,
-                    latent_mask=latent_mask, text_mask=u_mask, current_step=t,
-                    total_step=torch.ones_like(t), return_velocity=True,
-                )
-                v = v_uncond + cfg_scale * (v_cond - v_uncond)
-            else:
-                v = v_cond
-            xt = (xt + v * dt) * latent_mask
 
-        # Decode.
         wav = self._decode(xt)
         return wav, dur.detach().cpu().numpy()
 
@@ -183,10 +185,31 @@ class TextToSpeech:
         if self.mean is None or self.std is None:
             raise ValueError("Latent stats (mean/std) not loaded.")
         ns = self.normalizer_scale
+        frame_len = self.base_chunk_size * self.chunk_compress_factor
+
+        # Prefer BlueV3-onnx vocoder: Hub PT package has no matching AE weights.
+        if self._vocoder_ort is not None:
+            xt = x.detach().cpu().numpy().astype(np.float32)
+            mean = self.mean.detach().cpu().numpy().astype(np.float32)
+            std = self.std.detach().cpu().numpy().astype(np.float32)
+            if mean.ndim == 1:
+                mean = mean.reshape(1, -1, 1)
+                std = std.reshape(1, -1, 1)
+            # Hub vocoder.onnx bakes identity mean/std; denorm in Python first.
+            if self.denorm_before_vocoder and ns not in (0.0, 1.0):
+                xt = (xt / ns) * std + mean
+            elif self.denorm_before_vocoder:
+                xt = xt * std + mean
+            wav, *_ = self._vocoder_ort.run(None, {"latent": xt})
+            if wav.ndim == 3 and wav.shape[1] == 1:
+                wav = wav[:, 0, :]
+            if wav.shape[-1] > 2 * frame_len:
+                wav = wav[..., frame_len:-frame_len]
+            return np.asarray(wav, dtype=np.float32)
+
         z = (x / ns) * self.std + self.mean if ns not in (0.0, 1.0) else x * self.std + self.mean
         z = decompress_latents(z, factor=self.chunk_compress_factor, target_channels=self.ldim)
         wav = self.vocoder(z)
-        frame_len = self.base_chunk_size * self.chunk_compress_factor
         if wav.shape[-1] > 2 * frame_len:
             wav = wav[..., frame_len:-frame_len]
         if wav.dim() == 3 and wav.shape[1] == 1:
@@ -202,7 +225,7 @@ class TextToSpeech:
         style: Style,
         total_step: int,
         speed: float = 1.0,
-        cfg_scale: float = 4.0,
+        cfg_scale: float = 3.0,
         silence_duration: float = 0.0,
         text_is_phonemes: bool = False,
         pace_blend: Optional[float] = None,
@@ -224,7 +247,7 @@ class TextToSpeech:
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
-            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
+            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else DEFAULT_PACE_BLEND)
         )
         if isinstance(text, list):
             assert isinstance(lang, list) and len(text) == len(lang), (
@@ -475,9 +498,10 @@ def load_pt_models(
         num_superblocks=cfg.get("vf_n_blocks", 4),
         time_embed_dim=cfg.get("vf_time_dim", 64),
         rope_gamma=cfg.get("vf_rotary_scale", 10.0),
-        text_n_heads=cfg.get("vf_text_n_heads", 4),
+        text_n_heads=int(vf_text_cfg.get("n_heads", cfg.get("vf_text_n_heads", 8))),
         time_hdim=vf_time_cfg.get("hdim", 256),
         rotary_base=float(vf_text_cfg.get("rotary_base", 10000.0)),
+        cfg_scale=float(vf_cfg.get("cfg_scale", 3.0)),
     ).to(device).eval()
     vf_estimator.load_state_dict(vf_sd, strict=False)
 
@@ -497,6 +521,15 @@ def load_pt_models(
         style_encoder_cfg=dp_cfg.get("style_encoder"),
         predictor_cfg=dp_cfg.get("predictor"),
     ).to(device).eval()
+    # Keep config-defined shapes; skip ckpt tensors that don't fit (Hub DP
+    # ref_encoder is 16-wide while config/tts.json is 64-wide). Voice-JSON
+    # inference uses style_dp and does not need ref_encoder weights.
+    model_sd = dp_model.state_dict()
+    dp_sd = {
+        k: v
+        for k, v in dp_sd.items()
+        if k in model_sd and getattr(v, "shape", None) == model_sd[k].shape
+    }
     dp_model.load_state_dict(dp_sd, strict=False)
 
     voc_path = ae_ckpt or os.path.join(weights_dir, "vocoder.pt")
@@ -586,6 +619,21 @@ def encode_wav_to_style(
     )
 
 
+def _find_onnx_sidecar(*names: str) -> Optional[str]:
+    """Locate a BlueV3-onnx file next to PT weights or under ``onnx_models/``."""
+    roots = []
+    env = os.environ.get("ONNX_DIR")
+    if env:
+        roots.append(env)
+    roots.extend(["onnx_models", "onnx_slim", "."])
+    for root in roots:
+        for name in names:
+            path = os.path.join(root, name)
+            if os.path.exists(path):
+                return path
+    return None
+
+
 def load_text_to_speech(
     weights_dir: str,
     config_path: str = "tts.json",
@@ -595,12 +643,40 @@ def load_text_to_speech(
     dp_ckpt: Optional[str] = None,
     renikud_path: Optional[str] = None,
     seed: int = 42,
+    duration_onnx: Optional[str] = None,
+    vocoder_onnx: Optional[str] = None,
+    onnx_dir: Optional[str] = None,
 ) -> TextToSpeech:
+    """Load PT TE/VF; pair with BlueV3-onnx DP + vocoder when Hub PT sidecars are wrong/missing.
+
+    ``notmax123/BlueV3`` ships a mismatched duration checkpoint and no AE. When
+    ``onnx_models/`` (or ``ONNX_DIR`` / ``onnx_dir``) is present, duration and
+    decode use the matching ONNX graphs so PT TE/VF inference stays in parity.
+    """
     cfgs = load_cfgs(weights_dir, config_path)
     text_encoder, vf_estimator, dp_model, vocoder, u_text, u_ref = load_pt_models(
         weights_dir, cfgs, device, text2latent_ckpt, ae_ckpt, dp_ckpt
     )
-    mean, std = load_stats(weights_dir, device)
+
+    if onnx_dir is None:
+        onnx_dir = os.environ.get("ONNX_DIR") or (
+            "onnx_models" if os.path.isdir("onnx_models") else None
+        )
+
+    # Prefer ONNX stats (same denorm as BlueV3-onnx vocoder path).
+    mean, std = None, None
+    if onnx_dir and os.path.exists(os.path.join(onnx_dir, "stats.npz")):
+        stats = np.load(os.path.join(onnx_dir, "stats.npz"))
+        mean = torch.from_numpy(np.asarray(stats["mean"], dtype=np.float32)).to(device)
+        std = torch.from_numpy(np.asarray(stats["std"], dtype=np.float32)).to(device)
+        if mean.ndim == 1:
+            mean = mean.view(1, -1, 1)
+            std = std.view(1, -1, 1)
+        if "normalizer_scale" in stats.files:
+            cfgs["normalizer_scale"] = float(np.asarray(stats["normalizer_scale"]).reshape(-1)[0])
+    if mean is None:
+        mean, std = load_stats(weights_dir, device)
+
     text_processor = load_text_processor(weights_dir)
 
     if renikud_path is None:
@@ -609,6 +685,35 @@ def load_text_to_speech(
                 renikud_path = cand
                 break
     g2p = TextProcessor(renikud_path)
+
+    import onnxruntime as ort
+    from ..blue_onnx import _vocoder_stats_are_identity
+
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = min(8, os.cpu_count() or 1)
+    providers = ["CPUExecutionProvider"]
+
+    if duration_onnx is None:
+        duration_onnx = _find_onnx_sidecar("duration_predictor.onnx")
+        if duration_onnx is None and onnx_dir:
+            cand = os.path.join(onnx_dir, "duration_predictor.onnx")
+            if os.path.exists(cand):
+                duration_onnx = cand
+    dp_ort = None
+    if duration_onnx and os.path.exists(duration_onnx):
+        dp_ort = ort.InferenceSession(duration_onnx, sess_options=opts, providers=providers)
+
+    if vocoder_onnx is None:
+        vocoder_onnx = _find_onnx_sidecar("vocoder.onnx")
+        if vocoder_onnx is None and onnx_dir:
+            cand = os.path.join(onnx_dir, "vocoder.onnx")
+            if os.path.exists(cand):
+                vocoder_onnx = cand
+    vocoder_ort = None
+    denorm_before = False
+    if vocoder_onnx and os.path.exists(vocoder_onnx):
+        vocoder_ort = ort.InferenceSession(vocoder_onnx, sess_options=opts, providers=providers)
+        denorm_before = _vocoder_stats_are_identity(vocoder_onnx)
 
     return TextToSpeech(
         cfgs=cfgs,
@@ -624,6 +729,9 @@ def load_text_to_speech(
         mean=mean,
         std=std,
         seed=seed,
+        dp_ort=dp_ort,
+        vocoder_ort=vocoder_ort,
+        denorm_before_vocoder=denorm_before,
     )
 
 

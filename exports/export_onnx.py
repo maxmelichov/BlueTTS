@@ -197,7 +197,14 @@ class VocoderWithStats(nn.Module):
         self.factor = int(chunk_compress_factor)
 
     def forward(self, latent):
-        z = (latent * self.inv_scale) * self.std + self.mean
+        # Keep denorm as explicit elementwise ops so ONNX/onnxslim cannot
+        # drop real mean/std buffers (Hub export previously baked identity).
+        scale = self.inv_scale.to(dtype=latent.dtype)
+        std = self.std.to(dtype=latent.dtype)
+        mean = self.mean.to(dtype=latent.dtype)
+        z = latent * scale
+        z = z * std
+        z = z + mean
         B, _, T = z.shape
         z = z.reshape(B, self.latent_dim, self.factor, T).permute(0, 1, 3, 2).reshape(
             B, self.latent_dim, T * self.factor

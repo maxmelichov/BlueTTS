@@ -17,8 +17,12 @@ BLUE_SYNTH_MAX_CHUNK_LEN = 300
 # When ``pace_blend > 0``, duration is nudged toward this many seconds of audio per
 # text input token, so the same ``speed`` value tracks more closely across languages.
 DURATION_PACE_DPT_REF = 0.0625
-# Default blend automatically applied when inline ``<lang>...`` spans are present.
-DEFAULT_MIXED_PACE_BLEND = 0.25
+# Default blend for single-language synthesis — EN/DE DP runs ~0.045s/token vs
+# HE ~0.076s/token; pulling toward the ref slows the fast languages without
+# fully erasing the predictor.
+DEFAULT_PACE_BLEND = 0.5
+# Default blend when inline ``<lang>...`` spans are present.
+DEFAULT_MIXED_PACE_BLEND = 0.5
 # Default classifier-free guidance scale (vector field).
 DEFAULT_CFG_SCALE = 4.0
 
@@ -362,6 +366,57 @@ class ReferenceStyleEncoder:
         )
 
 
+def _load_latent_stats(onnx_dir: str, cfgs: dict) -> tuple[np.ndarray, np.ndarray, float]:
+    """Load mean/std/normalizer_scale for denorming VF latents before the vocoder."""
+    ns = float((cfgs.get("ttl", {}).get("normalizer", {}) or {}).get("scale", 1.0))
+    stats_path = os.path.join(onnx_dir, "stats.npz")
+    if os.path.exists(stats_path):
+        stats = np.load(stats_path)
+        mean = np.asarray(stats["mean"], dtype=np.float32)
+        std = np.asarray(stats["std"], dtype=np.float32)
+        if "normalizer_scale" in stats.files:
+            ns = float(np.asarray(stats["normalizer_scale"]).reshape(-1)[0])
+    else:
+        mean = np.zeros((1, cfgs["ttl"]["latent_dim"] * cfgs["ttl"]["chunk_compress_factor"], 1), np.float32)
+        std = np.ones_like(mean)
+    if mean.ndim == 1:
+        mean = mean.reshape(1, -1, 1)
+        std = std.reshape(1, -1, 1)
+    return mean, std, ns
+
+
+def _vocoder_stats_are_identity(model_path: str) -> bool:
+    """True when vocoder.onnx baked mean≈0 / std≈1 (known broken Hub export)."""
+    if not model_path or not os.path.exists(model_path):
+        return True
+    try:
+        import onnx
+        from onnx import numpy_helper
+
+        model = onnx.load(model_path)
+        vecs: list[np.ndarray] = []
+        for init in model.graph.initializer:
+            arr = numpy_helper.to_array(init)
+            if arr.size in (24, 144):
+                vecs.append(arr.astype(np.float64).reshape(-1))
+        for node in model.graph.node[:80]:
+            if node.op_type != "Constant":
+                continue
+            for attr in node.attribute:
+                if attr.name != "value":
+                    continue
+                arr = numpy_helper.to_array(attr.t)
+                if arr.size in (24, 144):
+                    vecs.append(arr.astype(np.float64).reshape(-1))
+        if not vecs:
+            return True
+        has_zero = any(float(np.abs(v).max()) < 1e-3 for v in vecs)
+        has_ones = any(float(np.abs(v - 1.0).max()) < 1e-3 for v in vecs)
+        return has_zero and has_ones
+    except Exception:
+        return True
+
+
 class TextToSpeech:
     def __init__(
         self,
@@ -374,6 +429,10 @@ class TextToSpeech:
         g2p: Optional[TextProcessor] = None,
         u_text: Optional[np.ndarray] = None,
         u_ref: Optional[np.ndarray] = None,
+        mean: Optional[np.ndarray] = None,
+        std: Optional[np.ndarray] = None,
+        normalizer_scale: float = 1.0,
+        denorm_before_vocoder: bool = True,
     ):
         self.cfgs = cfgs
         self.text_processor = text_processor
@@ -389,6 +448,10 @@ class TextToSpeech:
         self._u_text = u_text
         self._u_ref = u_ref
         self._vf_inputs = {i.name for i in vector_est_ort.get_inputs()}
+        self.mean = mean
+        self.std = std
+        self.normalizer_scale = float(normalizer_scale)
+        self.denorm_before_vocoder = bool(denorm_before_vocoder)
 
     def sample_noisy_latent(
         self, duration: np.ndarray
@@ -480,13 +543,21 @@ class TextToSpeech:
                 xt = v_uncond + cfg_scale * (v_cond - v_uncond)
             else:
                 xt, *_ = self.vector_est_ort.run(None, cond)
-        wav, *_ = self.vocoder_ort.run(None, {"latent": xt})
+        # Hub vocoder.onnx may bake identity mean/std; denorm VF latents in Python.
+        if (
+            self.denorm_before_vocoder
+            and self.mean is not None
+            and self.std is not None
+        ):
+            ns = self.normalizer_scale if self.normalizer_scale not in (0.0, 1.0) else 1.0
+            xt = (xt / ns) * self.std + self.mean
+        wav, *_ = self.vocoder_ort.run(None, {"latent": xt.astype(np.float32)})
         frame_len = self.base_chunk_size * self.chunk_compress_factor
         if wav.shape[-1] > 2 * frame_len:
             wav = wav[..., frame_len:-frame_len]
         if wav.ndim == 3 and wav.shape[1] == 1:
             wav = wav[:, 0, :]
-        return wav, dur_onnx
+        return wav.astype(np.float32), dur_onnx
 
     def __call__(
         self,
@@ -523,7 +594,8 @@ class TextToSpeech:
         seconds-per-text-token (``pace_dpt_ref`` or :data:`DURATION_PACE_DPT_REF`)
         so the same ``speed`` behaves more consistently across languages and in
         mixed inline-``<lang>`` text. If omitted (``None``), mixed text defaults
-        to :data:`DEFAULT_MIXED_PACE_BLEND`, while single-language defaults to 0.
+        to :data:`DEFAULT_MIXED_PACE_BLEND`, while single-language defaults to
+        :data:`DEFAULT_PACE_BLEND`.
         """
         phonemize = not text_is_phonemes
         if isinstance(text, list):
@@ -533,7 +605,7 @@ class TextToSpeech:
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
-            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
+            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else DEFAULT_PACE_BLEND)
         )
         if isinstance(text, list):
             assert isinstance(lang, list) and len(text) == len(lang), (
@@ -614,7 +686,7 @@ class TextToSpeech:
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
-            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
+            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else DEFAULT_PACE_BLEND)
         )
         phonemize = not text_is_phonemes
         if phonemize and self.g2p is not None:
@@ -674,6 +746,7 @@ def load_onnx_all(
     ort.InferenceSession,
     ort.InferenceSession,
     ort.InferenceSession,
+    str,
 ]:
     dp_onnx_path = os.path.join(onnx_dir, "duration_predictor.onnx")
     text_enc_onnx_path = os.path.join(onnx_dir, "text_encoder.onnx")
@@ -684,7 +757,7 @@ def load_onnx_all(
     text_enc_ort = load_onnx(text_enc_onnx_path, opts, providers)
     vector_est_ort = load_onnx(vector_est_onnx_path, opts, providers)
     vocoder_ort = load_onnx(vocoder_onnx_path, opts, providers)
-    return dp_ort, text_enc_ort, vector_est_ort, vocoder_ort
+    return dp_ort, text_enc_ort, vector_est_ort, vocoder_ort, vocoder_onnx_path
 
 
 def load_reference_style_encoder(
@@ -718,12 +791,17 @@ def load_reference_style_encoder(
 
 
 def load_cfgs(onnx_dir: str, config_path: str = "config/tts.json") -> dict:
-    # Prefer an explicit config next to the onnx files; otherwise fall back
-    # to the single repo-level config/tts.json.
-    local = os.path.join(onnx_dir, "tts.json")
-    cfg_path = local if os.path.exists(local) else config_path
-    with open(cfg_path, "r") as f:
-        return json.load(f)
+    """Load TTS config; prefer ``onnx_dir/tts.json`` when present."""
+    candidates = [
+        os.path.join(onnx_dir, "tts.json"),
+        config_path,
+        os.path.join(onnx_dir, config_path),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            with open(path) as f:
+                return json.load(f)
+    raise FileNotFoundError(f"No TTS config found in {candidates}")
 
 
 def load_text_processor(onnx_dir: str = "") -> UnicodeProcessor:
@@ -772,14 +850,20 @@ def load_text_to_speech(
         providers = ["CPUExecutionProvider"]
         print(f"Using CPU for inference (intra_op_threads={n_threads})")
     cfgs = load_cfgs(onnx_dir, config_path)
-    dp_ort, text_enc_ort, vector_est_ort, vocoder_ort = load_onnx_all(
+    dp_ort, text_enc_ort, vector_est_ort, vocoder_ort, vocoder_path = load_onnx_all(
         onnx_dir, opts, providers
     )
     text_processor = load_text_processor(onnx_dir)
     g2p = TextProcessor(renikud_path=phonikud_path)
+    mean, std, ns = _load_latent_stats(onnx_dir, cfgs)
+    denorm = _vocoder_stats_are_identity(vocoder_path)
     return TextToSpeech(
         cfgs, text_processor, dp_ort, text_enc_ort, vector_est_ort, vocoder_ort,
         g2p=g2p,
+        mean=mean,
+        std=std,
+        normalizer_scale=ns,
+        denorm_before_vocoder=denorm,
     )
 
 

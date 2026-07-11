@@ -10,10 +10,10 @@ uv sync --extra export
 
 ## Weights (safetensors) — **required** for new voice and ONNX
 
-Exporting a **voice** from a reference clip or **ONNX** graphs from PyTorch both load the same trained checkpoints. Those weights live as **`.safetensors`** files (plus stats) in the [notmax123/blue-v2](https://huggingface.co/notmax123/blue-v2) model repo. Download them once, for example into `pt_models/`:
+Exporting a **voice** from a reference clip or **ONNX** graphs from PyTorch both load the same trained checkpoints. Those weights live as **`.safetensors`** files (plus stats) in the [notmax123/BlueV3](https://huggingface.co/notmax123/BlueV3) model repo. Download them once, for example into `pt_models/`:
 
 ```bash
-uv run hf download notmax123/blue-v2 --repo-type model --local-dir ./pt_models
+uv run hf download notmax123/BlueV3 --repo-type model --local-dir ./pt_models
 ```
 
 You will need (filenames as on the Hub, paths passed via flags):
