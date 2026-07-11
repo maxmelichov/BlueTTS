@@ -42,9 +42,11 @@ class TRTEngine:
     """Thin wrapper around a serialized TensorRT engine."""
 
     def __init__(self, engine_path: str):
-        runtime = trt.Runtime(_LOGGER)
+        self.runtime = trt.Runtime(_LOGGER)
         with open(engine_path, "rb") as f:
-            self.engine = runtime.deserialize_cuda_engine(f.read())
+            self.engine = self.runtime.deserialize_cuda_engine(f.read())
+        if self.engine is None:
+            raise RuntimeError(f"Failed to deserialize TensorRT engine: {engine_path}")
         self.context = self.engine.create_execution_context()
         self.stream = torch.cuda.Stream()
         self._input_names = self._names(trt.TensorIOMode.INPUT)
@@ -121,6 +123,9 @@ def load_cfgs(config_path: str) -> dict:
 
 def load_engine(trt_dir: str, name: str, required: bool = True) -> Optional[TRTEngine]:
     path = os.path.join(trt_dir, name)
+    legacy_path = f"{path[:-4]}.slim.trt" if path.endswith(".trt") else f"{path}.slim.trt"
+    if not os.path.exists(path) and os.path.exists(legacy_path):
+        path = legacy_path
     if not os.path.exists(path):
         if required:
             raise FileNotFoundError(f"TRT engine not found: {path}")
@@ -128,7 +133,11 @@ def load_engine(trt_dir: str, name: str, required: bool = True) -> Optional[TRTE
     return TRTEngine(path)
 
 
-def load_stats(trt_dir: str, device: str) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], float]:
+def load_stats(
+    trt_dir: str,
+    device: str,
+    default_normalizer_scale: float = 1.0,
+) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], float]:
     for sp in (
         os.path.join(trt_dir, "stats.npz"),
         "onnx_models/stats.npz",
@@ -145,14 +154,18 @@ def load_stats(trt_dir: str, device: str) -> Tuple[Optional[torch.Tensor], Optio
                 std = std.reshape(1, -1, 1)
             m_t = torch.from_numpy(mean).to(device)
             s_t = torch.from_numpy(std).to(device)
-            ns = 1.0
+            ns = default_normalizer_scale
             if "normalizer_scale" in s.files:
                 ns = float(s["normalizer_scale"].item() if s["normalizer_scale"].ndim == 0 else s["normalizer_scale"][0])
             print(f"[INFO] Loaded stats from {sp}")
             return m_t, s_t, ns
         s = torch.load(sp, map_location=device)
-        return s["mean"].view(1, -1, 1).to(device), s["std"].view(1, -1, 1).to(device), 1.0
-    return None, None, 1.0
+        return (
+            s["mean"].view(1, -1, 1).to(device),
+            s["std"].view(1, -1, 1).to(device),
+            default_normalizer_scale,
+        )
+    return None, None, default_normalizer_scale
 
 
 def load_uncond(trt_dir: str, device: str) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
@@ -248,6 +261,7 @@ class BlueTRT:
         self.latent_dim = int(ttl.get("latent_dim", 24))
         self.chunk_compress_factor = int(ttl.get("chunk_compress_factor", 6))
         self.hop_length = int(spec.get("hop_length", 512))
+        self.base_chunk_size = int(ae.get("base_chunk_size", self.hop_length))
         self.sample_rate = int(ae.get("sample_rate", 44100))
         self.compressed_channels = self.latent_dim * self.chunk_compress_factor
 
@@ -255,18 +269,24 @@ class BlueTRT:
         self._text_enc = load_engine(trt_dir, "text_encoder.trt")
         self._dp = load_engine(trt_dir, "duration_predictor.trt", required=False)
         self._dp_style = load_engine(trt_dir, "duration_predictor_style.trt", required=False)
+        if self._dp_style is None and self._dp is not None and "style_dp" in self._dp.input_names():
+            self._dp_style = self._dp
         self._vf = load_engine(trt_dir, "vector_estimator.trt")
         self._vocoder = load_engine(trt_dir, "vocoder.trt")
 
         vf_out = set(self._vf.output_names())
+        self._vf_inputs = set(self._vf.input_names())
         self._vf_has_denoised = "denoised_latent" in vf_out
         self._vf_has_velocity = "velocity" in vf_out
+        self._vf_has_native_cfg = "cfg_scale" in self._vf_inputs
         if not (self._vf_has_denoised or self._vf_has_velocity):
             raise ValueError(f"Unsupported vector_estimator outputs: {vf_out}")
 
-        self.mean, self.std, ns_from_stats = load_stats(trt_dir, device)
-        if ns_from_stats != 1.0:
-            self.normalizer_scale = ns_from_stats
+        self.mean, self.std, self.normalizer_scale = load_stats(
+            trt_dir,
+            device,
+            default_normalizer_scale=self.normalizer_scale,
+        )
         if self.mean is not None:
             self.compressed_channels = int(self.mean.shape[1])
 
@@ -447,7 +467,9 @@ class BlueTRT:
                     np.array([val], dtype=np.float32), tm_np, pace_blend, ref
                 )
                 val = float(d[0])
-                T_lat = int(np.round(val / max(self.speed, 1e-6)))
+                duration_sec = val / max(self.speed, 1e-6)
+                packet_samples = self.base_chunk_size * self.chunk_compress_factor
+                T_lat = max(1, int(np.ceil(duration_sec * self.sample_rate / packet_samples)))
 
         if T_lat is None and z_ref_norm is not None and self._dp is not None:
             ref_mask = torch.ones(1, 1, z_ref_norm.shape[2], dtype=torch.float32, device=self.device)
@@ -458,15 +480,15 @@ class BlueTRT:
                     np.array([val], dtype=np.float32), tm_np, pace_blend, ref
                 )
                 val = float(d[0])
-                T_lat = int(np.round(val / max(self.speed, 1e-6)))
+                duration_sec = val / max(self.speed, 1e-6)
+                packet_samples = self.base_chunk_size * self.chunk_compress_factor
+                T_lat = max(1, int(np.ceil(duration_sec * self.sample_rate / packet_samples)))
 
         if T_lat is None:
             T_lat = int(text_ids.shape[1] * 1.3)
 
-        txt_len = int(text_mask.sum())
-        T_cap = max(20, min(txt_len * 3 + 20, 600))
-        T_lat = min(max(int(T_lat), 1), T_cap, 800, 2048 // self.chunk_compress_factor)
-        return max(10, T_lat)
+        T_lat = min(max(int(T_lat), 1), 2048)
+        return max(1, T_lat)
 
     def _vf_feed(
         self,
@@ -478,7 +500,7 @@ class BlueTRT:
         step: int,
         cfg_scale: float,
     ) -> Dict[str, torch.Tensor]:
-        vf_in = set(self._vf.input_names())
+        vf_in = self._vf_inputs
         total_t = torch.tensor([float(self.steps)], dtype=torch.float32, device=self.device)
         step_t = torch.tensor([float(step)], dtype=torch.float32, device=self.device)
         feed: Dict[str, torch.Tensor] = {"noisy_latent": noisy}
@@ -510,7 +532,13 @@ class BlueTRT:
         x = torch.randn(1, self.compressed_channels, T_lat, dtype=torch.float32, device=self.device)
         latent_mask = torch.ones(1, 1, T_lat, dtype=torch.float32, device=self.device)
 
-        use_cfg = cfg_scale != 1.0 and self._u_text is not None and self._u_ref is not None
+        use_cfg = (
+            not self._vf_has_native_cfg
+            and not self._vf_has_denoised
+            and cfg_scale != 1.0
+            and self._u_text is not None
+            and self._u_ref is not None
+        )
         u_text_mask = torch.ones(1, 1, 1, dtype=torch.float32, device=self.device) if use_cfg else None
 
         for s in range(self.steps):
@@ -561,3 +589,18 @@ class BlueTRT:
             wav_np[:fs] *= np.linspace(0.0, 1.0, fs, dtype=np.float32)
             wav_np[-fs:] *= np.linspace(1.0, 0.0, fs, dtype=np.float32)
         return wav_np
+
+
+def load_text_to_speech(
+    trt_dir: str,
+    config_path: str = "config/tts.json",
+    style_json: Optional[str] = None,
+    **kwargs: Any,
+) -> BlueTRT:
+    """Construct :class:`BlueTRT` with the same entry-point shape as Blue ONNX."""
+    return BlueTRT(
+        trt_dir=trt_dir,
+        config_path=config_path,
+        style_json=style_json,
+        **kwargs,
+    )

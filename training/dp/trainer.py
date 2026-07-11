@@ -94,7 +94,7 @@ def train_duration_predictor(
     checkpoint_dir: str = "checkpoints/duration_predictor",
     ae_checkpoint: str = "checkpoints/ae/blue_codec.safetensors",
     stats_path: str = "stats_multilingual.pt",
-    config_path: str = "configs/tts.json",
+    config_path: str = "config/tts.json",
     max_steps: int = 1000,
     batch_size: int = 64,
     lr: float = 1e-4,
@@ -114,6 +114,9 @@ def train_duration_predictor(
     style_encoder_cfg = dp_cfg.get("style_encoder", {})
     predictor_cfg = dp_cfg.get("predictor", {})
     compressed_channels = latent_dim * chunk_compress_factor
+    ae_spec_cfg = full_cfg["ae"]["encoder"].get("spec_processor", {})
+    sample_rate = int(ae_spec_cfg.get("sample_rate", 44100))
+    hop_length = int(ae_spec_cfg.get("hop_length", 512))
     
     print(f"\n{'='*60}")
     print(f"DP Config loaded from: {config_path}")
@@ -123,6 +126,7 @@ def train_duration_predictor(
     print(f"  compressed_channels={compressed_channels}")
     print(f"  normalizer_scale={normalizer_scale}")
     print(f"  style_dp={style_dp}, style_dim={style_dim}")
+    print(f"  sample_rate={sample_rate}, hop_length={hop_length}")
     print(f"{'='*60}\n")
     
     mel_spec, ae_encoder, model = _build_dp_models(
@@ -130,7 +134,11 @@ def train_duration_predictor(
     )
     
     optimizer = AdamW(model.parameters(), lr=lr)
-    dataloader = get_dp_dataloader(metadata_path, batch_size)
+    dataloader = get_dp_dataloader(
+        metadata_path,
+        batch_size,
+        sample_rate=sample_rate,
+    )
     
     if not os.path.exists(stats_path):
         print(f"Error: Stats file {stats_path} not found.")
@@ -174,7 +182,7 @@ def train_duration_predictor(
             B, C, T_lat = z.shape
 
             # Compute valid latent length from waveform length
-            valid_mel_len = lengths.to(device).float() / 512
+            valid_mel_len = lengths.to(device).float() / hop_length
             valid_z_len = (valid_mel_len / chunk_compress_factor).ceil().long().clamp(min=1, max=T_lat)
 
             # -------------------------------------------------
@@ -220,14 +228,19 @@ def train_duration_predictor(
             )
             if global_step == 0:
                 print(f"[Sanity] Pred shape: {log_pred.shape}") # Should be [B]
-                print("raw speaker examples:", speaker_ids[:10])
                 print("mapped speaker examples:", speaker_ids[:10])
                 print("unique mapped:", speaker_ids.unique())
 
             # -------------------------------------------------
             # 4) Target and loss (in LOG domain)
             # -------------------------------------------------
-            dur_gt = valid_z_len.float() * (512 * 6) / 44100.0  # [B] (seconds)
+            # One compressed latent frame spans `hop_length *
+            # chunk_compress_factor` waveform samples.
+            dur_gt = (
+                valid_z_len.float()
+                * (hop_length * chunk_compress_factor)
+                / sample_rate
+            )  # [B] (seconds)
             log_gt = torch.log(dur_gt.clamp(min=1e-5))
 
             # L1 loss on log duration

@@ -9,7 +9,13 @@ import torch.nn.functional as F
 import string
 
 # Ensure these local modules exist in your project structure
-from data.text_vocab import text_to_indices, VOCAB_LIST, normalize_text
+from data.text_vocab import (
+    text_to_indices,
+    VOCAB_LIST,
+    normalize_text,
+    NONVERBAL_TOKEN_ID_MIN,
+    NONVERBAL_TOKEN_ID_MAX,
+)
 from data.audio_utils import ensure_sr
 
 # espeak language codes for non-Hebrew languages
@@ -38,12 +44,20 @@ class Text2LatentDataset(Dataset):
         max_wav_len: int | None = None,      # e.g., 44100 * 20
         max_text_len: int | None = None,
         default_lang: str = "he",         # Fallback language if CSV has no 'lang' column
+        cross_ref_prob: float = 0.0,
+        nonverbal_repeat: int = 1,
     ):
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_wav_len = max_wav_len
         self.max_text_len = max_text_len
         self.default_lang = default_lang
+        if not 0.0 <= cross_ref_prob <= 1.0:
+            raise ValueError(f"cross_ref_prob must be in [0, 1], got {cross_ref_prob}")
+        if nonverbal_repeat < 1:
+            raise ValueError(f"nonverbal_repeat must be at least 1, got {nonverbal_repeat}")
+        self.cross_ref_prob = cross_ref_prob
+        self.nonverbal_repeat = nonverbal_repeat
 
         # --- 1. Load Metadata ---
         if not os.path.exists(metadata_path):
@@ -150,6 +164,22 @@ class Text2LatentDataset(Dataset):
             mask_wav = self.df.apply(self._is_duration_ok, axis=1)
             self.df = self.df[mask_wav].reset_index(drop=True)
 
+        # Repeat utterances containing reserved nonverbal tokens so standard
+        # samplers also see enough breaths/laughs/etc. The text is already
+        # normalized and phonemized at this point.
+        self.df["_has_nonverbal"] = self.df["text"].map(
+            lambda text: any(
+                NONVERBAL_TOKEN_ID_MIN <= token <= NONVERBAL_TOKEN_ID_MAX
+                for token in text_to_indices(str(text))
+            )
+        )
+        if self.nonverbal_repeat > 1 and self.df["_has_nonverbal"].any():
+            nonverbal_rows = self.df[self.df["_has_nonverbal"]]
+            self.df = pd.concat(
+                [self.df] + [nonverbal_rows] * (self.nonverbal_repeat - 1),
+                ignore_index=True,
+            )
+
         # --- 4. Speaker ID & Strict WER Filter ---
         self._assign_speaker_ids()
         
@@ -199,6 +229,14 @@ class Text2LatentDataset(Dataset):
     @property
     def speaker_ids(self):
         return self.df['speaker_id'].values
+
+    @property
+    def langs(self):
+        return self.df["lang"].astype(str).values
+
+    @property
+    def nonverbal_mask(self):
+        return self.df["_has_nonverbal"].to_numpy(dtype=bool)
 
     def __len__(self):
         return len(self.df)
@@ -296,8 +334,13 @@ class Text2LatentDataset(Dataset):
         
         # 2. Reference Audio Strategy (Zero-Shot Training)
         same_speaker_indices = self.speaker_to_indices.get(speaker_id, [])
-        # Cross-utterance reference: pick a different utterance from same speaker
-        use_cross_ref = len(same_speaker_indices) > 1
+        # Cross references are opt-in. Self references provide the paper's
+        # masked reconstruction objective and avoid leaking a different
+        # utterance by default.
+        use_cross_ref = (
+            len(same_speaker_indices) > 1
+            and np.random.random() < self.cross_ref_prob
+        )
         
         if use_cross_ref:
             # O(1) rejection sampling — avoids building an O(N) exclusion list

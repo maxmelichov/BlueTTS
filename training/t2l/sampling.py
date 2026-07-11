@@ -18,10 +18,10 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
-def build_reference_only(z_ref_input, valid_z_ref_len, device, max_frames=72):
+def build_reference_only(z_ref_input, valid_z_ref_len, device, max_frames=256):
     """
-    Left-align reference latents for inference. Crops to ``max_frames`` (default 72 ≈ 5s
-    at ~14.35 Hz) to match training. Returns ``(z_ref_left, ref_mask_left)``.
+    Left-align reference latents for inference. Crops to ``max_frames`` (default 256)
+    to stay within the training crop range. Returns ``(z_ref_left, ref_mask_left)``.
     """
     B, C, T_ref = z_ref_input.shape
     if max_frames is not None and T_ref > max_frames:
@@ -162,12 +162,13 @@ def sample_audio(
     speed=1.0,
     style_ttl=None,
     style_dp=None,
-    uncond_params=None,
     cfg_scale=1.0,
     # Config-derived params (from ttl section of tts.json)
     latent_dim=24,
     chunk_compress_factor=6,
     normalizer_scale=1.0,
+    return_duration=False,
+    drop_last_frame=True,
 ):
     """
     Plain flow-matching sampling:
@@ -210,6 +211,7 @@ def sample_audio(
         )
 
         duration = torch.exp(dur_pred) / speed
+        duration_out = duration
 
         sample_rate = 44100
         base_chunk_size = 512
@@ -224,6 +226,7 @@ def sample_audio(
         T = latent_mask.shape[2]
     else:
         dur_pred = None
+        duration_out = None
         if z_ref is not None:
             T = z_ref.shape[2]
         else:
@@ -262,56 +265,25 @@ def sample_audio(
     # 4. Sampler init
     # -------------------------
     x = xt
-    dt = 1.0 / steps
+    if hasattr(vf_estimator, "cfg_scale"):
+        vf_estimator.cfg_scale = cfg_scale
 
     # -------------------------
     # 5. Euler integration
     # -------------------------
     for i in range(steps):
-        t_val = i / steps
-        t = torch.full((B,), t_val, device=device)
-
-        # Conditional velocity
+        cur = torch.full((B,), float(i), device=device)
+        total = torch.full((B,), float(steps), device=device)
         x_in = x * latent_mask # Zero out padding before forward for hygiene
-        v_cond = vf_estimator(
+        x = vf_estimator(
             noisy_latent=x_in,
-            text_emb=h_text,      # [B, 256, T_txt]
-            style_ttl=ref_values, # [B, 50, 256] (values)
+            text_emb=h_text,
+            style_ttl=ref_values,
             latent_mask=latent_mask,
             text_mask=text_mask,
-            current_step=t,
-            total_step=torch.ones_like(t),
-            return_velocity=True,
+            current_step=cur,
+            total_step=total,
         )
-
-        if cfg_scale > 1.0 and uncond_params is not None:
-            # Unconditional velocity
-            if hasattr(uncond_params, 'module'):
-                u_text = uncond_params.module.u_text.expand(B, -1, T_txt)
-                u_ref = uncond_params.module.u_ref.expand(B, -1, -1)
-            else:
-                u_text = uncond_params.u_text.expand(B, -1, T_txt)
-                u_ref = uncond_params.u_ref.expand(B, -1, -1)
-
-            v_uncond = vf_estimator(
-                noisy_latent=x_in,
-                text_emb=u_text,
-                style_ttl=u_ref,
-                latent_mask=latent_mask,
-                text_mask=text_mask,
-                current_step=t,
-                total_step=torch.ones_like(t),
-                return_velocity=True,
-            )
-            v = v_uncond + cfg_scale * (v_cond - v_uncond)
-        else:
-            v = v_cond
-
-        # Stabilize boundaries: apply mask to velocity
-        v = v * latent_mask
-
-        x = x + v * dt
-
         x = x * latent_mask  # Zero out padded frames per-sample
     # -------------------------
     # 6. Decode to waveform
@@ -333,14 +305,22 @@ def sample_audio(
 
     print("[DBG] z_pred shape post-decompress:", z_pred.shape)
 
-    wav_pred = ae_decoder(z_pred)                 # [B, 1, T_wav]
+    if hasattr(ae_decoder, "decode_generated"):
+        wav_pred = ae_decoder.decode_generated(
+            z_pred,
+            drop_last_compressed_frame=drop_last_frame,
+            chunk_compress_factor=chunk_compress_factor,
+        )
+    else:
+        wav_pred = ae_decoder(z_pred)
 
     print("[DBG] wav_pred shape:", wav_pred.shape)
 
     # 7. Enforce exact length contract
     # Contract: 1 latent frame = hop_length * chunk_compress_factor samples
-    frame_len = 512 * chunk_compress_factor
-    # Truncate to exact expected frames
-    wav_pred = wav_pred[..., frame_len:-frame_len]
-
+    if not hasattr(ae_decoder, "decode_generated"):
+        frame_len = 512 * chunk_compress_factor
+        wav_pred = wav_pred[..., frame_len:-frame_len]
+    if return_duration:
+        return wav_pred, duration_out
     return wav_pred

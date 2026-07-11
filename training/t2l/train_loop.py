@@ -18,15 +18,23 @@ from tqdm import tqdm
 
 from training.t2l.data_module import Text2LatentDataset, collate_text2latent
 from training.data.audio_utils import ensure_sr
-from training.data.text_vocab import normalize_text, text_to_indices_multilang
+from training.data.text_vocab import (
+    normalize_text,
+    text_to_indices_multilang,
+    NONVERBAL_TOKEN_ID_MIN,
+    NONVERBAL_TOKEN_ID_MAX,
+)
 from training.utils import compress_latents
 from training.t2l.builders import build_models
 from training.t2l.models.reference_encoder import ReferenceEncoder
 from training.t2l.cfg_utils import (
     _latest_ckpt_in_dir,
     _validate_ttl_config,
+    dedupe_parameters,
     ddp_state_dict,
+    pop_and_load_uncond_tokens,
     seed_worker,
+    tie_shared_style_key,
     unwrap_ddp,
 )
 from training.t2l.sampling import build_reference_only, build_reference_from_latents, sample_audio
@@ -78,6 +86,21 @@ _PHRASE_ROWS: list[tuple[str, str | None, str, list[str]]] = [
 ]
 
 
+def nonverbal_batch_loss_weights(text_ids: torch.Tensor, boost: float) -> torch.Tensor:
+    """Return a per-utterance loss multiplier for nonverbal-token examples."""
+    if boost <= 1.0:
+        return torch.ones(text_ids.shape[0], device=text_ids.device)
+    has_nonverbal = (
+        (text_ids >= NONVERBAL_TOKEN_ID_MIN)
+        & (text_ids <= NONVERBAL_TOKEN_ID_MAX)
+    ).any(dim=1)
+    return torch.where(
+        has_nonverbal,
+        torch.full((text_ids.shape[0],), boost, device=text_ids.device),
+        torch.ones(text_ids.shape[0], device=text_ids.device),
+    )
+
+
 def _phonemize_eval_with_espeak(espeak_lang: str, label: str, lines: list[str]) -> list[str]:
     try:
         from phonemizer.backend import EspeakBackend
@@ -110,8 +133,8 @@ def train(
     checkpoint_dir="checkpoints/text2latent",
     ae_checkpoint="checkpoints/ae/ae_latest.pt",
     stats_path="stats_multilingual.pt",
-    config_path="configs/tts.json",
-    max_steps=1_000_000,
+    config_path="config/tts.json",
+    max_steps=10_000_000,
     batch_size=14,
     lr=5e-4,
     Ke=None,
@@ -149,8 +172,8 @@ def train(
         log_dir = os.path.join(checkpoint_dir, "logs")
 
     if finetune:
-        lr = 2.5e-4
-        spfm_start_override = 10_000
+        lr = 5e-4
+        spfm_start_override = 20_000
         if rank == 0:
             print(f"[Finetune Mode] lr={lr}, SPFM warm-up offset={spfm_start_override} steps (after resume)")
     else:
@@ -163,6 +186,7 @@ def train(
         full_config = json.load(f)
     ttl_cfg = full_config["ttl"]
     ae_cfg_json = full_config.get("ae", {})
+    dp_cfg = full_config.get("dp", {}) if isinstance(full_config.get("dp"), dict) else {}
 
     _validate_ttl_config(ttl_cfg)
 
@@ -174,11 +198,33 @@ def train(
     normalizer_scale = ttl_cfg["normalizer"]["scale"]
     sigma_min = ttl_cfg["flow_matching"]["sig_min"]
 
+    nv_cfg = ttl_cfg.get("nonverbal_tokens", {})
+    nv_sample_weight = float(nv_cfg.get("sample_weight", 10.0))
+    nv_loss_weight = float(nv_cfg.get("loss_weight", 6.0))
+    nv_dataset_repeat = int(nv_cfg.get("dataset_repeat", 8))
+    lang_sampling = {
+        language: float(weight)
+        for language, weight in ttl_cfg.get("lang_sampling", {}).items()
+        if float(weight) != 1.0
+    }
+
     um_cfg = ttl_cfg["uncond_masker"]
     prob_both_uncond = um_cfg["prob_both_uncond"]
     prob_text_uncond = um_cfg["prob_text_uncond"]
     if puncond is None:
         puncond = prob_both_uncond + prob_text_uncond
+    if Ke <= 0:
+        raise ValueError(f"Ke must be positive, got {Ke}")
+    if accumulation_steps <= 0:
+        raise ValueError(
+            f"accumulation_steps must be positive, got {accumulation_steps}"
+        )
+    if not (0.0 <= prob_both_uncond <= puncond <= 1.0):
+        raise ValueError(
+            "CFG dropout probabilities must satisfy "
+            f"0 <= prob_both_uncond ({prob_both_uncond}) <= "
+            f"total puncond ({puncond}) <= 1"
+        )
 
     if rank == 0:
         print(
@@ -186,6 +232,8 @@ def train(
             f"ccf={chunk_compress_factor} | Ke={Ke} (config {cfg_Ke}) | "
             f"normalizer={normalizer_scale} | sig_min={sigma_min}\n"
             f"  uncond: prob_both={prob_both_uncond} prob_text={prob_text_uncond} total_puncond={puncond}\n"
+            f"  nonverbal: sample_weight={nv_sample_weight} loss_weight={nv_loss_weight} repeat={nv_dataset_repeat}\n"
+            f"  language sampling: {lang_sampling or 'uniform'}\n"
             f"{'=' * 60}\n"
         )
 
@@ -229,8 +277,8 @@ def train(
 
     ae_sample_rate = ae_cfg_json.get('sample_rate', 44100)
 
-    text_encoder, reference_encoder, vf_estimator, uncond_params, dp_model, ae_encoder, ae_decoder, mel_spec, hop_length = build_models(
-        ttl_cfg, ae_cfg_json, ae_sample_rate, device
+    text_encoder, reference_encoder, vf_estimator, dp_model, ae_encoder, ae_decoder, mel_spec, hop_length = build_models(
+        ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_cfg=dp_cfg
     )
 
     if os.path.exists(ae_checkpoint):
@@ -262,11 +310,9 @@ def train(
     ae_decoder.eval().requires_grad_(False)
     mel_spec.eval()
 
-    u_text, u_ref = uncond_params.u_text, uncond_params.u_ref
-
-    params = list(text_encoder.parameters()) + list(reference_encoder.parameters()) + \
-             list(vf_estimator.parameters()) + list(uncond_params.parameters())
-    optimizer = AdamW(params, lr=lr)
+    tie_shared_style_key(text_encoder, vf_estimator)
+    params = dedupe_parameters(vf_estimator, text_encoder, reference_encoder)
+    optimizer = AdamW(params, lr=lr, betas=(0.9, 0.999), weight_decay=1e-2)
 
     global_step = 0
     scheduler_state = None
@@ -285,7 +331,14 @@ def train(
         for mod, name in [(vf_estimator, 'vf_estimator'), (text_encoder, 'text_encoder')]:
             if name in checkpoint:
                 model_state = mod.state_dict()
-                ckpt_state = checkpoint[name]
+                ckpt_state = dict(checkpoint[name])
+                if name == "vf_estimator":
+                    pop_and_load_uncond_tokens(
+                        vf_estimator,
+                        ckpt_state,
+                        checkpoint=checkpoint,
+                        text_encoder=text_encoder,
+                    )
                 remap = getattr(mod, "remap_legacy_state_dict", None)
                 if remap is not None:
                     ckpt_state = remap(ckpt_state)
@@ -302,10 +355,7 @@ def train(
         if 'reference_encoder' in checkpoint:
             reference_state = ReferenceEncoder.remap_legacy_state_dict(checkpoint['reference_encoder'])
             reference_encoder.load_state_dict(reference_state, strict=False)
-        if 'u_text' in checkpoint: u_text.data = checkpoint['u_text']
-        if 'u_ref' in checkpoint: u_ref.data = checkpoint['u_ref']
-
-        optimizer = AdamW(params, lr=lr)
+        optimizer = AdamW(params, lr=lr, betas=(0.9, 0.999), weight_decay=1e-2)
         if 'optimizer' in checkpoint and not (finetune or shapes_changed):
             try:
                 optimizer.load_state_dict(checkpoint['optimizer'])
@@ -327,20 +377,39 @@ def train(
                     )
         if 'scheduler' in checkpoint and not shapes_changed: scheduler_state = checkpoint['scheduler']
 
-    scheduler_last_epoch = -1 if finetune else (global_step - 1)
-    if scheduler_last_epoch != -1:
-        for pg in optimizer.param_groups: pg.setdefault('initial_lr', pg['lr'])
+    tie_shared_style_key(text_encoder, vf_estimator)
 
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[300_000, 600_000], gamma=0.5, last_epoch=scheduler_last_epoch)
+    milestones = [300_000, 600_000]
+    gamma = 0.5
+    for param_group in optimizer.param_groups:
+        param_group["initial_lr"] = lr
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        optimizer, milestones=milestones, gamma=gamma, last_epoch=-1
+    )
+    scheduler_restored = False
     if scheduler_state and not finetune:
-        try: scheduler.load_state_dict(scheduler_state)
-        except: pass
+        try:
+            scheduler.load_state_dict(scheduler_state)
+            for param_group, restored_lr in zip(
+                optimizer.param_groups, scheduler.get_last_lr()
+            ):
+                param_group["lr"] = restored_lr
+            scheduler_restored = True
+        except Exception as exc:
+            if rank == 0:
+                print(f"Warning: Failed to load scheduler state: {exc}")
+    if not finetune and global_step > 0 and not scheduler_restored:
+        decay_count = sum(global_step >= milestone for milestone in milestones)
+        resumed_lrs = [lr * (gamma ** decay_count)] * len(optimizer.param_groups)
+        for param_group, resumed_lr in zip(optimizer.param_groups, resumed_lrs):
+            param_group["lr"] = resumed_lr
+        scheduler.last_epoch = global_step
+        scheduler._last_lr = resumed_lrs
 
     if dist.is_initialized():
         text_encoder = DDP(text_encoder, device_ids=[local_rank], find_unused_parameters=True)
         reference_encoder = DDP(reference_encoder, device_ids=[local_rank], find_unused_parameters=True)
         vf_estimator = DDP(vf_estimator, device_ids=[local_rank], find_unused_parameters=True)
-        uncond_params = DDP(uncond_params, device_ids=[local_rank], find_unused_parameters=True)
 
     val_z_ref = None
     val_ref_enc_mask = None
@@ -356,6 +425,8 @@ def train(
         sample_rate=ae_sample_rate,
         max_wav_len=ae_sample_rate * 20,
         max_text_len=300,
+        cross_ref_prob=0.0,
+        nonverbal_repeat=nv_dataset_repeat,
     )
     if rank == 0:
         print(f"Dataset loaded with {len(dataset)} samples.")
@@ -370,10 +441,27 @@ def train(
         freq = dict(zip(unique_speakers, counts))
         print(f"Speaker counts: {freq}")
         
-        sample_weights = np.array([1.0 / freq[sid] for sid in speaker_ids])
+        sample_weights = np.array(
+            [1.0 / freq[sid] for sid in speaker_ids], dtype=np.float64
+        )
+        if lang_sampling:
+            langs = dataset.langs
+            for language, weight in lang_sampling.items():
+                sample_weights[langs == language] *= weight
+        if nv_sample_weight > 1.0 and dataset.nonverbal_mask.any():
+            sample_weights *= np.where(
+                dataset.nonverbal_mask, nv_sample_weight, 1.0
+            )
         sample_weights = sample_weights / sample_weights.sum()
         weights = torch.from_numpy(sample_weights).double()
         sampler = WeightedRandomSampler(weights, num_samples=len(dataset), replacement=True)
+        if rank == 0 and lang_sampling:
+            print(f"[Lang sampling] weights={lang_sampling}")
+        if rank == 0 and nv_sample_weight > 1.0:
+            print(
+                f"[NV tokens] sampler boost x{nv_sample_weight} on "
+                f"{int(dataset.nonverbal_mask.sum())} utterances"
+            )
     
     dataloader = DataLoader(
         dataset, 
@@ -553,8 +641,6 @@ def train(
                 text_masks=text_masks,
                 valid_z_len=valid_z_len,
                 vf_estimator=vf_estimator,
-                u_text=u_text,
-                u_ref=u_ref,
                 sigma_min=sigma_min,
                 device=device,
                 B=B,
@@ -593,38 +679,32 @@ def train(
             force_text_uncond = force_text_uncond | is_dirty
             force_style_uncond = force_style_uncond | is_dirty
 
-            mask_text_uncond = force_text_uncond.view(-1, 1, 1).float()
-            mask_text_cond = 1.0 - mask_text_uncond
-            mask_style_uncond = force_style_uncond.view(-1, 1, 1).float()
-            mask_style_cond = 1.0 - mask_style_uncond
-
-            u_text_padded = F.pad(u_text, (0, T_txt - 1))
-            u_text_batch = u_text_padded.expand(B_eff, -1, -1)
-            h_context = h_text_exp * mask_text_cond + u_text_batch * mask_text_uncond
-
-            mask_uncond_valid = torch.zeros_like(text_masks_base_exp)
-            mask_uncond_valid[:, :, 0] = 1.0
-            text_mask_final = text_masks_base_exp * mask_text_cond + mask_uncond_valid * mask_text_uncond
-
-            u_ref_batch = u_ref.expand(B_eff, -1, -1)
-            ref_values_final = ref_values_exp * mask_style_cond + u_ref_batch * mask_style_uncond
-
             x_t_in = x_t * latent_mask_exp
             v_pred = vf_estimator(
                 noisy_latent=x_t_in,
-                text_emb=h_context,
-                style_ttl=ref_values_final,
+                text_emb=h_text_exp,
+                style_ttl=ref_values_exp,
                 latent_mask=latent_mask_exp,
-                text_mask=text_mask_final,
+                text_mask=text_masks_base_exp,
                 current_step=t,
                 total_step=torch.ones_like(t),
+                drop_text=force_text_uncond,
+                drop_style=force_style_uncond,
                 return_velocity=True,
             )
 
             final_mask = latent_mask_exp * target_loss_mask_exp
             loss_raw = F.l1_loss(v_pred, v_target, reduction='none')
             mask_ct = final_mask.expand(-1, C, -1)
-            loss = (loss_raw * mask_ct).sum() / (mask_ct.sum() + 1e-8)
+            per_sample_loss = (loss_raw * mask_ct).sum(dim=(1, 2)) / (
+                mask_ct.sum(dim=(1, 2)).clamp_min(1.0)
+            )
+            nv_weights = nonverbal_batch_loss_weights(text_ids, nv_loss_weight)
+            if Ke > 1:
+                nv_weights = nv_weights.repeat_interleave(Ke)
+            loss = (per_sample_loss * nv_weights).sum() / (
+                nv_weights.sum() + 1e-8
+            )
 
             if global_step % 1000 == 0 and rank == 0:
                 with torch.no_grad():
@@ -666,8 +746,6 @@ def train(
                     "vf_estimator": ddp_state_dict(vf_estimator),
                     "text_encoder": ddp_state_dict(text_encoder),
                     "reference_encoder": ddp_state_dict(reference_encoder),
-                    "u_text": u_text.data,
-                    "u_ref": u_ref.data,
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "global_step": global_step,
@@ -724,13 +802,13 @@ def train(
                                 steps=16,
                                 device=dev,
                                 debug_label=f"{label}_{suffix}",
+                                speed=1.05,
                                 latent_dim=latent_dim,
                                 chunk_compress_factor=chunk_compress_factor,
                                 normalizer_scale=normalizer_scale,
                                 style_ttl=style_ttl,
                                 style_dp=style_dp,
-                                uncond_params=uncond_params,
-                                cfg_scale=4.0,
+                                cfg_scale=3.0,
                             )
                             wav = wav_out.squeeze().cpu().numpy()
                             sf.write(os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_{suffix}.wav"), wav, ae_sample_rate)
@@ -764,13 +842,13 @@ def train(
                                     steps=16,
                                     device=dev,
                                     debug_label=f"{label}_val_sample",
+                                    speed=1.05,
                                     latent_dim=latent_dim,
                                     chunk_compress_factor=chunk_compress_factor,
                                 normalizer_scale=normalizer_scale,
                                 style_ttl=val_style_ttl,
                                 style_dp=val_style_dp,
-                                uncond_params=uncond_params,
-                                cfg_scale=4.0,
+                                cfg_scale=3.0,
                             )
                                 wav = wav_out.squeeze().cpu().numpy()
                                 sf.write(os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_val_sample.wav"), wav, ae_sample_rate)
@@ -825,13 +903,13 @@ def train(
                                 duration_predictor=dp_model,
                                 steps=16,
                                 device=dev, debug_label="vc",
+                                speed=1.05,
                                 latent_dim=latent_dim,
                                 chunk_compress_factor=chunk_compress_factor,
                                 normalizer_scale=normalizer_scale,
                                 style_ttl=vc_style_ttl,
                                 style_dp=vc_style_dp,
-                                uncond_params=uncond_params,
-                                cfg_scale=4.0,
+                                cfg_scale=3.0,
                             )
                             sf.write(
                                 os.path.join(log_dir, f"step_{global_step}_vc_output.wav"),
@@ -851,7 +929,14 @@ def train(
                 reference_encoder.train()
 
         # Flush remaining gradients if dataloader length is not divisible by accumulation_steps
-        if num_batches % accumulation_steps != 0:
+        remainder = num_batches % accumulation_steps
+        if remainder != 0:
+            # Losses were divided by the full accumulation window. Correct an
+            # incomplete final window so its update remains a true mean.
+            grad_scale = accumulation_steps / remainder
+            for parameter in params:
+                if parameter.grad is not None:
+                    parameter.grad.mul_(grad_scale)
             torch.nn.utils.clip_grad_norm_(params, 10.0)
             optimizer.step()
             scheduler.step()

@@ -62,6 +62,10 @@ VOCAB_SIZE = 256  # Down from 384. 256 is optimal for embedding sizes.
 PAD_ID = 0
 BOS_ID = 1
 EOS_ID = 2
+# Reserved IDs for explicit nonverbal phoneme/event tokens.  They are kept
+# outside the IPA character maps so older text-only datasets remain compatible.
+NONVERBAL_TOKEN_ID_MIN = 244
+NONVERBAL_TOKEN_ID_MAX = 255
 
 CHAR_TO_ID: dict[str, int] = {**_PIPER_MAP, **_EXTENDED_MAP}
 ID_TO_CHAR: dict[int, str] = {v: k for k, v in CHAR_TO_ID.items()}

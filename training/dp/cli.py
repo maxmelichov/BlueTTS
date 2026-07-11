@@ -7,9 +7,9 @@ from training.utils import seed_all
 def main():
     seed_all(42, deterministic=False)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/tts.json")
+    parser.add_argument("--config", type=str, default="config/tts.json")
     parser.add_argument("--data", type=str, default="generated_audio/combined_dataset_cleaned_real_data.csv")
-    parser.add_argument("--max_steps", type=int, default=9181)
+    parser.add_argument("--max_steps", type=int, default=9000)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--device", type=str, default=None)
