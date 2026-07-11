@@ -55,7 +55,6 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
     vf_text_n_heads = vf_cfg["main_blocks"]["text_cond_layer"]["n_heads"]
     vf_style_dim = vf_cfg["main_blocks"]["style_cond_layer"]["style_dim"]
     vf_rotary_scale = vf_cfg["main_blocks"]["text_cond_layer"]["rotary_scale"]
-    vf_use_residual = vf_cfg["main_blocks"]["text_cond_layer"].get("use_residual", True)
     vf_rotary_base = vf_cfg["main_blocks"]["text_cond_layer"].get("rotary_base", 10000.0)
 
     te_ksz = te_cfg["convnext"].get("ksz", 5)
@@ -63,9 +62,6 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
 
     se_ksz = se_cfg["convnext"].get("ksz", 5)
     se_dilation_lst = se_cfg["convnext"].get("dilation_lst", [1] * se_num_blocks)
-
-    vf_main_blocks_cfg = vf_cfg.get("main_blocks", {})
-    vf_last_convnext_cfg = vf_cfg.get("last_convnext", {})
 
     ae_enc_arch = ae_cfg_json['encoder']
     ae_spec_cfg = ae_enc_arch.get('spec_processor', {})
@@ -123,11 +119,8 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         num_superblocks=vf_n_blocks,
         time_embed_dim=vf_time_dim,
         rope_gamma=float(vf_rotary_scale),
-        main_blocks_cfg=vf_main_blocks_cfg,
-        last_convnext_cfg=vf_last_convnext_cfg,
         text_n_heads=vf_text_n_heads,
         time_hdim=vf_time_hdim,
-        use_residual=vf_use_residual,
         rotary_base=vf_rotary_base,
     ).to(device)
 

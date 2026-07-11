@@ -318,15 +318,13 @@ def export_voice_style(
         style_encoder_cfg=dp.get("style_encoder"),
         predictor_cfg=dp.get("predictor"),
     ).to(device).eval()
-    dp_net.load_state_dict(ckpt, strict=True)
+    dp_net.load_state_dict(DPNetwork.remap_legacy_state_dict(ckpt), strict=False)
 
     z_tr = trim_reference_latents(z_ref_norm, "DPRefEnc")
     mask = torch.ones(1, 1, z_tr.shape[2], device=device, dtype=torch.float32)
     with torch.inference_mode():
         sdp = dp_net.ref_encoder(z_tr, mask=mask)
-        n_q = dp_net.ref_encoder.num_queries
-        q_dim = dp_net.ref_encoder.query_dim
-        style_dp = sdp.reshape(1, n_q, q_dim).cpu().numpy().astype(np.float32)
+        style_dp = sdp.cpu().numpy().astype(np.float32)
     print(f"[OK] style_dp <- {dp_path}")
 
     style_ttl_stats = {

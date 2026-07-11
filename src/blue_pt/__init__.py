@@ -25,9 +25,12 @@ from ..blue_onnx import (
 
 from training.t2l.models.text_encoder import TextEncoder  # noqa: E402
 from training.t2l.models.vf_estimator import VectorFieldEstimator  # noqa: E402
+from training.t2l.models.reference_encoder import ReferenceEncoder  # noqa: E402
 from training.dp.models.dp_network import DPNetwork  # noqa: E402
-from training.utils import load_ttl_config  # noqa: E402
-from bluecodec import LatentDecoder1D  # noqa: E402
+from training.t2l.sampling import build_reference_only  # noqa: E402
+from training.data.audio_utils import ensure_sr  # noqa: E402
+from training.utils import LinearMelSpectrogram, compress_latents, load_ttl_config  # noqa: E402
+from bluecodec import LatentDecoder1D, LatentEncoder  # noqa: E402
 from bluecodec.utils import decompress_latents  # noqa: E402
 
 _INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)(?:</\1>|<\1>)", re.DOTALL)
@@ -159,11 +162,13 @@ class TextToSpeech:
             v_cond = self.vector_estimator(
                 noisy_latent=x_in, text_emb=h_text, style_ttl=style.ttl,
                 latent_mask=latent_mask, text_mask=text_mask, current_step=t,
+                total_step=torch.ones_like(t), return_velocity=True,
             )
             if use_cfg:
                 v_uncond = self.vector_estimator(
                     noisy_latent=x_in, text_emb=h_text_null, style_ttl=h_ref_null,
                     latent_mask=latent_mask, text_mask=u_mask, current_step=t,
+                    total_step=torch.ones_like(t), return_velocity=True,
                 )
                 v = v_uncond + cfg_scale * (v_cond - v_uncond)
             else:
@@ -334,8 +339,11 @@ def load_cfgs(weights_dir: str, config_path: str = "tts.json") -> dict:
 def load_stats(
     weights_dir: str, device: str
 ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-    for name in ("stats_multilingual.pt", "stats.pt", "stats_real_data.pt", "stats_mixed.pt"):
-        path = os.path.join(weights_dir, name)
+    paths = [weights_dir] if os.path.isfile(weights_dir) else [
+        os.path.join(weights_dir, name)
+        for name in ("stats_multilingual.pt", "stats.pt", "stats_real_data.pt", "stats_mixed.pt")
+    ]
+    for path in paths:
         if not os.path.exists(path):
             continue
         stats = torch.load(path, map_location="cpu", weights_only=False)
@@ -422,7 +430,19 @@ def load_pt_models(
                 if "u_ref" in un:
                     u_ref = un["u_ref"].to(device)
 
-    emb_key = "text_embedder.char_embedder.weight"
+    te_sd = TextEncoder.remap_legacy_state_dict(te_sd)
+    vf_sd = VectorFieldEstimator.remap_legacy_state_dict(vf_sd)
+    ttl_cfg = cfg.get("ttl", {})
+    te_cfg = ttl_cfg.get("text_encoder", {})
+    te_conv_cfg = te_cfg.get("convnext", {})
+    te_attn_cfg = te_cfg.get("attn_encoder", {})
+    spte_cfg = ttl_cfg.get("speech_prompted_text_encoder", {})
+    vf_cfg = ttl_cfg.get("vector_field", {})
+    vf_time_cfg = vf_cfg.get("time_encoder", {})
+    vf_text_cfg = vf_cfg.get("main_blocks", {}).get("text_cond_layer", {})
+    dp_cfg = cfg.get("dp", {})
+
+    emb_key = "text_encoder.text_embedder.char_embedder.weight"
     if emb_key in te_sd and te_sd[emb_key].shape[0] != vocab_size:
         vocab_size = te_sd[emb_key].shape[0]
 
@@ -432,7 +452,16 @@ def load_pt_models(
         n_conv_layers=cfg.get("te_convnext_layers", 6),
         n_attn_layers=cfg.get("te_attn_n_layers", 4),
         expansion_factor=cfg.get("te_expansion_factor", 4),
-        p_dropout=0.0,
+        p_dropout=cfg.get("te_attn_p_dropout", 0.0),
+        kernel_size=te_conv_cfg.get("ksz", 5),
+        dilation_lst=te_conv_cfg.get("dilation_lst"),
+        attn_n_heads=te_attn_cfg.get("n_heads", 4),
+        attn_filter_channels=te_attn_cfg.get("filter_channels", 1024),
+        spte_n_heads=spte_cfg.get("n_heads", 2),
+        spte_text_dim=spte_cfg.get("text_dim", cfg.get("te_d_model", 256)),
+        spte_style_dim=spte_cfg.get("style_dim", cfg.get("se_d_model", 256)),
+        spte_n_units=spte_cfg.get("n_units", cfg.get("te_d_model", 256)),
+        spte_n_style=se_n_style,
     ).to(device).eval()
     text_encoder.load_state_dict(te_sd, strict=False)
 
@@ -446,11 +475,15 @@ def load_pt_models(
         num_superblocks=cfg.get("vf_n_blocks", 4),
         time_embed_dim=cfg.get("vf_time_dim", 64),
         rope_gamma=cfg.get("vf_rotary_scale", 10.0),
+        text_n_heads=cfg.get("vf_text_n_heads", 4),
+        time_hdim=vf_time_cfg.get("hdim", 256),
+        rotary_base=float(vf_text_cfg.get("rotary_base", 10000.0)),
     ).to(device).eval()
     vf_estimator.load_state_dict(vf_sd, strict=False)
 
     dp_path = dp_ckpt or os.path.join(weights_dir, "duration_predictor.pt")
     dp_sd = _load_sd(dp_path, "state_dict")
+    dp_sd = DPNetwork.remap_legacy_state_dict(dp_sd)
     dp_vocab_size = vocab_size
     dp_emb_key = "sentence_encoder.text_embedder.char_embedder.weight"
     if dp_emb_key in dp_sd and dp_sd[dp_emb_key].shape[0] != dp_vocab_size:
@@ -460,6 +493,9 @@ def load_pt_models(
         latent_channels=compressed,
         style_dp=cfg.get("dp_style_tokens", 8),
         style_dim=cfg.get("dp_style_dim", 16),
+        sentence_encoder_cfg=dp_cfg.get("sentence_encoder"),
+        style_encoder_cfg=dp_cfg.get("style_encoder"),
+        predictor_cfg=dp_cfg.get("predictor"),
     ).to(device).eval()
     dp_model.load_state_dict(dp_sd, strict=False)
 
@@ -469,6 +505,85 @@ def load_pt_models(
     vocoder.load_state_dict(voc_sd, strict=False)
 
     return text_encoder, vf_estimator, dp_model, vocoder, u_text, u_ref
+
+
+def load_reference_models(
+    cfg: dict,
+    device: str,
+    text2latent_ckpt: str,
+    ae_ckpt: str,
+) -> Tuple[LatentEncoder, ReferenceEncoder]:
+    """Load the encoders required to derive a :class:`Style` from a WAV file."""
+    ttl_cfg = cfg.get("ttl", {})
+    se_cfg = ttl_cfg.get("style_encoder", {})
+    se_conv_cfg = se_cfg.get("convnext", {})
+    se_tokens_cfg = se_cfg.get("style_token_layer", {})
+
+    ae_encoder = LatentEncoder(cfg=cfg["ae_enc_cfg"]).to(device).eval()
+    ae_sd = _load_sd(ae_ckpt, "encoder", "state_dict")
+    ae_encoder.load_state_dict(ae_sd, strict=True)
+
+    reference_encoder = ReferenceEncoder(
+        in_channels=cfg["compressed_channels"],
+        d_model=cfg["se_d_model"],
+        hidden_dim=cfg["se_hidden_dim"],
+        num_blocks=cfg["se_num_blocks"],
+        num_tokens=cfg["se_n_style"],
+        num_heads=cfg["se_n_heads"],
+        kernel_size=se_conv_cfg.get("ksz", 5),
+        dilation_lst=se_conv_cfg.get("dilation_lst"),
+        prototype_dim=se_tokens_cfg.get("prototype_dim", cfg["se_d_model"]),
+        n_units=se_tokens_cfg.get("n_units", cfg["se_d_model"]),
+        style_value_dim=se_tokens_cfg.get("style_value_dim", cfg["se_d_model"]),
+    ).to(device).eval()
+    ref_sd = _load_sd(text2latent_ckpt, "reference_encoder")
+    ref_sd = ReferenceEncoder.remap_legacy_state_dict(ref_sd)
+    reference_encoder.load_state_dict(ref_sd, strict=False)
+    return ae_encoder, reference_encoder
+
+
+@torch.inference_mode()
+def encode_wav_to_style(
+    wav_path: str,
+    ae_encoder: LatentEncoder,
+    reference_encoder: ReferenceEncoder,
+    dp_model: DPNetwork,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    cfg: dict,
+    device: str,
+    max_frames: int = 256,
+) -> Style:
+    """Extract TTL and duration-predictor style tokens from a reference WAV."""
+    ae_spec_cfg = cfg.get("ae", {}).get("encoder", {}).get("spec_processor", {})
+    sample_rate = int(cfg["ae_sample_rate"])
+    mel_spec = LinearMelSpectrogram(
+        sample_rate=sample_rate,
+        n_fft=ae_spec_cfg.get("n_fft", 2048),
+        win_length=ae_spec_cfg.get("win_length", ae_spec_cfg.get("n_fft", 2048)),
+        hop_length=ae_spec_cfg.get("hop_length", 512),
+        n_mels=ae_spec_cfg.get("n_mels", 228),
+    ).to(device).eval()
+
+    import soundfile as sf
+
+    wav_np, source_rate = sf.read(wav_path)
+    if wav_np.ndim > 1:
+        wav_np = wav_np.mean(axis=1)
+    wav = ensure_sr(torch.from_numpy(wav_np).float(), source_rate, sample_rate, device=device)
+    if wav.ndim == 1:
+        wav = wav.unsqueeze(0)
+
+    z = ae_encoder(mel_spec(wav))
+    z = compress_latents(z, factor=cfg["chunk_compress_factor"])
+    z = ((z - mean) / std) * cfg["normalizer_scale"]
+    valid_lengths = torch.tensor([z.shape[-1]], device=device)
+    z_ref, ref_mask = build_reference_only(z, valid_lengths, device, max_frames=max_frames)
+
+    return Style(
+        reference_encoder(z_ref, mask=ref_mask),
+        dp_model.ref_encoder(z_ref, mask=ref_mask),
+    )
 
 
 def load_text_to_speech(
@@ -521,9 +636,11 @@ __all__ = [
     "chunk_text",
     "load_cfgs",
     "load_pt_models",
+    "load_reference_models",
     "load_stats",
     "load_text_processor",
     "load_text_to_speech",
     "load_voice_style",
+    "encode_wav_to_style",
     "timer",
 ]

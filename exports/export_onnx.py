@@ -60,6 +60,9 @@ def _load_into(module, state, key):
     if sub is None:
         print(f"[WARN] '{key}' not found in checkpoint; random init.")
         return
+    remap = getattr(module, "remap_legacy_state_dict", None)
+    if remap is not None:
+        sub = remap(sub)
     module.load_state_dict(sub, strict=False)
 
 
@@ -149,7 +152,7 @@ def _replace_mha(module: nn.Module) -> None:
 # ── graph wrappers that bake runtime conditioning into the ONNX graph ─────────
 
 class VectorFieldEstimatorCFG(nn.Module):
-    """Wraps VF and bakes u_text / u_ref so CFG is one ONNX call per diffusion step."""
+    """Export the raw vector field with baked unconditionals and one Euler step."""
 
     def __init__(self, model: VectorFieldEstimator, u_text: torch.Tensor, u_ref: torch.Tensor):
         super().__init__()
@@ -165,13 +168,19 @@ class VectorFieldEstimatorCFG(nn.Module):
         u_ref_b = self.u_ref.expand(B, -1, -1)
         u_mask = torch.ones_like(text_mask)
 
-        den_cond = self.model(noisy_latent=noisy_latent, text_emb=text_emb, style_ttl=style_ttl,
-                              latent_mask=latent_mask, text_mask=text_mask,
-                              current_step=current_step, total_step=total_step)
-        den_uncond = self.model(noisy_latent=noisy_latent, text_emb=u_text_b, style_ttl=u_ref_b,
-                                latent_mask=latent_mask, text_mask=u_mask,
-                                current_step=current_step, total_step=total_step)
-        return den_uncond + cfg_scale * (den_cond - den_uncond)
+        v_cond = self.model(
+            noisy_latent=noisy_latent, text_emb=text_emb, style_ttl=style_ttl,
+            latent_mask=latent_mask, text_mask=text_mask,
+            current_step=current_step, total_step=total_step, return_velocity=True,
+        )
+        v_uncond = self.model(
+            noisy_latent=noisy_latent, text_emb=u_text_b, style_ttl=u_ref_b,
+            latent_mask=latent_mask, text_mask=u_mask,
+            current_step=current_step, total_step=total_step, return_velocity=True,
+        )
+        step_size = (1.0 / total_step).view(-1, 1, 1)
+        velocity = v_uncond + cfg_scale.view(-1, 1, 1) * (v_cond - v_uncond)
+        return (noisy_latent + step_size * velocity) * latent_mask
 
 
 class VocoderWithStats(nn.Module):
@@ -417,6 +426,7 @@ def main():
         text_dim=cfg["vf_text_dim"], style_dim=cfg["vf_style_dim"],
         num_style_tokens=n_style, num_superblocks=cfg["vf_n_blocks"],
         time_embed_dim=cfg["vf_time_dim"], rope_gamma=cfg["vf_rotary_scale"],
+        text_n_heads=cfg["vf_text_n_heads"],
     ).eval()
     _load_into(vf, t2l, "vf_estimator")
 
@@ -448,7 +458,7 @@ def main():
             dp_state[emb_key] = dp_state[emb_key][:target].clone()
         elif have < target:
             raise RuntimeError(f"DP checkpoint vocab ({have}) < model vocab ({target}).")
-    dp.load_state_dict(dp_state, strict=False)
+    dp.load_state_dict(DPNetwork.remap_legacy_state_dict(dp_state), strict=False)
     _replace_mha(dp)
 
     # ---- dummy inputs -------------------------------------------------------

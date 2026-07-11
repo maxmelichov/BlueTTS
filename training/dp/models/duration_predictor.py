@@ -1,176 +1,492 @@
+import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from typing import Optional
 
-from training.t2l.models.text_encoder import (
-    AttnEncoder,
-    TextEmbedderWrapper,
-    ConvNeXtWrapper,
-)
+from training.model_utils import register_contiguous_grad_hook
 
+# =========================================================
+# LayerNorm with [B, C, L] layout
+# Matches Hierarchy: .../norm/norm/LayerNormalization (Transpose -> LN -> Transpose)
+# =========================================================
 
-class DPReferenceEncoder(nn.Module):
-    def __init__(
-        self,
-        in_channels: int = 144,
-        d_model: int = 64,
-        hidden_dim: int = 256,
-        num_blocks: int = 4,
-        num_queries: int = 8,
-        query_dim: int = 16,
-        num_heads: int = 2,
-        kernel_size: int = 5,
-        dilation_lst: list = None,
-    ):
+class DPLayerNorm(nn.Module):
+    def __init__(self, dim: int):
         super().__init__()
-        self.d_model = d_model
-        self.num_queries = num_queries
-        self.query_dim = query_dim
-        mlp_ratio = hidden_dim // d_model
+        self.norm = nn.LayerNorm(dim)
 
-        self.input_proj = nn.Conv1d(in_channels, d_model, kernel_size=1)
-        self.convnext = ConvNeXtWrapper(
-            d_model,
-            n_layers=num_blocks,
-            expansion_factor=mlp_ratio,
-            kernel_size=kernel_size,
-            dilation_lst=dilation_lst,
-        )
-        self.ref_keys = nn.Parameter(torch.randn(num_queries, query_dim) * 0.02)
-        self.attn1 = nn.MultiheadAttention(
-            embed_dim=query_dim, num_heads=num_heads, kdim=d_model, vdim=d_model, batch_first=True
-        )
-        self.attn2 = nn.MultiheadAttention(
-            embed_dim=query_dim, num_heads=num_heads, kdim=d_model, vdim=d_model, batch_first=True
-        )
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, C, L] -> Transpose -> LayerNormalization -> Transpose
+        return self.norm(x.transpose(1, 2)).transpose(1, 2)
 
-    def forward(self, z_ref: torch.Tensor, mask: torch.Tensor = None):
-        B = z_ref.shape[0]
-        x = self.input_proj(z_ref)
-        x = self.convnext(x, mask=mask)
-        kv = x.transpose(1, 2)
 
-        key_padding_mask = None
+# =========================================================
+# ConvNeXt Block (1D)
+# Hierarchy: /sentence_encoder/convnext/convnext.i/...
+# =========================================================
+
+class DPConvNextBlock(nn.Module):
+    def __init__(self,
+                 dim: int,
+                 expansion_factor: int = 4,
+                 kernel_size: int = 5,
+                 layer_scale_init_value: float = 1e-6):
+        super().__init__()
+        hidden_dim = dim * expansion_factor
+        # ONNX exports this dwconv with an explicit edge(replicate)-padding op
+        # (Pad mode='edge') before the Conv, not zero padding.
+        self.dwconv = nn.Conv1d(dim, dim, kernel_size=kernel_size, padding='same',
+                                padding_mode='replicate', groups=dim)
+        self.norm = DPLayerNorm(dim)
+        self.pwconv1 = nn.Conv1d(dim, hidden_dim, kernel_size=1)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Conv1d(hidden_dim, dim, kernel_size=1)
+        self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((1, dim, 1)))
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        # /convnext.i/Mul
         if mask is not None:
-            key_padding_mask = (mask.squeeze(1) == 0)
+            x = x * mask
+        residual = x
 
-        q0 = self.ref_keys.unsqueeze(0).expand(B, -1, -1)
-        q1, _ = self.attn1(query=q0, key=kv, value=kv, key_padding_mask=key_padding_mask, need_weights=False)
-        q2 = q0 + q1
-        out, _ = self.attn2(query=q2, key=kv, value=kv, key_padding_mask=key_padding_mask, need_weights=False)
-        return out.reshape(B, -1)
+        # /convnext.i/dwconv/Pad -> /Conv
+        x = self.dwconv(x)
 
-
-class DPTextEncoder(nn.Module):
-    def __init__(self, vocab_size=37, d_model=64):
-        super().__init__()
-        self.d_model = d_model
-        self.text_embedder = TextEmbedderWrapper(vocab_size, d_model)
-        self.convnext = ConvNeXtWrapper(d_model, n_layers=6, expansion_factor=4)
-        self.sentence_token = nn.Parameter(torch.randn(1, d_model, 1) * 0.02)
-        self.attn_encoder = AttnEncoder(
-            channels=d_model,
-            n_heads=2,
-            filter_channels=d_model * 4,
-            n_layers=2,
-        )
-        self.proj_out = nn.Sequential()
-        self.proj_out.add_module("net", nn.Conv1d(d_model, d_model, 1, bias=False))
-
-    def forward(self, text_ids, mask=None):
-        B, T = text_ids.shape
-        x = self.text_embedder(text_ids)
-        x = x.transpose(1, 2)
+        # /convnext.i/Mul_1
         if mask is not None:
             x = x * mask
 
-        u_token = self.sentence_token.expand(B, -1, -1)
-        x = torch.cat([u_token, x], dim=2)
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)          # GELU: Div/Erf/Add/Mul/Mul_1
+        x = self.pwconv2(x)
 
+        # /convnext.i/Mul_2 (gamma)
+        x = self.gamma * x
+        # /convnext.i/Add (residual)
+        x = residual + x
+        # /convnext.i/Mul_3
         if mask is not None:
-            mask_u = torch.ones(B, 1, 1, device=mask.device)
-            mask = torch.cat([mask_u, mask], dim=2)
-
-        x = self.convnext(x, mask=mask)
-        conv_out = x
-        x = self.attn_encoder(x, mask=mask)
-        x = x + conv_out
-
-        first_token = x[:, :, :1]
-        out = self.proj_out(first_token)
-        if mask is not None:
-            out = out * mask[:, :, :1]
-        return out.squeeze(2)
+            x = x * mask
+        return x
 
 
-class DurationEstimator(nn.Module):
-    def __init__(self, text_dim=64, style_dim=128):
+# =========================================================
+# Relative-position Multi-Head Attention (VITS-style)
+# Hierarchy: /sentence_encoder/attn_encoder/attn_layers.i/...
+#   conv_q, conv_k, conv_v, conv_o, emb_rel_k, emb_rel_v
+# =========================================================
+
+class DPRelativeAttention(nn.Module):
+    def __init__(self,
+                 channels: int,
+                 n_heads: int = 2,
+                 window_size: int = 4):
         super().__init__()
-        self.layers = nn.ModuleList([
-            nn.Linear(text_dim + style_dim, 128),
-            nn.Linear(128, 1),
-        ])
-        self.activation = nn.PReLU()
+        assert channels % n_heads == 0
+        self.channels = channels
+        self.n_heads = n_heads
+        self.k_channels = channels // n_heads
+        self.window_size = window_size
 
-    def forward(self, text_emb, style_emb, text_mask=None, return_log=False):
-        if style_emb.dim() > 2:
-            style_emb = style_emb.reshape(style_emb.shape[0], -1)
-        x = torch.cat([text_emb, style_emb], dim=1)
+        # /attn_layers.i/conv_q, conv_k, conv_v, conv_o
+        self.conv_q = nn.Conv1d(channels, channels, 1)
+        self.conv_k = nn.Conv1d(channels, channels, 1)
+        self.conv_v = nn.Conv1d(channels, channels, 1)
+        self.conv_o = nn.Conv1d(channels, channels, 1)
+
+        # Relative embeddings: [1, 2*W+1, k_channels]
+        # tts.dp.sentence_encoder.attn_encoder.attn_layers.i.emb_rel_k / emb_rel_v
+        rel_stddev = self.k_channels ** -0.5
+        self.emb_rel_k = nn.Parameter(torch.randn(1, window_size * 2 + 1, self.k_channels) * rel_stddev)
+        self.emb_rel_v = nn.Parameter(torch.randn(1, window_size * 2 + 1, self.k_channels) * rel_stddev)
+        register_contiguous_grad_hook(self.emb_rel_k)
+        register_contiguous_grad_hook(self.emb_rel_v)
+
+    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor = None) -> torch.Tensor:
+        # conv_q/k/v -> attention -> conv_o
+        q = self.conv_q(x)
+        k = self.conv_k(x)
+        v = self.conv_v(x)
+        out = self._attention(q, k, v, mask=attn_mask)
+        out = self.conv_o(out)
+        return out
+
+    def _attention(self, query, key, value, mask=None):
+        b, d, t_t = query.size()
+        t_s = key.size(2)
+
+        # /Reshape + /Transpose -> [B, H, L, k]
+        query = query.view(b, self.n_heads, self.k_channels, t_t).transpose(2, 3)
+        key = key.view(b, self.n_heads, self.k_channels, t_s).transpose(2, 3)
+        value = value.view(b, self.n_heads, self.k_channels, t_s).transpose(2, 3)
+
+        # Content scores: /Div -> /MatMul
+        scores = torch.matmul(query / math.sqrt(self.k_channels), key.transpose(-2, -1))
+
+        # Relative-key scores: /MatMul_1 -> relative_position_to_absolute
+        rel_emb_k = self._get_relative_embeddings(self.emb_rel_k, t_s)
+        rel_logits = torch.matmul(query / math.sqrt(self.k_channels),
+                                  rel_emb_k.unsqueeze(0).transpose(-2, -1))
+        scores_local = self._relative_position_to_absolute_position(rel_logits)
+        # /Add_2
+        scores = scores + scores_local
+
+        # /Where (masked_fill with -1e4)
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e4)
+
+        # /Softmax
+        p_attn = F.softmax(scores, dim=-1)
+
+        # Content context: /MatMul_2
+        output = torch.matmul(p_attn, value)
+
+        # Relative-value context: absolute_position_to_relative -> /MatMul_3 -> /Add_4
+        rel_weights = self._absolute_position_to_relative_position(p_attn)
+        rel_emb_v = self._get_relative_embeddings(self.emb_rel_v, t_s)
+        output = output + torch.matmul(rel_weights, rel_emb_v.unsqueeze(0))
+
+        # /Transpose_9 -> /Reshape_19
+        output = output.transpose(2, 3).contiguous().view(b, d, t_t)
+        return output
+
+    def _get_relative_embeddings(self, relative_embeddings, length):
+        pad_length = max(length - (self.window_size + 1), 0)
+        slice_start = max((self.window_size + 1) - length, 0)
+        slice_end = slice_start + 2 * length - 1
+        if pad_length > 0:
+            relative_embeddings = F.pad(relative_embeddings, (0, 0, pad_length, pad_length, 0, 0))
+        return relative_embeddings[:, slice_start:slice_end].contiguous()
+
+    def _relative_position_to_absolute_position(self, x):
+        b, h, l, _ = x.size()
+        x = F.pad(x, (0, 1))
+        x = x.view(b, h, l * 2 * l)
+        x = F.pad(x, (0, l - 1))
+        x = x.view(b, h, l + 1, 2 * l - 1)[:, :, :l, l - 1:]
+        return x
+
+    def _absolute_position_to_relative_position(self, x):
+        b, h, l, _ = x.size()
+        x = F.pad(x, (0, l - 1))
+        x = x.view(b, h, l * l + l * (l - 1))
+        x = F.pad(x, (l, 0))
+        x = x.view(b, h, l, 2 * l)[:, :, :, 1:]
+        return x
+
+
+# =========================================================
+# Position-wise Feed Forward (ReLU)
+# Hierarchy: /attn_encoder/ffn_layers.i/conv_1 -> Relu -> conv_2
+# =========================================================
+
+class DPFFN(nn.Module):
+    def __init__(self, channels: int, filter_channels: int):
+        super().__init__()
+        self.conv_1 = nn.Conv1d(channels, filter_channels, 1)
+        self.conv_2 = nn.Conv1d(filter_channels, channels, 1)
+
+    def forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.Tensor:
+        x = self.conv_1(x * x_mask)
+        x = torch.relu(x)
+        x = self.conv_2(x * x_mask)
+        return x * x_mask
+
+
+# =========================================================
+# Attention Encoder
+# Hierarchy: /attn_encoder/{attn_layers, norm_layers_1, ffn_layers, norm_layers_2}.i
+# =========================================================
+
+class DPAttnEncoder(nn.Module):
+    def __init__(self,
+                 channels: int,
+                 n_heads: int = 2,
+                 filter_channels: int = 256,
+                 n_layers: int = 2,
+                 window_size: int = 4):
+        super().__init__()
+        self.n_layers = n_layers
+        self.attn_layers = nn.ModuleList()
+        self.norm_layers_1 = nn.ModuleList()
+        self.ffn_layers = nn.ModuleList()
+        self.norm_layers_2 = nn.ModuleList()
+        for _ in range(n_layers):
+            self.attn_layers.append(DPRelativeAttention(channels, n_heads=n_heads, window_size=window_size))
+            self.norm_layers_1.append(DPLayerNorm(channels))
+            self.ffn_layers.append(DPFFN(channels, filter_channels))
+            self.norm_layers_2.append(DPLayerNorm(channels))
+
+    def forward(self, x: torch.Tensor, x_mask: torch.Tensor) -> torch.Tensor:
+        # /attn_encoder/Unsqueeze -> Unsqueeze_1 -> Mul  (attn_mask [B,1,L,L])
+        attn_mask = x_mask.unsqueeze(2) * x_mask.unsqueeze(-1)
+        # /attn_encoder/Mul_1
+        x = x * x_mask
+        for i in range(self.n_layers):
+            y = self.attn_layers[i](x, attn_mask)
+            # /attn_encoder/Add -> norm_layers_1.i
+            x = self.norm_layers_1[i](x + y)
+            y = self.ffn_layers[i](x, x_mask)
+            # /attn_encoder/Add_1 -> norm_layers_2.i
+            x = self.norm_layers_2[i](x + y)
+        # /attn_encoder/Mul_2
+        x = x * x_mask
+        return x
+
+
+# =========================================================
+# Text embedder
+# Hierarchy: /sentence_encoder/text_embedder/char_embedder
+# =========================================================
+
+class DPTextEmbedder(nn.Module):
+    def __init__(self, vocab_size: int = 163, d_model: int = 64):
+        super().__init__()
+        self.char_embedder = nn.Embedding(vocab_size, d_model)
+
+    def forward(self, text_ids: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        # char_embedder/Gather -> Transpose -> Mul
+        x = self.char_embedder(text_ids).transpose(1, 2)
+        if mask is not None:
+            x = x * mask
+        return x
+
+
+# =========================================================
+# Output projection
+# Hierarchy: /sentence_encoder/proj_out/net (Conv1d, no bias) -> Mul
+# =========================================================
+
+class DPProjOut(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        self.net = nn.Conv1d(channels, channels, 1, bias=False)
+
+    def forward(self, x: torch.Tensor, x_mask: torch.Tensor = None) -> torch.Tensor:
+        x = self.net(x)
+        if x_mask is not None:
+            x = x * x_mask
+        return x
+
+
+# =========================================================
+# Sentence Encoder
+# Hierarchy: /sentence_encoder/...
+# =========================================================
+
+class DPSentenceEncoder(nn.Module):
+    def __init__(self,
+                 vocab_size: int = 163,
+                 d_model: int = 64,
+                 n_heads: int = 2,
+                 filter_channels: int = 256,
+                 n_layers: int = 2,
+                 window_size: int = 4,
+                 n_convnext: int = 6):
+        super().__init__()
+        # text_embedder.char_embedder
+        self.text_embedder = DPTextEmbedder(vocab_size, d_model)
+
+        # convnext.convnext.0..5
+        self.convnext = nn.Module()
+        self.convnext.convnext = nn.ModuleList([
+            DPConvNextBlock(d_model, expansion_factor=4) for _ in range(n_convnext)
+        ])
+
+        # sentence_token
+        self.sentence_token = nn.Parameter(torch.randn(1, d_model, 1) * 0.02)
+
+        # attn_encoder
+        self.attn_encoder = DPAttnEncoder(d_model, n_heads=n_heads,
+                                          filter_channels=filter_channels,
+                                          n_layers=n_layers, window_size=window_size)
+
+        # proj_out
+        self.proj_out = DPProjOut(d_model)
+
+    def forward(self, text_ids: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+        B = text_ids.shape[0]
+
+        # text_embedder/Gather -> Transpose -> Mul
+        x = self.text_embedder(text_ids, mask=mask)
+
+        # /Expand -> /Concat_1 (prepend sentence token)
+        token = self.sentence_token.expand(B, -1, -1)
+        x = torch.cat([token, x], dim=2)
+
+        # /Concat_2 (prepend token mask)
+        if mask is not None:
+            token_mask = torch.ones_like(mask[:, :, :1])
+            mask = torch.cat([token_mask, mask], dim=2)
+        else:
+            mask = torch.ones(B, 1, x.shape[2], device=x.device, dtype=x.dtype)
+
+        # convnext stack
+        for block in self.convnext.convnext:
+            x = block(x, mask=mask)
+        convnext_out = x
+
+        # attn_encoder
+        attn_out = self.attn_encoder(convnext_out, mask)
+
+        # /sentence_encoder/Add (global residual)
+        x = attn_out + convnext_out
+
+        # /sentence_encoder/Slice_1 (take sentence token, position 0)
+        x = x[:, :, :1]
+
+        # /sentence_encoder/proj_out/net/Conv -> Mul
+        x = self.proj_out(x, mask[:, :, :1])
+        return x
+
+
+# =========================================================
+# Predictor (Duration Estimator)
+# Hierarchy: /predictor/layers.0 -> activation (PRelu) -> layers.1 -> Exp -> Squeeze
+# =========================================================
+
+class DPPredictor(nn.Module):
+    def __init__(self, input_dim: int = 192, hidden_dim: int = 128):
+        super().__init__()
+        # layers.0, layers.1
+        self.layers = nn.ModuleList([
+            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(hidden_dim, 1),
+        ])
+        # activation -> single PRelu op (weight shape [1])
+        self.activation = nn.PReLU(num_parameters=1)
+
+    def forward(self, text_feat: torch.Tensor, style_dp: torch.Tensor, return_log: bool = False) -> torch.Tensor:
+        B = text_feat.shape[0]
+
+        # /predictor/Reshape  (text feature [B, 64, 1] -> [B, 64])
+        text_feat = text_feat.reshape(B, -1)
+        # /predictor/Reshape_1 (style [B, 8, 16] -> [B, 128])
+        style = style_dp.reshape(B, -1)
+
+        # /predictor/Concat_2 (text then style)
+        x = torch.cat([text_feat, style], dim=1)
+
+        # layers.0/Gemm -> activation/PRelu -> layers.1/Gemm
         x = self.layers[0](x)
         x = self.activation(x)
-        x = self.layers[1](x)
-        if return_log:
-            return x.squeeze(1)
-        return torch.exp(x).squeeze(1)
+        x = self.layers[1](x)  # [B, 1]
 
+        if return_log:
+            # log-duration branch (no ONNX counterpart) squeezes the same axis
+            return x.squeeze(1)
+
+        # /predictor/Exp -> /predictor/Squeeze (graph order)
+        x = torch.exp(x)
+        x = x.squeeze(1)
+        return x
+
+
+# =========================================================
+# Main TTS Duration Model (== tts.dp)
+# Children sentence_encoder and predictor are siblings.
+# =========================================================
+
+
+from training.t2l.models.reference_encoder import ReferenceEncoder
 
 class TTSDurationModel(nn.Module):
     def __init__(self, vocab_size=37, style_dp=8, style_dim=16, sentence_encoder_cfg=None, style_encoder_cfg=None, predictor_cfg=None):
         super().__init__()
         self.vocab_size = vocab_size
-
+        
+        # Parse configs
         se_cfg = sentence_encoder_cfg or {}
         st_cfg = style_encoder_cfg or {}
         pr_cfg = predictor_cfg or {}
-
+        
+        # DP config resolution:
         se_d_model = se_cfg.get("char_emb_dim", 64)
-
+        se_attn = se_cfg.get("attn_encoder", {})
+        se_n_heads = se_attn.get("n_heads", se_cfg.get("n_heads", 2))
+        se_filter_channels = se_attn.get("filter_channels", se_cfg.get("filter_channels", 256))
+        se_n_layers = se_attn.get("n_layers", se_cfg.get("n_layers", 2))
+        se_window_size = se_cfg.get("window_size", 4)
+        
+        se_convnext = se_cfg.get("convnext", {})
+        se_n_convnext = se_convnext.get("num_layers", 6)
+        
         st_proj = st_cfg.get("proj_in", {})
         st_d_model = st_proj.get("odim", 64)
-
+        
         st_convnext = st_cfg.get("convnext", {})
         st_hidden_dim = st_convnext.get("intermediate_dim", 256)
         st_num_blocks = st_convnext.get("num_layers", 4)
         st_dilation = st_convnext.get("dilation_lst", None)
-
+        
         st_token_layer = st_cfg.get("style_token_layer", {})
         st_num_queries = st_token_layer.get("n_style", style_dp)
-        st_query_dim = st_token_layer.get("style_value_dim", style_dim)
+        st_prototype_dim = st_token_layer.get("prototype_dim", st_d_model)
+        st_n_units = st_token_layer.get("n_units", st_prototype_dim)
+        st_style_value_dim = st_token_layer.get("style_value_dim", style_dim)
         st_num_heads = st_token_layer.get("n_heads", 2)
-
-        pr_text_dim = pr_cfg.get("sentence_dim", 64)
-        pr_style_dim = pr_cfg.get("n_style", st_num_queries) * pr_cfg.get("style_dim", st_query_dim)
-
-        self.sentence_encoder = DPTextEncoder(vocab_size=vocab_size, d_model=se_d_model)
-        self.ref_encoder = DPReferenceEncoder(
+        
+        pr_text_dim = pr_cfg.get("sentence_dim", se_d_model)
+        pr_style_dim = pr_cfg.get("n_style", st_num_queries) * pr_cfg.get("style_dim", st_style_value_dim)
+        pr_hidden_dim = pr_cfg.get("hidden_dim", pr_cfg.get("hdim", 128))
+        
+        # 1. Text Encoder (Must match ONNX trace exactly)
+        self.sentence_encoder = DPSentenceEncoder(
+            vocab_size=vocab_size,
+            d_model=se_d_model,
+            n_heads=se_n_heads,
+            filter_channels=se_filter_channels,
+            n_layers=se_n_layers,
+            window_size=se_window_size,
+            n_convnext=se_n_convnext
+        )
+        
+        # 2. Reference Encoder (Used during training to get style_dp from z_ref)
+        self.ref_encoder = ReferenceEncoder(
             in_channels=144,
             d_model=st_d_model,
             hidden_dim=st_hidden_dim,
             num_blocks=st_num_blocks,
-            num_queries=st_num_queries,
-            query_dim=st_query_dim,
+            num_tokens=st_num_queries,
             num_heads=st_num_heads,
+            kernel_size=5,
             dilation_lst=st_dilation,
+            prototype_dim=st_prototype_dim,
+            n_units=st_n_units,
+            style_value_dim=st_style_value_dim
         )
-        self.predictor = DurationEstimator(text_dim=pr_text_dim, style_dim=pr_style_dim)
+        
+        # 3. Predictor (Must match ONNX trace exactly)
+        self.predictor = DPPredictor(
+            input_dim=pr_text_dim + pr_style_dim,
+            hidden_dim=pr_hidden_dim
+        )
+
+    @staticmethod
+    def remap_legacy_state_dict(state_dict: dict) -> dict:
+        """Map the former flat DP ConvNeXt keys into ``DPSentenceEncoder``."""
+        remapped = {}
+        prefix = "sentence_encoder.convnext."
+        for key, value in state_dict.items():
+            if key.startswith(prefix) and not key.startswith(f"{prefix}convnext."):
+                key = f"{prefix}convnext.{key[len(prefix):]}"
+            remapped[key] = value
+        return remapped
 
     def forward(self, text_ids, z_ref=None, text_mask=None, ref_mask=None, style_dp=None, return_log=False):
-        text_emb = self.sentence_encoder(text_ids, mask=text_mask)
-
+        # 1. Text path (Sentence Encoder)
+        text_feat = self.sentence_encoder(text_ids, mask=text_mask)
+        
+        # 2. Style path
         if style_dp is not None:
-            style_emb = style_dp
+            style = style_dp
         elif z_ref is not None:
-            style_emb = self.ref_encoder(z_ref, mask=ref_mask)
+            style = self.ref_encoder(z_ref, mask=ref_mask)
         else:
             raise ValueError("Either z_ref or style_dp must be provided")
-
-        return self.predictor(text_emb, style_emb, text_mask=text_mask, return_log=return_log)
+            
+        # 3. Predictor
+        duration = self.predictor(text_feat, style, return_log=return_log)
+        return duration
