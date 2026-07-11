@@ -21,6 +21,7 @@ from training.data.audio_utils import ensure_sr
 from training.data.text_vocab import normalize_text, text_to_indices_multilang
 from training.utils import compress_latents
 from training.t2l.builders import build_models
+from training.t2l.models.reference_encoder import ReferenceEncoder
 from training.t2l.cfg_utils import (
     _latest_ckpt_in_dir,
     _validate_ttl_config,
@@ -283,7 +284,11 @@ def train(
         shapes_changed = False
         for mod, name in [(vf_estimator, 'vf_estimator'), (text_encoder, 'text_encoder')]:
             if name in checkpoint:
-                model_state, ckpt_state = mod.state_dict(), checkpoint[name]
+                model_state = mod.state_dict()
+                ckpt_state = checkpoint[name]
+                remap = getattr(mod, "remap_legacy_state_dict", None)
+                if remap is not None:
+                    ckpt_state = remap(ckpt_state)
                 filtered_state = {}
                 for k, v in ckpt_state.items():
                     if k in model_state and v.shape != model_state[k].shape:
@@ -294,7 +299,9 @@ def train(
                         continue
                     filtered_state[k] = v
                 mod.load_state_dict(filtered_state, strict=False)
-        if 'reference_encoder' in checkpoint: reference_encoder.load_state_dict(checkpoint['reference_encoder'], strict=False)
+        if 'reference_encoder' in checkpoint:
+            reference_state = ReferenceEncoder.remap_legacy_state_dict(checkpoint['reference_encoder'])
+            reference_encoder.load_state_dict(reference_state, strict=False)
         if 'u_text' in checkpoint: u_text.data = checkpoint['u_text']
         if 'u_ref' in checkpoint: u_ref.data = checkpoint['u_ref']
 
@@ -610,6 +617,8 @@ def train(
                 latent_mask=latent_mask_exp,
                 text_mask=text_mask_final,
                 current_step=t,
+                total_step=torch.ones_like(t),
+                return_velocity=True,
             )
 
             final_mask = latent_mask_exp * target_loss_mask_exp
@@ -699,8 +708,7 @@ def train(
                             style_ttl = re_infer(ref_z, mask=ref_mask)      # [1, 50, 256]
                             style_dp = None
                             if dp_model is not None:
-                                style_dp = dp_model.ref_encoder(ref_z, mask=ref_mask)  # [1, 128]
-                                style_dp = style_dp.reshape(B_ref, 8, 16)              # [1, 8, 16]
+                                style_dp = dp_model.ref_encoder(ref_z, mask=ref_mask)
 
                         for i, text in enumerate(sentences):
                             ids = text_to_indices_multilang(text, base_lang=lang)
@@ -739,8 +747,7 @@ def train(
                             val_style_ttl = re_infer(ref_z_val, mask=ref_mask_val) if ref_z_val is not None else None  # [1, 50, 256]
                             val_style_dp = None
                             if dp_model is not None and ref_z_val is not None:
-                                val_style_dp = dp_model.ref_encoder(ref_z_val, mask=ref_mask_val)  # [1, 128]
-                                val_style_dp = val_style_dp.reshape(1, 8, 16)
+                                val_style_dp = dp_model.ref_encoder(ref_z_val, mask=ref_mask_val)
 
                         for lang, label, sentences in eval_phrase_rows:
                             for i, text in enumerate(sentences):
@@ -808,7 +815,6 @@ def train(
                                 vc_style_dp = None
                                 if dp_model is not None:
                                     vc_style_dp = dp_model.ref_encoder(vc_ref_z_built, mask=vc_ref_mask)
-                                    vc_style_dp = vc_style_dp.reshape(1, 8, 16)
 
                             wav_vc = sample_audio(
                                 vf_infer, te_infer, re_infer, ae_decoder,

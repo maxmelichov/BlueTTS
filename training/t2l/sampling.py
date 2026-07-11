@@ -280,6 +280,8 @@ def sample_audio(
             latent_mask=latent_mask,
             text_mask=text_mask,
             current_step=t,
+            total_step=torch.ones_like(t),
+            return_velocity=True,
         )
 
         if cfg_scale > 1.0 and uncond_params is not None:
@@ -298,6 +300,8 @@ def sample_audio(
                 latent_mask=latent_mask,
                 text_mask=text_mask,
                 current_step=t,
+                total_step=torch.ones_like(t),
+                return_velocity=True,
             )
             v = v_uncond + cfg_scale * (v_cond - v_uncond)
         else:

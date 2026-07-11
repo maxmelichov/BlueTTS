@@ -328,6 +328,40 @@ class Style:
         self.dp = style_dp_onnx
 
 
+class ReferenceStyleEncoder:
+    """ONNX reference-audio style path exported alongside the synthesis graphs.
+
+    ``mel`` must use the codec mel configuration stored in ``tts.json``. This
+    keeps audio preprocessing separate from ONNX execution while allowing
+    callers to derive both style tensors without loading PyTorch models.
+    """
+
+    def __init__(
+        self,
+        codec_encoder_ort: ort.InferenceSession,
+        style_encoder_ort: ort.InferenceSession,
+        duration_style_encoder_ort: ort.InferenceSession,
+    ):
+        self.codec_encoder_ort = codec_encoder_ort
+        self.style_encoder_ort = style_encoder_ort
+        self.duration_style_encoder_ort = duration_style_encoder_ort
+
+    def encode(self, mel: np.ndarray) -> Style:
+        z_ref, *_ = self.codec_encoder_ort.run(None, {"mel": np.asarray(mel, dtype=np.float32)})
+        z_ref = np.asarray(z_ref, dtype=np.float32)
+        ref_mask = np.ones((z_ref.shape[0], 1, z_ref.shape[2]), dtype=np.float32)
+        style_ttl, *_ = self.style_encoder_ort.run(
+            None, {"z_ref": z_ref, "ref_mask": ref_mask}
+        )
+        style_dp, *_ = self.duration_style_encoder_ort.run(
+            None, {"z_ref": z_ref, "ref_mask": ref_mask}
+        )
+        return Style(
+            np.asarray(style_ttl, dtype=np.float32),
+            np.asarray(style_dp, dtype=np.float32),
+        )
+
+
 class TextToSpeech:
     def __init__(
         self,
@@ -653,6 +687,36 @@ def load_onnx_all(
     return dp_ort, text_enc_ort, vector_est_ort, vocoder_ort
 
 
+def load_reference_style_encoder(
+    onnx_dir: str,
+    opts: Optional[ort.SessionOptions] = None,
+    providers: Optional[list[str]] = None,
+) -> ReferenceStyleEncoder:
+    """Load the optional ONNX reference → style helper graphs.
+
+    Run ``exports/export_onnx.py`` with the reference helpers enabled before
+    calling this function; all three helper files are required.
+    """
+    opts = opts or ort.SessionOptions()
+    providers = providers or ["CPUExecutionProvider"]
+    required = {
+        "codec_encoder": "codec_encoder.onnx",
+        "style_encoder": "style_encoder.onnx",
+        "duration_style_encoder": "duration_style_encoder.onnx",
+    }
+    paths = {name: os.path.join(onnx_dir, filename) for name, filename in required.items()}
+    missing = [path for path in paths.values() if not os.path.exists(path)]
+    if missing:
+        raise FileNotFoundError(
+            "Missing ONNX reference-style helper(s): " + ", ".join(missing)
+        )
+    return ReferenceStyleEncoder(
+        load_onnx(paths["codec_encoder"], opts, providers),
+        load_onnx(paths["style_encoder"], opts, providers),
+        load_onnx(paths["duration_style_encoder"], opts, providers),
+    )
+
+
 def load_cfgs(onnx_dir: str, config_path: str = "config/tts.json") -> dict:
     # Prefer an explicit config next to the onnx files; otherwise fall back
     # to the single repo-level config/tts.json.
@@ -676,18 +740,34 @@ def text_to_indices(text: str, lang: str = "he") -> list[int]:
 
 
 def load_text_to_speech(
-    onnx_dir: str, use_gpu: bool = False, config_path: str = "config/tts.json",
+    onnx_dir: str,
+    use_gpu: bool = False,
+    config_path: str = "config/tts.json",
+    phonikud_path: Optional[str] = None,
+    threads: Optional[int] = None,
 ) -> TextToSpeech:
     opts = ort.SessionOptions()
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     # ORT over-subscribes on many-core CPUs (NUMA/SMT contention).
     # Empirically 4–8 intra-op threads is optimal for this model on CPU.
-    n_threads = int(os.environ.get("ORT_NUM_THREADS", min(8, os.cpu_count() or 1)))
+    n_threads = int(
+        threads
+        or os.environ.get("ORT_NUM_THREADS")
+        or os.environ.get("ORT_INTRA")
+        or min(8, os.cpu_count() or 1)
+    )
     opts.intra_op_num_threads = n_threads
     opts.inter_op_num_threads = 1
     if use_gpu:
-        raise NotImplementedError("GPU mode is not fully tested")
+        available = ort.get_available_providers()
+        if "CUDAExecutionProvider" not in available:
+            raise RuntimeError(
+                "CUDAExecutionProvider is unavailable; install onnxruntime-gpu "
+                "or call with use_gpu=False."
+            )
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        print("Using CUDAExecutionProvider for inference")
     else:
         providers = ["CPUExecutionProvider"]
         print(f"Using CPU for inference (intra_op_threads={n_threads})")
@@ -696,7 +776,7 @@ def load_text_to_speech(
         onnx_dir, opts, providers
     )
     text_processor = load_text_processor(onnx_dir)
-    g2p = TextProcessor()
+    g2p = TextProcessor(renikud_path=phonikud_path)
     return TextToSpeech(
         cfgs, text_processor, dp_ort, text_enc_ort, vector_est_ort, vocoder_ort,
         g2p=g2p,

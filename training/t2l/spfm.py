@@ -80,6 +80,8 @@ def spfm_forward_mask(
             latent_mask=latent_mask,
             text_mask=text_masks,
             current_step=t_spfm,
+            total_step=torch.ones_like(t_spfm),
+            return_velocity=True,
         )
 
         u_text_spfm = u_text.expand(B, D_text, 1)
@@ -93,6 +95,8 @@ def spfm_forward_mask(
             latent_mask=latent_mask,
             text_mask=u_text_mask_spfm,
             current_step=t_spfm,
+            total_step=torch.ones_like(t_spfm),
+            return_velocity=True,
         )
 
         final_mask_spfm = latent_mask * target_loss_mask
