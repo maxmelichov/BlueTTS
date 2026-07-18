@@ -25,6 +25,36 @@ DEFAULT_PACE_BLEND = 0.5
 DEFAULT_MIXED_PACE_BLEND = 0.5
 # Default classifier-free guidance scale (vector field).
 DEFAULT_CFG_SCALE = 4.0
+# Speaking rate: 1.05 matches Space UI 1.0x.
+DEFAULT_SPEED = 1.05
+# End-fade applied by :func:`trim_chunk_wav` after duration trim.
+_TRIM_FADE_SEC = 0.01
+
+
+def trim_chunk_wav(
+    wav: np.ndarray,
+    sample_rate: int,
+    duration_sec: float,
+    fade_sec: float = _TRIM_FADE_SEC,
+) -> np.ndarray:
+    """Trim waveform to ``floor(sr * duration)`` and apply a short end fade.
+
+    Matches Space / reference inference: no last-packet drop on the latent;
+    length is enforced on the waveform after the vocoder.
+    """
+    wav = np.asarray(wav, dtype=np.float32).reshape(-1)
+    n = max(0, int(np.floor(float(duration_sec) * float(sample_rate))))
+    if n <= 0:
+        return np.zeros(0, dtype=np.float32)
+    if wav.shape[0] > n:
+        wav = wav[:n].copy()
+    else:
+        wav = wav.copy()
+    fs = int(float(fade_sec) * float(sample_rate))
+    if fs > 0 and wav.shape[0] > 0:
+        fs = min(fs, int(wav.shape[0]))
+        wav[-fs:] *= np.linspace(1.0, 0.0, fs, dtype=np.float32)
+    return wav
 
 
 def blend_duration_pace(
@@ -475,7 +505,7 @@ class TextToSpeech:
         lang_list: list[str],
         style: Style,
         total_step: int,
-        speed: float = 1.05,
+        speed: float = DEFAULT_SPEED,
         cfg_scale: float = DEFAULT_CFG_SCALE,
         pace_blend: float = 0.0,
         pace_dpt_ref: Optional[float] = None,
@@ -543,21 +573,33 @@ class TextToSpeech:
                 xt = v_uncond + cfg_scale * (v_cond - v_uncond)
             else:
                 xt, *_ = self.vector_est_ort.run(None, cond)
-        # Hub vocoder.onnx may bake identity mean/std; denorm VF latents in Python.
+
+        # Unnormalize before decode when the vocoder expects raw AE-space latents
+        # (Hub graphs that baked identity mean/std). Proper VocoderWithStats
+        # exports bake denorm in-graph, so denorm_before_vocoder stays False.
+        # No masking / last-packet drop: feed the full denoised latent to the vocoder.
         if (
             self.denorm_before_vocoder
             and self.mean is not None
             and self.std is not None
         ):
-            ns = self.normalizer_scale if self.normalizer_scale not in (0.0, 1.0) else 1.0
+            ns = self.normalizer_scale if self.normalizer_scale != 0.0 else 1.0
             xt = (xt / ns) * self.std + self.mean
         wav, *_ = self.vocoder_ort.run(None, {"latent": xt.astype(np.float32)})
-        frame_len = self.base_chunk_size * self.chunk_compress_factor
-        if wav.shape[-1] > 2 * frame_len:
-            wav = wav[..., frame_len:-frame_len]
         if wav.ndim == 3 and wav.shape[1] == 1:
             wav = wav[:, 0, :]
-        return wav.astype(np.float32), dur_onnx
+        wav = np.asarray(wav, dtype=np.float32)
+        # Space: trim each item to floor(sr * dur). Batch items may differ in
+        # length after trim, so rebuild a [B, T_max] array (zero-padded).
+        trimmed = [
+            trim_chunk_wav(wav[b], self.sample_rate, float(dur_onnx[b])).reshape(-1)
+            for b in range(bsz)
+        ]
+        t_max = max((t.shape[0] for t in trimmed), default=0)
+        out = np.zeros((bsz, t_max), dtype=np.float32)
+        for b, t in enumerate(trimmed):
+            out[b, : t.shape[0]] = t
+        return out, dur_onnx
 
     def __call__(
         self,
@@ -565,9 +607,9 @@ class TextToSpeech:
         lang: Union[str, list[str]],
         style: Style,
         total_step: int,
-        speed: float = 1.0,
+        speed: float = DEFAULT_SPEED,
         cfg_scale: float = DEFAULT_CFG_SCALE,
-        silence_duration: float = 0.0,
+        silence_duration: float = 0.3,
         text_is_phonemes: bool = False,
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
@@ -578,6 +620,7 @@ class TextToSpeech:
           match batch size; no chunking).
         - ``text`` as ``str`` → chunked single-speaker synthesis, concatenated with
           ``silence_duration`` seconds of silence between chunks.
+          Each chunk is already trimmed to predicted duration inside ``_infer``.
 
         ``cfg_scale`` enables classifier-free guidance when uncond embeddings are
         available (loaded from ``uncond.npz`` by :func:`load_text_to_speech`) or when
@@ -667,7 +710,7 @@ class TextToSpeech:
         lang_list: list[str],
         style: Style,
         total_step: int,
-        speed: float = 1.05,
+        speed: float = DEFAULT_SPEED,
         cfg_scale: float = DEFAULT_CFG_SCALE,
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
