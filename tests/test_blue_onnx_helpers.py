@@ -14,6 +14,7 @@ from src.blue_onnx import (
     chunk_text,
     length_to_mask,
     strip_lang_tags_from_phoneme_string,
+    trim_chunk_wav,
 )
 
 
@@ -53,6 +54,23 @@ class TestLengthToMask(unittest.TestCase):
     def test_shape(self):
         m = length_to_mask(np.array([2, 3], dtype=np.int64))
         self.assertEqual(m.shape, (2, 1, 3))
+
+
+class TestTrimChunkWav(unittest.TestCase):
+    def test_trims_to_floor_duration(self):
+        sr = 100
+        wav = np.ones(50, dtype=np.float32)
+        out = trim_chunk_wav(wav, sr, duration_sec=0.2, fade_sec=0.0)
+        self.assertEqual(out.shape[0], 20)
+        np.testing.assert_allclose(out, 1.0)
+
+    def test_end_fade(self):
+        sr = 100
+        wav = np.ones(50, dtype=np.float32)
+        out = trim_chunk_wav(wav, sr, duration_sec=0.5, fade_sec=0.05)
+        self.assertEqual(out.shape[0], 50)
+        self.assertAlmostEqual(float(out[-1]), 0.0, places=5)
+        self.assertAlmostEqual(float(out[0]), 1.0, places=5)
 
 
 class TestUnicodeProcessor(unittest.TestCase):

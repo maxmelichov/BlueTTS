@@ -15,12 +15,14 @@ from ..blue_onnx import (
     BLUE_SYNTH_MAX_CHUNK_LEN,
     DEFAULT_MIXED_PACE_BLEND,
     DEFAULT_PACE_BLEND,
+    DEFAULT_SPEED,
     DURATION_PACE_DPT_REF,
     TextProcessor,
     blend_duration_pace,
     chunk_text,
     strip_lang_tags_from_phoneme_string,
     text_to_indices,
+    trim_chunk_wav,
 )
 
 # Keep in sync with ``src.blue_onnx._INLINE_LANG_PAIR`` (mixed inline-language detection).
@@ -230,11 +232,11 @@ class BlueTRT:
         style_json: Optional[str] = None,
         steps: int = 5,
         cfg_scale: float = 4.0,
-        speed: float = 1.0,
+        speed: float = DEFAULT_SPEED,
         seed: int = 42,
         chunk_len: int = BLUE_SYNTH_MAX_CHUNK_LEN,
-        silence_sec: float = 0.15,
-        fade_duration: float = 0.02,
+        silence_sec: float = 0.3,
+        fade_duration: float = 0.01,
         renikud_path: Optional[str] = None,
         device: str = "cuda",
     ):
@@ -245,6 +247,7 @@ class BlueTRT:
         self.seed = seed
         self.chunk_len = min(max(1, chunk_len), BLUE_SYNTH_MAX_CHUNK_LEN)
         self.silence_sec = silence_sec
+        # Kept for API compat; trim_chunk_wav applies the end fade instead.
         self.fade_duration = fade_duration
         self.device = device
 
@@ -430,7 +433,7 @@ class BlueTRT:
             text_emb = next(iter(te_out.values()))
 
         # Duration.
-        T_lat = self._predict_duration(
+        T_lat, duration_sec = self._predict_duration(
             text_ids,
             text_mask,
             z_ref_norm,
@@ -442,8 +445,8 @@ class BlueTRT:
         # Flow matching with optional CFG.
         latent = self._flow_matching(text_emb, ref_values, text_mask, T_lat, cfg_scale)
 
-        # Decode.
-        return self._decode(latent)
+        # Decode (full latent → vocoder; trim waveform to DP duration).
+        return self._decode(latent, duration_sec)
 
     def _predict_duration(
         self,
@@ -453,10 +456,12 @@ class BlueTRT:
         style_dp: Optional[torch.Tensor],
         pace_blend: float = 0.0,
         pace_dpt_ref: Optional[float] = None,
-    ) -> int:
+    ) -> Tuple[int, float]:
         T_lat: Optional[int] = None
+        duration_sec: Optional[float] = None
         ref = float(pace_dpt_ref) if pace_dpt_ref is not None else DURATION_PACE_DPT_REF
         tm_np = text_mask.detach().cpu().numpy()
+        packet_samples = self.base_chunk_size * self.chunk_compress_factor
 
         if style_dp is not None and self._dp_style is not None:
             if style_dp.dim() == 2:
@@ -469,7 +474,6 @@ class BlueTRT:
                 )
                 val = float(d[0])
                 duration_sec = val / max(self.speed, 1e-6)
-                packet_samples = self.base_chunk_size * self.chunk_compress_factor
                 T_lat = max(1, int(np.ceil(duration_sec * self.sample_rate / packet_samples)))
 
         if T_lat is None and z_ref_norm is not None and self._dp is not None:
@@ -482,14 +486,16 @@ class BlueTRT:
                 )
                 val = float(d[0])
                 duration_sec = val / max(self.speed, 1e-6)
-                packet_samples = self.base_chunk_size * self.chunk_compress_factor
                 T_lat = max(1, int(np.ceil(duration_sec * self.sample_rate / packet_samples)))
 
         if T_lat is None:
             T_lat = int(text_ids.shape[1] * 1.3)
 
         T_lat = min(max(int(T_lat), 1), 2048)
-        return max(1, T_lat)
+        T_lat = max(1, T_lat)
+        if duration_sec is None:
+            duration_sec = float(T_lat * packet_samples) / float(self.sample_rate)
+        return T_lat, float(duration_sec)
 
     def _vf_feed(
         self,
@@ -570,26 +576,22 @@ class BlueTRT:
 
         return x
 
-    def _decode(self, latent: torch.Tensor) -> np.ndarray:
+    def _decode(self, latent: torch.Tensor, duration_sec: float) -> np.ndarray:
         # Vocoder engine matches `exports/export_onnx.py` VocoderWithStats: in-graph
         # denorm + 144ch→24ch time shuffle; pass flow output [1, 144, T] only.
+        # No last-packet drop — trim waveform to predicted duration after decode.
         voc_out = self._vocoder.run({"latent": latent})
         wav = voc_out.get("waveform")
         if wav is None:
             wav = next(iter(voc_out.values()))
 
-        frame_len = self.hop_length * self.chunk_compress_factor
-        if wav.shape[-1] > 2 * frame_len:
-            wav = wav[..., frame_len:-frame_len]
-
-        wav_np = wav.squeeze().cpu().numpy().astype(np.float32)
-
-        fs = int(self.fade_duration * self.sample_rate)
-        if fs and len(wav_np) >= 2 * fs:
-            wav_np = wav_np.copy()
-            wav_np[:fs] *= np.linspace(0.0, 1.0, fs, dtype=np.float32)
-            wav_np[-fs:] *= np.linspace(1.0, 0.0, fs, dtype=np.float32)
-        return wav_np
+        wav_np = wav.squeeze().detach().cpu().numpy().astype(np.float32)
+        return trim_chunk_wav(
+            wav_np,
+            self.sample_rate,
+            float(duration_sec),
+            fade_sec=float(self.fade_duration),
+        )
 
 
 def load_text_to_speech(

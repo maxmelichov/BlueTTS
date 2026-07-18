@@ -15,6 +15,7 @@ from ..blue_onnx import (
     AVAILABLE_LANGS,
     DEFAULT_MIXED_PACE_BLEND,
     DEFAULT_PACE_BLEND,
+    DEFAULT_SPEED,
     DURATION_PACE_DPT_REF,
     TextProcessor,
     UnicodeProcessor,
@@ -22,6 +23,7 @@ from ..blue_onnx import (
     chunk_text,
     load_text_processor as _load_text_processor_onnx,
     strip_lang_tags_from_phoneme_string,
+    trim_chunk_wav,
 )
 
 from training.t2l.models.text_encoder import TextEncoder  # noqa: E402
@@ -116,7 +118,7 @@ class TextToSpeech:
         lang_list: list[str],
         style: Style,
         total_step: int,
-        speed: float = 1.0,
+        speed: float = DEFAULT_SPEED,
         cfg_scale: float = 3.0,
         pace_blend: float = 0.0,
         pace_dpt_ref: Optional[float] = None,
@@ -156,6 +158,7 @@ class TextToSpeech:
         ref = float(pace_dpt_ref) if pace_dpt_ref is not None else DURATION_PACE_DPT_REF
         dur_np = blend_duration_pace(dur_np, tm_np, pace_blend, ref)
         dur = torch.from_numpy(dur_np).to(self.device) / max(float(speed), 1e-6)
+        dur_out = dur.detach().cpu().numpy().astype(np.float32)
 
         # Text encoding.
         h_text = self.text_encoder(text_ids, style.ttl, text_mask=text_mask)
@@ -178,16 +181,18 @@ class TextToSpeech:
                 return_velocity=False,
             )
 
-        wav = self._decode(xt)
-        return wav, dur.detach().cpu().numpy()
+        wav = self._decode(xt, dur_out)
+        return wav, dur_out
 
-    def _decode(self, x: torch.Tensor) -> np.ndarray:
+    def _decode(self, x: torch.Tensor, durations: np.ndarray) -> np.ndarray:
         if self.mean is None or self.std is None:
             raise ValueError("Latent stats (mean/std) not loaded.")
-        ns = self.normalizer_scale
-        frame_len = self.base_chunk_size * self.chunk_compress_factor
+        ns = float(self.normalizer_scale) or 1.0
+        bsz = int(x.shape[0])
+        durations = np.asarray(durations, dtype=np.float32).reshape(-1)
 
         # Prefer BlueV3-onnx vocoder: Hub PT package has no matching AE weights.
+        # No last-packet drop — feed the full denoised latent; trim waveform by DP duration.
         if self._vocoder_ort is not None:
             xt = x.detach().cpu().numpy().astype(np.float32)
             mean = self.mean.detach().cpu().numpy().astype(np.float32)
@@ -195,26 +200,29 @@ class TextToSpeech:
             if mean.ndim == 1:
                 mean = mean.reshape(1, -1, 1)
                 std = std.reshape(1, -1, 1)
-            # Hub vocoder.onnx bakes identity mean/std; denorm in Python first.
-            if self.denorm_before_vocoder and ns not in (0.0, 1.0):
+            if self.denorm_before_vocoder:
                 xt = (xt / ns) * std + mean
-            elif self.denorm_before_vocoder:
-                xt = xt * std + mean
             wav, *_ = self._vocoder_ort.run(None, {"latent": xt})
             if wav.ndim == 3 and wav.shape[1] == 1:
                 wav = wav[:, 0, :]
-            if wav.shape[-1] > 2 * frame_len:
-                wav = wav[..., frame_len:-frame_len]
-            return np.asarray(wav, dtype=np.float32)
+            wav = np.asarray(wav, dtype=np.float32)
+        else:
+            z = (x / ns) * self.std + self.mean
+            z = decompress_latents(z, factor=self.chunk_compress_factor, target_channels=self.ldim)
+            wav_t = self.vocoder(z)
+            if wav_t.dim() == 3 and wav_t.shape[1] == 1:
+                wav_t = wav_t.squeeze(1)
+            wav = wav_t.detach().cpu().numpy().astype(np.float32)
 
-        z = (x / ns) * self.std + self.mean if ns not in (0.0, 1.0) else x * self.std + self.mean
-        z = decompress_latents(z, factor=self.chunk_compress_factor, target_channels=self.ldim)
-        wav = self.vocoder(z)
-        if wav.shape[-1] > 2 * frame_len:
-            wav = wav[..., frame_len:-frame_len]
-        if wav.dim() == 3 and wav.shape[1] == 1:
-            wav = wav.squeeze(1)
-        return wav.detach().cpu().numpy().astype(np.float32)
+        trimmed = [
+            trim_chunk_wav(wav[b], self.sample_rate, float(durations[b])).reshape(-1)
+            for b in range(bsz)
+        ]
+        t_max = max((t.shape[0] for t in trimmed), default=0)
+        out = np.zeros((bsz, t_max), dtype=np.float32)
+        for b, t in enumerate(trimmed):
+            out[b, : t.shape[0]] = t
+        return out
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -224,9 +232,9 @@ class TextToSpeech:
         lang: Union[str, list[str]],
         style: Style,
         total_step: int,
-        speed: float = 1.0,
+        speed: float = DEFAULT_SPEED,
         cfg_scale: float = 3.0,
-        silence_duration: float = 0.0,
+        silence_duration: float = 0.3,
         text_is_phonemes: bool = False,
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
@@ -238,6 +246,7 @@ class TextToSpeech:
 
         See :meth:`src.blue_onnx.TextToSpeech.__call__` for ``pace_blend`` and
         ``pace_dpt_ref`` (more consistent ``speed`` across languages).
+        Each chunk is already trimmed to predicted duration inside ``_infer``.
         """
         phonemize = not text_is_phonemes
         if isinstance(text, list):
