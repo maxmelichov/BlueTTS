@@ -4,7 +4,7 @@ from pathlib import Path
 import soundfile as sf
 
 sys.path.append(".")
-from src.blue_onnx import load_text_to_speech, load_voice_style
+from src.blue_onnx import limit_peak, load_text_to_speech, load_voice_style
 
 onnx_dir = os.environ.get("ONNX_DIR", "onnx_models")
 tts = load_text_to_speech(onnx_dir=onnx_dir)
@@ -30,6 +30,7 @@ audio, _ = tts(
 )
 if audio.ndim == 2:
     audio = audio[0]
+audio = limit_peak(audio)  # keep the WAV from clipping when the vocoder overshoots
 out = Path("examples/out/mixed.wav")
 out.parent.mkdir(parents=True, exist_ok=True)
 sf.write(out, audio, tts.sample_rate)

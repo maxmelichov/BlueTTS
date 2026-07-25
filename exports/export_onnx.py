@@ -322,7 +322,7 @@ def export_style_extractors(
     ).eval()
     ae_enc_path = os.path.join(onnx_dir, "codec_encoder.onnx")
     export_one(ae_enc_wrapped, ae_enc_path, (mel,), ["mel"], ["z_ref"], {
-        "mel": {2: "T_mel"}, "z_ref": {2: "T_ref"},
+        "mel": {0: "B", 2: "T_mel"}, "z_ref": {0: "B", 2: "T_ref"},
     }, do_slim=do_slim, do_int8=do_int8)
     if do_verify:
         all_ok &= verify(ae_enc_wrapped, ae_enc_path, (mel,), ["mel"], "codec_encoder", atol=1e-4, rtol=1e-3)
@@ -331,7 +331,8 @@ def export_style_extractors(
     se_names = ["z_ref", "ref_mask"]
     se_path = os.path.join(onnx_dir, "style_encoder.onnx")
     export_one(ref_enc, se_path, se_inputs, se_names, ["style_ttl"], {
-        "z_ref": {2: "T_ref"}, "ref_mask": {2: "T_ref"},
+        "z_ref": {0: "B", 2: "T_ref"}, "ref_mask": {0: "B", 2: "T_ref"},
+        "style_ttl": {0: "B"},
     }, do_slim=do_slim, do_int8=do_int8)
     if do_verify:
         all_ok &= verify(ref_enc, se_path, se_inputs, se_names, "style_encoder", atol=1e-4, rtol=1e-3)
@@ -339,7 +340,8 @@ def export_style_extractors(
     dp_ref_wrapped = DPReferenceStyleWrapper(dp).eval()
     dp_ref_path = os.path.join(onnx_dir, "duration_style_encoder.onnx")
     export_one(dp_ref_wrapped, dp_ref_path, se_inputs, se_names, ["style_dp"], {
-        "z_ref": {2: "T_ref"}, "ref_mask": {2: "T_ref"},
+        "z_ref": {0: "B", 2: "T_ref"}, "ref_mask": {0: "B", 2: "T_ref"},
+        "style_dp": {0: "B"},
     }, do_slim=do_slim, do_int8=do_int8)
     if do_verify:
         all_ok &= verify(dp_ref_wrapped, dp_ref_path, se_inputs, se_names, "duration_style_encoder", atol=1e-4, rtol=1e-3)
@@ -452,15 +454,18 @@ def main():
     _replace_mha(dp)
 
     # ---- dummy inputs -------------------------------------------------------
-    B, T_text, T_lat = 1, 32, 100
+    # Trace with B=2 so batch-dependent shapes stay symbolic; axis 0 is exported
+    # dynamic ("B") on every graph, which is what TextToSpeech.batch() needs.
+    B, T_text, T_lat = 2, 32, 100
     text_ids = torch.zeros(B, T_text, dtype=torch.long)
     text_mask = torch.ones(B, 1, T_text)
     style_ttl = torch.randn(B, n_style, d_model)
     latent_mask = torch.ones(B, 1, T_lat)
     noisy_latent = torch.randn(B, compressed, T_lat)
     text_emb = torch.randn(B, d_model, T_text)
-    cur_step = torch.tensor([0.0])
-    tot_step = torch.tensor([1.0])
+    cur_step = torch.zeros(B)
+    tot_step = torch.ones(B)
+    # cfg_scale stays [1]: it broadcasts over the batch inside the graph.
     cfg_scale = torch.tensor([4.0])
     style_dp_s = torch.randn(B, cfg["dp_style_tokens"], cfg["dp_style_dim"])
     z_pred = torch.randn(B, compressed, T_lat)
@@ -477,8 +482,8 @@ def main():
     te_inputs = (text_ids, style_ttl, text_mask)
     te_names = ["text_ids", "style_ttl", "text_mask"]
     export_one(text_enc, te_path, te_inputs, te_names, ["text_emb"], {
-        "text_ids": {1: "T_text"}, "style_ttl": {1: "T_ref"},
-        "text_mask": {2: "T_text"}, "text_emb": {2: "T_text"},
+        "text_ids": {0: "B", 1: "T_text"}, "style_ttl": {0: "B", 1: "T_ref"},
+        "text_mask": {0: "B", 2: "T_text"}, "text_emb": {0: "B", 2: "T_text"},
     }, do_slim=args.slim, do_int8=args.int8)
     if do_verify:
         all_ok &= verify(text_enc, te_path, te_inputs, te_names, "text_encoder", atol=1e-4, rtol=1e-3)
@@ -490,9 +495,11 @@ def main():
     vf_names = ["noisy_latent", "text_emb", "style_ttl", "latent_mask", "text_mask",
                 "current_step", "total_step", "cfg_scale"]
     export_one(vf_wrapped, vf_path, vf_inputs, vf_names, ["denoised_latent"], {
-        "noisy_latent": {2: "T_lat"}, "text_emb": {2: "T_text"}, "style_ttl": {1: "T_ref"},
-        "latent_mask": {2: "T_lat"}, "text_mask": {2: "T_text"},
-        "denoised_latent": {2: "T_lat"},
+        "noisy_latent": {0: "B", 2: "T_lat"}, "text_emb": {0: "B", 2: "T_text"},
+        "style_ttl": {0: "B", 1: "T_ref"},
+        "latent_mask": {0: "B", 2: "T_lat"}, "text_mask": {0: "B", 2: "T_text"},
+        "current_step": {0: "B"}, "total_step": {0: "B"},
+        "denoised_latent": {0: "B", 2: "T_lat"},
     }, do_slim=args.slim, do_int8=args.int8)
     if do_verify:
         all_ok &= verify(vf_wrapped, vf_path, vf_inputs, vf_names, "vector_estimator")
@@ -504,7 +511,7 @@ def main():
     ).eval()
     voc_path = os.path.join(args.onnx_dir, "vocoder.onnx")
     export_one(voc_wrapped, voc_path, (z_pred,), ["latent"], ["waveform"], {
-        "latent": {2: "T_lat"}, "waveform": {2: "T_wav"},
+        "latent": {0: "B", 2: "T_lat"}, "waveform": {0: "B", 2: "T_wav"},
     }, do_slim=args.slim, do_int8=args.int8)
     if do_verify:
         all_ok &= verify(voc_wrapped, voc_path, (z_pred,), ["latent"], "vocoder", atol=1e-4, rtol=1e-3)
@@ -515,7 +522,8 @@ def main():
     dp_inputs = (text_ids, style_dp_s, text_mask)
     dp_names = ["text_ids", "style_dp", "text_mask"]
     export_one(dp_wrapped, dp_path, dp_inputs, dp_names, ["duration"], {
-        "text_ids": {1: "T_text"}, "text_mask": {2: "T_text"},
+        "text_ids": {0: "B", 1: "T_text"}, "style_dp": {0: "B"},
+        "text_mask": {0: "B", 2: "T_text"}, "duration": {0: "B"},
     }, do_slim=args.slim, do_int8=args.int8)
     if do_verify:
         all_ok &= verify(dp_wrapped, dp_path, dp_inputs, dp_names, "duration_predictor", atol=1e-4, rtol=1e-3)

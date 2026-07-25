@@ -3,7 +3,7 @@ import argparse
 import soundfile as sf
 
 sys.path.append(".")
-from src.blue_onnx import load_text_to_speech, load_voice_style
+from src.blue_onnx import limit_peak, load_text_to_speech, load_voice_style
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--text", default="שלום עולם")
@@ -27,6 +27,7 @@ audio, _ = tts(
 )
 if audio.ndim == 2:
     audio = audio[0]
+audio = limit_peak(audio)  # keep the WAV from clipping when the vocoder overshoots
 sr = tts.sample_rate
 sf.write(args.out, audio, sr)
 print(f"Saved to {args.out}")

@@ -7,11 +7,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "numpy",
+    "num2words",
     "librosa",
     "onnxruntime",
     "soundfile",
     "huggingface-hub>=0.26.0",
-    "renikud-onnx",
+    "renikud-plus",
     "phonemizer-fork>=3.3.2",
     "espeakng-loader>=0.2.4",
     "onnx>=1.20.1",

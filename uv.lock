@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -136,12 +136,13 @@ dependencies = [
     { name = "espeakng-loader" },
     { name = "huggingface-hub" },
     { name = "librosa" },
+    { name = "num2words" },
     { name = "numpy" },
     { name = "onnx" },
     { name = "onnxruntime" },
     { name = "onnxslim" },
     { name = "phonemizer-fork" },
-    { name = "renikud-onnx" },
+    { name = "renikud-plus" },
     { name = "soundfile" },
 ]
 
@@ -175,6 +176,7 @@ requires-dist = [
     { name = "espeakng-loader", specifier = ">=0.2.4" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "librosa" },
+    { name = "num2words" },
     { name = "numpy" },
     { name = "onnx", specifier = ">=1.20.1" },
     { name = "onnx", marker = "extra == 'export'", specifier = ">=1.17.0" },
@@ -184,7 +186,7 @@ requires-dist = [
     { name = "onnxslim", specifier = ">=0.1.90" },
     { name = "onnxslim", marker = "extra == 'export'", specifier = ">=0.1.0" },
     { name = "phonemizer-fork", specifier = ">=3.3.2" },
-    { name = "renikud-onnx" },
+    { name = "renikud-plus" },
     { name = "safetensors", marker = "extra == 'export'", specifier = ">=0.4.0" },
     { name = "soundfile" },
     { name = "torch", marker = "extra == 'export'", specifier = ">=2.1.0" },
@@ -442,6 +444,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/85/8e/8f2f94cd40af1b51e
 wheels = [
     { url = "https://files.pythonhosted.org/packages/da/90/022c79d6e5e6f843268c10b84d4a021ee3afba0621d3c176d3ff2024bfc8/dlinfo-2.0.0-py3-none-any.whl", hash = "sha256:b32cc18e3ea67c0ca9ca409e5b41eed863bd1363dbc9dd3de90fedf11b61e7bc", size = 3654, upload-time = "2025-01-16T15:43:09.474Z" },
 ]
+
+[[package]]
+name = "docopt"
+version = "0.6.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a2/55/8f8cab2afd404cf578136ef2cc5dfb50baa1761b68c9da1fb1e4eed343c9/docopt-0.6.2.tar.gz", hash = "sha256:49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491", size = 25901, upload-time = "2014-06-16T11:18:57.406Z" }
 
 [[package]]
 name = "espeakng-loader"
@@ -938,6 +946,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/6a/51/63fe664f3908c97be9d2e4f1158eb633317598cfa6e1fc14af5383f17512/networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509", size = 2517025, upload-time = "2025-12-08T17:02:39.908Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl", hash = "sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762", size = 2068504, upload-time = "2025-12-08T17:02:38.159Z" },
+]
+
+[[package]]
+name = "num2words"
+version = "0.5.14"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "docopt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f6/58/ad645bd38b4b648eb2fc2ba1b909398e54eb0cbb6a7dbd2b4953e38c9621/num2words-0.5.14.tar.gz", hash = "sha256:b066ec18e56b6616a3b38086b5747daafbaa8868b226a36127e0451c0cf379c6", size = 218213, upload-time = "2024-12-17T20:17:10.191Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d6/5b/545e9267a1cc080c8a1be2746113a063e34bcdd0f5173fd665a5c13cb234/num2words-0.5.14-py3-none-any.whl", hash = "sha256:1c8e5b00142fc2966fd8d685001e36c4a9911e070d1b120e1beb721fa1edb33d", size = 163525, upload-time = "2024-12-17T20:17:06.074Z" },
 ]
 
 [[package]]
@@ -1636,14 +1656,17 @@ wheels = [
 ]
 
 [[package]]
-name = "renikud-onnx"
-version = "0.1.0"
+name = "renikud-plus"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy" },
     { name = "onnxruntime" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/41/bc/8ebe22fc96be36b1a0300361c44df98e1a39ef83a445265f2c8189b990de/renikud_plus-0.3.0.tar.gz", hash = "sha256:123e8c7c4b3bd1d00e4b2161ea10bce29f7f7a4a7e38a034402afeecb767b721", size = 6238, upload-time = "2026-07-17T10:46:43.99Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/21/a8/1e7a558db1602be08febe87ff3d5df7b11b2efc19cd4d4c95699f582b5bd/renikud_onnx-0.1.0-py3-none-any.whl", hash = "sha256:9dd808ca3604a30fc4cea54050de8d228ca2f5c97cdd7ac0d06a3014af6da028", size = 3545, upload-time = "2026-04-10T22:06:55.012Z" },
+    { url = "https://files.pythonhosted.org/packages/35/d6/df772315350329dfbea4508099d37c3deaa731a3686ac50e20d87c89f198/renikud_plus-0.3.0-py3-none-any.whl", hash = "sha256:0fe3b30bf2898471cb314dff89e0758d5290eb701e134e0e980ffb9aa775a805", size = 7049, upload-time = "2026-07-17T10:46:42.969Z" },
 ]
 
 [[package]]

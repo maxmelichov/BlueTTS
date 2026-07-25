@@ -26,7 +26,7 @@ pip install "blue-onnx"
 
 For Rust ONNX inference, see [blue-rs](https://github.com/thewh1teagle/blue-rs).
 
-**Inference with pip in three steps:** (1) install as above, (2) put ONNX in `./onnx_models` (see [Models](#models) — `hf download` from [`blue-onnx-v2`](https://huggingface.co/notmax123/blue-onnx-v2), or the int8 [INT8 bundle](https://huggingface.co/notmax123/bluev2-onnx-int8) into another folder), (3) copy a style JSON (e.g. from [voices/](https://github.com/maxmelichov/BlueTTS/tree/main/voices)) and Hebrew G2P `model.onnx` (see [Models](#models)), then use this from your project:
+**Inference with pip in three steps:** (1) install as above, (2) put ONNX in `./onnx_models` (see [Models](#models) — `hf download` from [`blue-onnx-v2`](https://huggingface.co/notmax123/blue-onnx-v2), or the int8 [INT8 bundle](https://huggingface.co/notmax123/bluev2-onnx-int8) into another folder), (3) copy a style JSON (e.g. from [voices/](https://github.com/maxmelichov/BlueTTS/tree/main/voices)), then use this from your project:
 
 ```python
 import soundfile as sf
@@ -35,11 +35,12 @@ from blue_onnx import BlueTTS
 tts = BlueTTS(
     onnx_dir="onnx_models",
     style_json="voices/female1.json",
-    renikud_path="model.onnx",
 )
 s, sr = tts.synthesize("Hello", lang="en")
 sf.write("out.wav", s, sr)
 ```
+
+Hebrew G2P ([RenikudPlus](https://github.com/maxmelichov/RenikudPlus)) downloads its own weights on first use; pass `renikud_path="model.onnx"` to point at a local copy instead.
 
 Optional accelerators (PyPI): install the extra, then drop the stock CPU wheel so a single build owns `onnxruntime`:
 
@@ -83,10 +84,11 @@ The Hub bundles do **not** include per-voice **style JSON**; use the sample `voi
 
 **Optional**
 
-- Hebrew G2P: 
+- Hebrew G2P: nothing to do — [RenikudPlus](https://github.com/maxmelichov/RenikudPlus) pulls [`notmax123/RenikudPlus`](https://huggingface.co/notmax123/RenikudPlus) (~310 MB) on first Hebrew synthesis and caches it. To pre-fetch or pin a local copy:
   ```bash
-  wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
+  uv run hf download notmax123/RenikudPlus model.onnx --local-dir .
   ```
+  then pass `renikud_path="model.onnx"` (`BlueTTS`, `load_text_to_speech`).
 - PyTorch checkpoints ([notmax123/blue-v2](https://huggingface.co/notmax123/blue-v2)) for **exporting new voice JSON** and ONNX: `uv sync --extra export` then
   ```bash
   uv run hf download notmax123/blue-v2 --repo-type model --local-dir ./pt_models
@@ -109,7 +111,32 @@ samples, sr = tts.synthesize(mixed, lang="he")
 sf.write("mixed_output.wav", samples, sr)
 ```
 
-If you are editing **this repo** without installing the package, use `from src.blue_onnx import BlueTTS` (as in `examples/`) or put `src` on `PYTHONPATH`.
+If you are editing **this repo** without installing the package, import from `src.blue_onnx` (as `examples/` do) or put `src` on `PYTHONPATH`.
+
+`BlueTTS` is the one-voice convenience front end. For per-text styles, batched synthesis or phoneme input, use `load_text_to_speech` / `load_voice_style` directly, as `examples/` do.
+
+### Text normalization
+
+The model only speaks phonemes, so digits and symbols have to become words first. `BlueTTS.synthesize` does this by default; on `TextToSpeech` it is opt-in:
+
+```python
+samples, _ = tts("ההזמנה IL-4829 תגיע ב 12/05/2024 בשעה 08:15, מחיר 1,500 ש\"ח (50% הנחה).",
+                 lang="he", style=style, total_step=8, normalize_text=True)
+```
+
+Numbers, prices, percentages, ratios, dates, clock times, phone numbers, emails, ticket/model codes, bracketed asides, markdown headers, repeated punctuation and Hebrew spelling quirks (gershayim, phonetic geresh, hyphenated compounds) are all handled — locale-aware, so `1,500` is a thousand in English/Hebrew and `1.500` is a thousand in German/Spanish/Italian. Spelled codes, phone numbers, dates and times are synthesized as separate slower spans so digit groups stay intelligible.
+
+Inspect exactly what will be spoken without synthesizing:
+
+```python
+from blue_onnx import prepare_text_for_synthesis, split_slow_segments
+
+prepared = prepare_text_for_synthesis(text, lang="he")   # mark_slow=False for plain text
+for segment, is_slow in split_slow_segments(prepared):
+    print(is_slow, segment)
+```
+
+`uv run python examples/normalize.py` prints both and writes the audio.
 
 ## Examples
 
@@ -118,6 +145,7 @@ Get models into `./onnx_models` (see [Models](#models)) and `voices/*.json` from
 ```bash
 uv run python examples/basic.py   # he / en / es / it / de + mixed in one run
 uv run python examples/mixed.py
+uv run python examples/normalize.py   # numbers, dates, times, codes, emails
 uv run python examples/app.py --lang en --text "Hello world."
 ```
 
@@ -170,7 +198,7 @@ uv run python exports/create_tensorrt.py \
 
 ## Acknowledgments
 
-Hebrew G2P uses [renikud](https://github.com/thewh1teagle/renikud). Thanks to [thewh1teagle](https://github.com/thewh1teagle).
+Hebrew G2P uses [RenikudPlus](https://github.com/maxmelichov/RenikudPlus), built on [renikud](https://github.com/thewh1teagle/renikud). Thanks to [thewh1teagle](https://github.com/thewh1teagle).
 
 ## License
 
