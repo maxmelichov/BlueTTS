@@ -488,11 +488,7 @@ def load_text_to_speech(
     mean, std = load_stats(weights_dir, device)
     text_processor = load_text_processor(weights_dir)
 
-    if renikud_path is None:
-        for cand in ("model.onnx", os.path.join(weights_dir, "model.onnx")):
-            if os.path.exists(cand):
-                renikud_path = cand
-                break
+    # renikud_path stays optional: RenikudPlus fetches its own weights when omitted.
     g2p = TextProcessor(renikud_path)
 
     return TextToSpeech(
