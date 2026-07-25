@@ -1,198 +1,187 @@
+"""DP data loading: natural utterances with worker-side 5%–95% reference crops."""
+
+from __future__ import annotations
+
+import math
 import random
+from typing import Optional
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from functools import partial
+
 from training.data.text2latent_dataset import Text2LatentDataset
-from training.utils import seed_worker
+from training.data.text_vocab import PAD_ID
+
+PACKET_SAMPLES = 512 * 6  # hop_length * chunk_compress_factor
+MAX_REF_PACKETS = 256  # build_reference_only inference cap (~17.8s)
 
 
-def _map_speaker_id(speaker_id, spk2idx: dict | None, unknown_spk: int = 0) -> int:
-    if spk2idx is None:
-        return int(speaker_id)
-    if speaker_id in spk2idx:
-        return int(spk2idx[speaker_id])
-    try:
-        return int(spk2idx.get(int(speaker_id), unknown_spk))
-    except (ValueError, TypeError):
-        return unknown_spk
+def collate_dp(batch):
+    """Collate natural utterances for DP training.
 
-
-def _map_speaker_ids(speaker_ids, spk2idx: dict | None, unknown_spk: int = 0) -> list[int]:
-    return [_map_speaker_id(s, spk2idx, unknown_spk) for s in speaker_ids]
-
-
-def _pad_wavs_texts(wavs, texts, speaker_ids):
-    max_wav_len = max(w.numel() for w in wavs)
-    max_text_len = max(t.numel() for t in texts)
-    batch_size = len(wavs)
-
-    wavs_padded = torch.zeros(batch_size, 1, max_wav_len, dtype=wavs[0].dtype)
-    wav_lengths = torch.empty(batch_size, dtype=torch.long)
-    texts_padded = torch.zeros(batch_size, max_text_len, dtype=texts[0].dtype)
-    text_masks = torch.zeros(batch_size, 1, max_text_len, dtype=torch.float32)
-
-    for i, (w, t) in enumerate(zip(wavs, texts)):
-        wl = w.numel()
-        tl = t.numel()
-        wavs_padded[i, 0, :wl] = w
-        wav_lengths[i] = wl
-        texts_padded[i, :tl] = t
-        text_masks[i, 0, :tl] = 1.0
-
-    speaker_ids_tensor = torch.tensor(speaker_ids, dtype=torch.long)
-    return wavs_padded, texts_padded, text_masks, wav_lengths, speaker_ids_tensor
-
-
-def collate_with_repeat_same_file(
-    batch,
-    sr: int = 44100,
-    repeat_p: float = 0.3,
-    sep_id: int | None = None,
-    n_min: int = 2,
-    n_max: int = 10,
-    silence_sec: float = 0.2,
-    spk2idx: dict | None = None,
-    unknown_spk: int = 0,
-    max_total_samples: int | None = None,
-):
+    The paper's DP reference is a random 5%–95% segment of the *input
+    speech*, so the crop is sampled in the worker and only the crop is
+    returned. The duration target only needs the full wav length.
     """
-    Repeat the SAME sample N times to synthesize longer sequences.
-
-    This is kept as an optional DP data path. The default DP dataloader below still
-    uses `collate_dp` because the paper setup trains on individual utterances.
-    """
-    assert sep_id is not None and sep_id != 0
-    assert 2 <= n_min <= n_max
-    assert spk2idx is not None, "Pass spk2idx via functools.partial(...)"
+    wavs = [item[0].reshape(-1) for item in batch]
+    texts = [item[1].reshape(-1) for item in batch]
+    speaker_ids = [int(item[2]) for item in batch]
 
     batch_size = len(batch)
-    num_rep = int(batch_size * repeat_p)
-    num_normal = batch_size - num_rep
+    wav_lengths = torch.tensor([wav.numel() for wav in wavs], dtype=torch.long)
+    text_lengths = torch.tensor([text.numel() for text in texts], dtype=torch.long)
+    max_text_len = int(text_lengths.max().item())
 
-    wavs = [b[0].reshape(-1) for b in batch]
-    texts = [b[1] for b in batch]
-    speaker_ids = _map_speaker_ids([b[2] for b in batch], spk2idx, unknown_spk)
+    crops = []
+    crop_packets = []
+    for wav in wavs:
+        valid_packets = max(1, wav.numel() // PACKET_SAMPLES)
+        min_crop = max(1, math.ceil(valid_packets * 0.05))
+        max_crop = max(min_crop, math.floor(valid_packets * 0.95))
+        max_crop = min(max_crop, MAX_REF_PACKETS)
+        min_crop = min(min_crop, max_crop)
+        crop = random.randint(min_crop, max_crop)
+        start = random.randint(0, valid_packets - crop)
+        crops.append(wav[start * PACKET_SAMPLES : (start + crop) * PACKET_SAMPLES])
+        crop_packets.append(crop)
 
-    idxs = list(range(batch_size))
-    random.shuffle(idxs)
+    max_crop_samples = max(crop_packets) * PACKET_SAMPLES
+    ref_wavs = torch.zeros(batch_size, max_crop_samples, dtype=wavs[0].dtype)
+    texts_padded = torch.full((batch_size, max_text_len), PAD_ID, dtype=texts[0].dtype)
+    text_masks = torch.zeros(batch_size, 1, max_text_len, dtype=torch.float32)
 
-    sep_val = int(torch.tensor([sep_id], dtype=texts[0].dtype).item())
-    silence_len = int(silence_sec * sr)
-    silence = torch.zeros(silence_len, dtype=wavs[0].dtype) if silence_len > 0 else None
+    for idx, (crop, text) in enumerate(zip(crops, texts)):
+        ref_wavs[idx, : crop.numel()] = crop
+        texts_padded[idx, : text.numel()] = text
+        text_masks[idx, 0, : text.numel()] = 1.0
 
-    new_wavs = []
-    new_texts = []
-    new_speaker_ids = []
-
-    for i in idxs[:num_normal]:
-        new_wavs.append(wavs[i])
-        new_texts.append(texts[i])
-        new_speaker_ids.append(speaker_ids[i])
-
-    for _ in range(num_rep):
-        idx0 = idxs[random.randrange(batch_size)]
-        w0 = wavs[idx0]
-        t0 = texts[idx0]
-        spk = speaker_ids[idx0]
-
-        n_repeat = random.randint(n_min, n_max)
-        if max_total_samples is not None and w0.numel() > 0:
-            max_repeat = max(1, max_total_samples // w0.numel())
-            n_repeat = min(n_repeat, max_repeat)
-
-        if silence is None:
-            w_cat = w0.repeat(n_repeat)
-        else:
-            total_len = n_repeat * w0.numel() + (n_repeat - 1) * silence_len
-            w_cat = torch.empty(total_len, dtype=w0.dtype)
-            pos = 0
-            for k in range(n_repeat):
-                w_cat[pos:pos + w0.numel()] = w0
-                pos += w0.numel()
-                if k < n_repeat - 1:
-                    w_cat[pos:pos + silence_len] = silence
-                    pos += silence_len
-
-        if n_repeat == 1:
-            t_cat = t0
-        else:
-            total_text_len = n_repeat * t0.numel() + (n_repeat - 1)
-            t_cat = torch.empty(total_text_len, dtype=t0.dtype)
-            pos = 0
-            for k in range(n_repeat):
-                t_cat[pos:pos + t0.numel()] = t0
-                pos += t0.numel()
-                if k < n_repeat - 1:
-                    t_cat[pos] = sep_val
-                    pos += 1
-
-        new_wavs.append(w_cat)
-        new_texts.append(t_cat)
-        new_speaker_ids.append(spk)
-
-    return _pad_wavs_texts(new_wavs, new_texts, new_speaker_ids)
+    return (
+        ref_wavs,
+        torch.tensor(crop_packets, dtype=torch.long),
+        texts_padded,
+        text_masks,
+        wav_lengths,
+        torch.tensor(speaker_ids, dtype=torch.long),
+    )
 
 
-def collate_dp(batch, spk2idx=None, unknown_spk=0):
+def build_balanced_sample_weights(
+    dataset: Text2LatentDataset,
+    lang_target: Optional[dict] = None,
+    length_buckets: tuple = (50, 100, 150, 200, 300),
+    length_power: float = 0.5,
+    min_bucket_count: int = 1000,
+) -> torch.Tensor:
+    """Per-sample weights that flatten language and text-length skew.
+
+    Weight is ``lang_weight * bucket_count^(-length_power)``; bucket counts
+    are floored at ``min_bucket_count`` so near-empty buckets are not
+    oversampled into memorization.
     """
-    Simple collate for duration predictor training (paper Sec 4.2).
+    langs = np.asarray(dataset.langs, dtype=object)
+    text_lengths = dataset.df["text"].astype(str).str.len().to_numpy()
+    bucket_ids = np.digitize(text_lengths, length_buckets)
 
-    No sample repetition — each utterance is treated individually.
-    The DP predicts utterance-level total latent duration.
+    lang_weight = np.ones(len(langs), dtype=np.float64)
+    if lang_target:
+        unique, counts = np.unique(langs, return_counts=True)
+        count_map = dict(zip(unique.tolist(), counts.tolist()))
+        total = float(len(langs))
+        for lang, target_prob in lang_target.items():
+            if lang in count_map:
+                natural_prob = count_map[lang] / total
+                lang_weight[langs == lang] = target_prob / natural_prob
 
-    batch items from Text2LatentDataset:
-        (wav, text_ids, speaker_id, ref_wav, is_self_ref, ref_speaker_id)
-    returns:
-        wavs_padded [B,1,T], texts_padded [B,L], text_masks [B,1,L],
-        wav_lengths [B], speaker_ids [B]
-    """
-    wavs = [b[0].reshape(-1) for b in batch]
-    texts = [b[1] for b in batch]
-    speaker_ids_raw = [b[2] for b in batch]
-    speaker_ids = _map_speaker_ids(speaker_ids_raw, spk2idx, unknown_spk)
-    return _pad_wavs_texts(wavs, texts, speaker_ids)
+    # Count (lang, bucket) pairs without pandas.
+    pair_keys = np.array(
+        [f"{lang}|{bucket}" for lang, bucket in zip(langs, bucket_ids)],
+        dtype=object,
+    )
+    unique_pairs, inverse, pair_counts = np.unique(
+        pair_keys, return_inverse=True, return_counts=True
+    )
+    counts = np.maximum(pair_counts[inverse], min_bucket_count)
+    bucket_weight = counts.astype(np.float64) ** (-length_power)
+
+    weights = lang_weight * bucket_weight
+    weights /= weights.sum()
+
+    # Report effective sampled distribution.
+    print("[Balance] Effective sampling distribution (lang, bucket -> mass):")
+    for key, count in zip(unique_pairs.tolist(), pair_counts.tolist()):
+        mass = float(weights[pair_keys == key].sum())
+        print(f"  {key}: n={count} mass={mass:.3f}")
+    return torch.from_numpy(weights)
+
 
 def get_dp_dataloader(
     metadata_path: str,
     batch_size: int,
-    num_workers: int = 16,
     sample_rate: int = 44100,
-):
+    hop_length: int = 512,
+    max_wav_sec: float = 30.0,
+    max_text_len: int = 800,
+    num_workers: int = 16,
+    balance_sampling: bool = False,
+    seed: int = 42,
+    device: str = "cpu",
+    packet_samples: int = PACKET_SAMPLES,
+) -> DataLoader:
+    if packet_samples != PACKET_SAMPLES:
+        raise ValueError(
+            f"Config packet size {packet_samples} != collate PACKET_SAMPLES "
+            f"{PACKET_SAMPLES}; update the collate constant"
+        )
+
+    max_wav_len = int(round(max_wav_sec * sample_rate)) if max_wav_sec > 0 else None
     dataset = Text2LatentDataset(
         metadata_path,
         sample_rate=sample_rate,
-        max_wav_len=sample_rate * 20,
-        max_text_len=800,
+        hop_length=hop_length,
+        max_wav_len=max_wav_len,
+        max_text_len=max_text_len if max_text_len > 0 else None,
     )
-    speaker_ids = dataset.speaker_ids
-    unique_speakers, counts = np.unique(speaker_ids, return_counts=True)
-    freq = dict(zip(unique_speakers, counts))
-    print(f"Speaker counts: {freq}")
-    try:
-        spk_raw = np.array(speaker_ids, dtype=np.int64)
-        uniq = np.unique(spk_raw)
-        spk2idx = {int(s): int(i) for i, s in enumerate(uniq)}
-    except Exception as e:
-        print(f"Warning: Could not cast speaker_ids to int64 ({e}). Using raw values.")
-        uniq = np.unique(speaker_ids)
-        spk2idx = {s: int(i) for i, s in enumerate(uniq)}
-    num_speakers = len(uniq)
-    print("num_speakers mapped:", num_speakers)
-    weights = np.array([1.0 / freq[s] for s in speaker_ids], dtype=np.float32).tolist()
-    sampler = WeightedRandomSampler(weights, num_samples=len(dataset), replacement=True)
-    collate_fn = partial(collate_dp, spk2idx=spk2idx, unknown_spk=0)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        sampler=sampler,
-        num_workers=num_workers,
-        collate_fn=collate_fn,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=2,
-        worker_init_fn=partial(seed_worker, base_seed=42)
-    )
-    print(f"Dataset loaded with {len(dataset)} samples.")
+    if len(dataset) < batch_size:
+        raise ValueError(
+            f"Dataset has {len(dataset)} samples, fewer than batch_size={batch_size}"
+        )
+
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+
+    def worker_init_fn(worker_id: int) -> None:
+        worker_seed = seed + worker_id
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+
+    loader_kwargs = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "drop_last": True,
+        "num_workers": num_workers,
+        "collate_fn": collate_dp,
+        "pin_memory": str(device).startswith("cuda"),
+        "worker_init_fn": worker_init_fn,
+        "generator": generator,
+    }
+    if balance_sampling:
+        sample_weights = build_balanced_sample_weights(
+            dataset,
+            lang_target={"he": 0.4, "en": 0.3},
+        )
+        loader_kwargs["sampler"] = WeightedRandomSampler(
+            sample_weights,
+            num_samples=len(dataset),
+            replacement=True,
+            generator=generator,
+        )
+    else:
+        loader_kwargs["shuffle"] = True
+    if num_workers > 0:
+        loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
+
+    dataloader = DataLoader(**loader_kwargs)
+    print(f"Dataset loaded with {len(dataset)} natural utterances.")
     return dataloader
