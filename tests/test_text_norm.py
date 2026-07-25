@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import unittest
 
 from src.blue_onnx.text_norm import (
@@ -26,6 +27,7 @@ from src.blue_onnx.text_norm import (
     spell_alphanumeric_code,
     split_slow_segments,
     strip_brackets,
+    strip_emoji,
     strip_hebrew_abbreviation_quotes,
     strip_hebrew_inword_hyphens,
     strip_silent_separator_tokens,
@@ -286,6 +288,90 @@ class TestPrepareEndToEnd(unittest.TestCase):
             lang="he",
         )
         self.assertFalse(any(ch.isdigit() for ch in strip_slow_markers(out)), out)
+
+
+class TestEnSpanProtection(unittest.TestCase):
+    """No expander may nest a tag pair or a slow marker inside an ``<en>`` span.
+
+    ``split_slow_segments`` cuts on ``【…】`` without looking at tags, so a marker
+    landing inside a span orphans its ``<en>``/``</en>`` and the remaining
+    English is phonemized by the outer language's G2P.
+    """
+
+    def assert_spans_are_well_formed(self, out: str) -> None:
+        self.assertEqual(out.count("<en>"), out.count("</en>"), out)
+        depth = 0
+        for tag in re.findall(r"</?en>", out):
+            depth += 1 if tag == "<en>" else -1
+            self.assertIn(depth, (0, 1), f"nested or unbalanced <en>: {out!r}")
+        for span in re.findall(r"<en>.*?</en>", out, re.DOTALL):
+            self.assertNotIn(SLOW_MARK_OPEN, span, out)
+            self.assertNotIn(SLOW_MARK_CLOSE, span, out)
+
+    def test_email_with_digits_does_not_nest_spans(self):
+        # Regression: expand_emails wraps the address, then the code speller used
+        # to re-spell "user123" inside that span.
+        out = prepare_text_for_synthesis("שלח לי מייל ל user123@gmail.com", lang="he")
+        self.assert_spans_are_well_formed(out)
+        self.assertIn("at gmail dot com", out)
+
+    def test_slow_split_keeps_the_english_span_intact(self):
+        out = prepare_text_for_synthesis("שלח לי מייל ל user123@gmail.com", lang="he")
+        for segment, _is_slow in split_slow_segments(out):
+            self.assert_spans_are_well_formed(segment)
+
+    def test_time_inside_an_en_span_reads_in_english(self):
+        out = prepare_text_for_synthesis("פגישה <en>at 08:15 sharp</en> מחר", lang="he")
+        self.assert_spans_are_well_formed(out)
+        self.assertIn("eight fifteen", out)
+        self.assertNotIn("שמונה", out)
+
+    def test_date_inside_an_en_span_reads_in_english(self):
+        out = prepare_text_for_synthesis("ההזמנה <en>on 12/05/2024</en>", lang="he")
+        self.assert_spans_are_well_formed(out)
+        self.assertIn("May", out)
+
+    def test_percent_and_ratio_inside_an_en_span_read_in_english(self):
+        out = prepare_text_for_synthesis("<en>50% at a 2:3 rate</en>", lang="he")
+        self.assert_spans_are_well_formed(out)
+        self.assertIn("percent", out)
+        self.assertIn(" to ", out)
+        self.assertNotIn("אחוז", out)
+
+    def test_code_inside_an_en_span_is_left_to_english_g2p(self):
+        out = prepare_text_for_synthesis("הקוד <en>is TKT-90254</en> בבקשה", lang="he")
+        self.assert_spans_are_well_formed(out)
+        self.assertIn("TKT-90254", out)
+
+    def test_code_outside_a_span_is_still_spelled(self):
+        out = prepare_text_for_synthesis("הקוד הוא TKT-90254 בבקשה", lang="he")
+        self.assert_spans_are_well_formed(out)
+        self.assertIn("T K T", out)
+        self.assertIn(SLOW_MARK_OPEN, out)
+
+    def test_unmatched_open_tag_does_not_swallow_text(self):
+        out = prepare_text_for_synthesis("שלום <en>hello", lang="he")
+        self.assertIn("hello", out)
+
+
+class TestEmoji(unittest.TestCase):
+    def test_emoji_are_dropped(self):
+        self.assertEqual(strip_emoji("Nice 🎉 party"), "Nice party")
+        self.assertEqual(strip_emoji("😀"), "")
+
+    def test_emoji_do_not_fuse_neighbouring_words(self):
+        self.assertEqual(strip_emoji("Nice🎉party"), "Nice party")
+
+    def test_prepare_strips_emoji_before_g2p(self):
+        # Regression: espeak reads them aloud, so the tokenizer's own filter —
+        # which runs after phonemization — never sees them.
+        self.assertNotIn("🎉", prepare_text_for_synthesis("Nice 🎉 party", lang="en"))
+
+    def test_flags_and_dingbats_are_dropped(self):
+        self.assertEqual(strip_emoji("done ✅ 🇮🇱"), "done")
+
+    def test_ordinary_punctuation_survives(self):
+        self.assertEqual(strip_emoji("a — b, c."), "a — b, c.")
 
 
 if __name__ == "__main__":

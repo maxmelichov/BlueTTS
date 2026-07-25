@@ -45,6 +45,25 @@ _PROTECTED_SPAN_RE = re.compile(
 )
 _INLINE_EN_BLOCK_RE = re.compile(r"(<en>.*?</en>)", re.IGNORECASE | re.DOTALL)
 
+# Pictographs, dingbats and flags. Stripped *before* G2P: espeak happily reads
+# them aloud ("Nice 🎉 party" → "nice party popper party"), so filtering them at
+# tokenization time — after phonemization — is far too late.
+EMOJI_RE = re.compile(
+    "[\U0001f600-\U0001f64f"  # emoticons
+    "\U0001f300-\U0001f5ff"  # symbols & pictographs
+    "\U0001f680-\U0001f6ff"  # transport & map symbols
+    "\U0001f700-\U0001f77f"
+    "\U0001f780-\U0001f7ff"
+    "\U0001f800-\U0001f8ff"
+    "\U0001f900-\U0001f9ff"
+    "\U0001fa00-\U0001fa6f"
+    "\U0001fa70-\U0001faff"
+    "☀-⛿"  # misc symbols
+    "✀-➿"  # dingbats
+    "\U0001f1e6-\U0001f1ff]+",  # regional indicators (flags)
+    flags=re.UNICODE,
+)
+
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 # Latin letter+digit tokens (TKT-90254, IL4829, GPT-4, …) — spelled for TTS.
 _ALNUM_MIX_TOKEN_RE = re.compile(
@@ -98,6 +117,35 @@ _HEBREW_DIGIT_WORDS: dict[str, str] = {
 def canonical_lang(lang: str) -> str:
     """Map language aliases (``ge``, ``en-us``) onto the model's codes."""
     return LANG_CODE_ALIASES.get(lang.lower(), lang.lower())
+
+
+def strip_emoji(text: str) -> str:
+    """Drop emoji and pictographs, which no phonemizer should try to read."""
+    return re.sub(r"\s+", " ", EMOJI_RE.sub(" ", text)).strip()
+
+
+def _map_en_spans(text: str, lang: str, fn) -> str:
+    """Apply ``fn(segment, lang, inside_en)`` to each part of ``text``.
+
+    ``<en>…</en>`` spans are passed with their own language and their tags put
+    back afterwards. Every expander that rewrites digits has to go through this:
+    running one over a whole string lets it nest a second ``<en>`` pair — or a
+    ``【…】`` marker — *inside* an existing span, and :func:`split_slow_segments`
+    then cuts the span in half, stranding the rest of the English text on the
+    outer language's G2P.
+    """
+    out: list[str] = []
+    for part in _INLINE_EN_BLOCK_RE.split(text):
+        if _INLINE_EN_BLOCK_RE.fullmatch(part):
+            out.append(f"<en>{fn(part[4:-5], 'en', True)}</en>")
+        else:
+            out.append(fn(part, lang, False))
+    return "".join(out)
+
+
+def _maybe_slow(inner: str, inside_en: bool) -> str:
+    """Wrap in slow markers unless inside an ``<en>`` span, which they'd split."""
+    return inner if inside_en else mark_slow_segment(inner)
 
 
 def _spoken_number(value: Union[int, float], lang: str) -> Optional[str]:
@@ -261,11 +309,10 @@ def expand_geresh_loanwords(text: str, lang: str = "he") -> str:
         en = _GERESH_LOANWORD_EN.get(m.group(0))
         return f"<en>{en}</en>" if en else m.group(0)
 
-    parts = _INLINE_EN_BLOCK_RE.split(text)
-    return "".join(
-        p if p.lower().startswith("<en>") else _GERESH_LOANWORD_RE.sub(repl, p)
-        for p in parts
-    )
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        return segment if inside_en else _GERESH_LOANWORD_RE.sub(repl, segment)
+
+    return _map_en_spans(text, canonical_lang(lang), expand)
 
 
 def strip_hebrew_inword_hyphens(text: str, lang: str = "he") -> str:
@@ -306,10 +353,10 @@ def expand_emails(text: str, lang: str = "he") -> str:
     def repl(m: re.Match[str]) -> str:
         return f"<en>{email_to_spoken_english(m.group(0))}</en>"
 
-    parts = _INLINE_EN_BLOCK_RE.split(text)
-    return "".join(
-        p if p.lower().startswith("<en>") else _EMAIL_RE.sub(repl, p) for p in parts
-    )
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        return segment if inside_en else _EMAIL_RE.sub(repl, segment)
+
+    return _map_en_spans(text, canonical_lang(lang), expand)
 
 
 def should_spell_alphanumeric_token(token: str) -> bool:
@@ -362,47 +409,59 @@ def spell_alphanumeric_code(code: str, lang: str = "he") -> str:
 
 
 def expand_alphanumeric_codes(text: str, lang: str = "he") -> str:
-    """Spell any Latin letter+digit mix (IDs, model codes, tracking numbers)."""
-    lang = canonical_lang(lang)
+    """Spell any Latin letter+digit mix (IDs, model codes, tracking numbers).
 
-    def repl(m: re.Match[str]) -> str:
-        token = m.group(0)
-        if not should_spell_alphanumeric_token(token):
-            return token
-        return spell_alphanumeric_code(token, lang=lang) or token
+    Tokens already inside an ``<en>`` span are left alone: they are bound for
+    English G2P, which reads them acceptably, and spelling them would nest a
+    second ``<en>`` pair plus a slow marker inside the outer span. That matters
+    for addresses in particular — :func:`expand_emails` runs first, so the local
+    part of ``user123@gmail.com`` is inside a span by the time we get here.
+    """
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        if inside_en:
+            return segment
 
-    return _ALNUM_MIX_TOKEN_RE.sub(repl, text)
+        def repl(m: re.Match[str]) -> str:
+            token = m.group(0)
+            if not should_spell_alphanumeric_token(token):
+                return token
+            return spell_alphanumeric_code(token, lang=seg_lang) or token
+
+        return _ALNUM_MIX_TOKEN_RE.sub(repl, segment)
+
+    return _map_en_spans(text, canonical_lang(lang), expand)
 
 
 def expand_list_markers(text: str, lang: str = "he") -> str:
     """Turn ``1. item`` list markers into spoken counters (אחד / one, …)."""
-    lang = canonical_lang(lang)
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        if inside_en:
+            return segment
 
-    def repl(m: re.Match[str]) -> str:
-        n = int(m.group(1))
-        if lang == "he" and n in _HEBREW_LIST_CARDINALS:
-            word = _HEBREW_LIST_CARDINALS[n]
-        else:
-            word = _spoken_number(n, lang)
-            if word is None:
-                return m.group(0)
-        return f"{word}. "
+        def repl(m: re.Match[str]) -> str:
+            n = int(m.group(1))
+            if seg_lang == "he" and n in _HEBREW_LIST_CARDINALS:
+                word = _HEBREW_LIST_CARDINALS[n]
+            else:
+                word = _spoken_number(n, seg_lang)
+                if word is None:
+                    return m.group(0)
+            return f"{word}. "
 
-    parts = _INLINE_EN_BLOCK_RE.split(text)
-    return "".join(
-        p if p.lower().startswith("<en>") else _LIST_MARKER_RE.sub(repl, p)
-        for p in parts
-    )
+        return _LIST_MARKER_RE.sub(repl, segment)
+
+    return _map_en_spans(text, canonical_lang(lang), expand)
 
 
 def expand_plus_sign(text: str, lang: str = "he") -> str:
     """Speak ``+`` as פלוס/plus when it joins phrases (``DJ gear + laptop``)."""
-    word = _PLUS_WORDS.get(canonical_lang(lang), _PLUS_WORDS["en"])
-    parts = _INLINE_EN_BLOCK_RE.split(text)
-    return "".join(
-        p if p.lower().startswith("<en>") else re.sub(r"\s+\+\s+", f" {word} ", p)
-        for p in parts
-    )
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        if inside_en:
+            return segment
+        word = _PLUS_WORDS.get(seg_lang, _PLUS_WORDS["en"])
+        return re.sub(r"\s+\+\s+", f" {word} ", segment)
+
+    return _map_en_spans(text, canonical_lang(lang), expand)
 
 
 def expand_phone_numbers(text: str, lang: str = "he") -> str:
@@ -421,12 +480,13 @@ def expand_phone_numbers(text: str, lang: str = "he") -> str:
     def repl_phone(m: re.Match[str]) -> str:
         return mark_slow_segment(_spoken_digits(m.group(0).replace("-", ""), "he"))
 
-    def expand_segment(seg: str) -> str:
-        seg = re.sub(r"\*(\d{2,})", repl_star, seg)
-        return re.sub(r"(?<!\d)0\d{0,2}-\d{6,8}(?!\d)", repl_phone, seg)
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        if inside_en:
+            return segment
+        segment = re.sub(r"\*(\d{2,})", repl_star, segment)
+        return re.sub(r"(?<!\d)0\d{0,2}-\d{6,8}(?!\d)", repl_phone, segment)
 
-    parts = _INLINE_EN_BLOCK_RE.split(text)
-    return "".join(p if p.lower().startswith("<en>") else expand_segment(p) for p in parts)
+    return _map_en_spans(text, canonical_lang(lang), expand)
 
 
 def expand_times(text: str, lang: str = "he") -> str:
@@ -435,66 +495,80 @@ def expand_times(text: str, lang: str = "he") -> str:
     Runs before :func:`expand_ratios`, which would otherwise read the colon as
     "eight to fifteen".
     """
-    lang = canonical_lang(lang)
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        def repl(m: re.Match[str]) -> str:
+            hour, minute = int(m.group(1)), int(m.group(2))
+            hour_word = _spoken_number(hour, seg_lang)
+            if hour_word is None:
+                return m.group(0)
+            if minute == 0:
+                return _maybe_slow(hour_word, inside_en)
+            minute_word = _spoken_number(minute, seg_lang)
+            if minute_word is None:
+                return m.group(0)
+            joined = (
+                f"{hour_word} ו{minute_word}"
+                if seg_lang == "he"
+                else f"{hour_word} {minute_word}"
+            )
+            return _maybe_slow(joined, inside_en)
 
-    def repl(m: re.Match[str]) -> str:
-        hour, minute = int(m.group(1)), int(m.group(2))
-        hour_word = _spoken_number(hour, lang)
-        if hour_word is None:
-            return m.group(0)
-        if minute == 0:
-            return mark_slow_segment(hour_word)
-        minute_word = _spoken_number(minute, lang)
-        if minute_word is None:
-            return m.group(0)
-        joined = f"{hour_word} ו{minute_word}" if lang == "he" else f"{hour_word} {minute_word}"
-        return mark_slow_segment(joined)
+        return _TIME_RE.sub(repl, segment)
 
-    return _TIME_RE.sub(repl, text)
+    return _map_en_spans(text, canonical_lang(lang), expand)
 
 
 def expand_dates(text: str, lang: str = "he") -> str:
     """Expand day-first numeric dates (``12/05/2024``, ``12.5.24``) into words."""
-    lang = canonical_lang(lang)
-
-    def repl(m: re.Match[str]) -> str:
-        day, month, raw_year = int(m.group(1)), int(m.group(2)), m.group(3)
-        if not (1 <= day <= 31 and 1 <= month <= 12):
-            return m.group(0)
-        year = int(raw_year)
-        if len(raw_year) == 2:
-            year += 2000 if year < 70 else 1900
-        year_word = _spoken_number(year, lang)
-        if year_word is None:
-            return m.group(0)
-        if lang == "he":
-            day_word = _spoken_number(day, "he")
-            if day_word is None:
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        def repl(m: re.Match[str]) -> str:
+            day, month, raw_year = int(m.group(1)), int(m.group(2)), m.group(3)
+            if not (1 <= day <= 31 and 1 <= month <= 12):
                 return m.group(0)
-            return mark_slow_segment(
-                f"{day_word} {_HEBREW_MONTH_ORDINALS[month]} {year_word}"
+            year = int(raw_year)
+            if len(raw_year) == 2:
+                year += 2000 if year < 70 else 1900
+            year_word = _spoken_number(year, seg_lang)
+            if year_word is None:
+                return m.group(0)
+            if seg_lang == "he":
+                day_word = _spoken_number(day, "he")
+                if day_word is None:
+                    return m.group(0)
+                return _maybe_slow(
+                    f"{day_word} {_HEBREW_MONTH_ORDINALS[month]} {year_word}", inside_en
+                )
+            months = _MONTH_NAMES.get(seg_lang)
+            day_word = _spoken_ordinal(day, seg_lang)
+            if months is None or day_word is None:
+                return m.group(0)
+            glue = _DATE_DAY_MONTH_GLUE.get(seg_lang, " ")
+            return _maybe_slow(
+                f"{day_word}{glue}{months[month - 1]} {year_word}", inside_en
             )
-        months = _MONTH_NAMES.get(lang)
-        day_word = _spoken_ordinal(day, lang)
-        if months is None or day_word is None:
-            return m.group(0)
-        glue = _DATE_DAY_MONTH_GLUE.get(lang, " ")
-        return mark_slow_segment(f"{day_word}{glue}{months[month - 1]} {year_word}")
 
-    return _DATE_RE.sub(repl, text)
+        return _DATE_RE.sub(repl, segment)
+
+    return _map_en_spans(text, canonical_lang(lang), expand)
 
 
 def expand_percent_symbols(text: str, lang: str = "he") -> str:
-    """Replace ``%`` with the spoken word for ``lang``."""
-    word = _PERCENT_WORDS.get(canonical_lang(lang), _PERCENT_WORDS["en"])
-    text = re.sub(r"(\d+(?:[.,]\d+)?)\s*%", rf"\1 {word}", text)
-    return re.sub(r"%", f" {word} ", text)
+    """Replace ``%`` with the spoken word for ``lang`` (or ``en`` inside a span)."""
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        word = _PERCENT_WORDS.get(seg_lang, _PERCENT_WORDS["en"])
+        segment = re.sub(r"(\d+(?:[.,]\d+)?)\s*%", rf"\1 {word}", segment)
+        return re.sub(r"%", f" {word} ", segment)
+
+    return _map_en_spans(text, canonical_lang(lang), expand)
 
 
 def expand_ratios(text: str, lang: str = "he") -> str:
     """Read ``2:3`` as a ratio. Clock times are already gone by this point."""
-    word = _RATIO_WORDS.get(canonical_lang(lang), _RATIO_WORDS["en"])
-    return re.sub(r"(?<!\d)(\d+)\s*:\s*(\d+)(?!\d)", rf"\1 {word} \2", text)
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        word = _RATIO_WORDS.get(seg_lang, _RATIO_WORDS["en"])
+        return re.sub(r"(?<!\d)(\d+)\s*:\s*(\d+)(?!\d)", rf"\1 {word} \2", segment)
+
+    return _map_en_spans(text, canonical_lang(lang), expand)
 
 
 def expand_numbers(text: str, lang: str = "he") -> str:
@@ -543,13 +617,14 @@ def prepare_text_for_synthesis(
 ) -> str:
     """Run the full normalization chain and return synthesis-ready text.
 
-    Order is deliberate: structural cleanup, then Hebrew spelling quirks, then
+    Order is deliberate: emoji and structural cleanup, then Hebrew spelling quirks, then
     codes (which claim letter+digit tokens before the number expanders see
     them), then times → dates → percent → ratios → bare numbers.
 
     With ``mark_slow=False`` the ``【…】`` slow markers are removed from the
     result, leaving plain text for callers that synthesize in one pass.
     """
+    text = strip_emoji(text)
     text = normalize_common_text(text)
     text = strip_hebrew_abbreviation_quotes(text, lang)
     text = normalize_phonetic_geresh(text, lang)
