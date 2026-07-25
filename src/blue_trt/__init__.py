@@ -234,12 +234,7 @@ class BlueTRT:
         self.fade_duration = fade_duration
         self.device = device
 
-        if renikud_path is None:
-            for cand in ("model.onnx", os.path.join(trt_dir, "model.onnx")):
-                if os.path.exists(cand):
-                    renikud_path = cand
-                    break
-
+        # renikud_path stays optional: RenikudPlus fetches its own weights when omitted.
         cfgs = load_cfgs(config_path)
         ttl = cfgs.get("ttl", {}) or {}
         ae = cfgs.get("ae", {}) or {}

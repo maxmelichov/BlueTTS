@@ -11,6 +11,17 @@ from unicodedata import normalize
 import numpy as np
 import onnxruntime as ort
 
+from .text_norm import (  # noqa: F401  (re-exported as the package's public API)
+    SLOW_MARK_OPEN,
+    SLOW_PACE_BLEND,
+    SLOW_PACE_DPT_REF,
+    SLOW_SILENCE,
+    SLOW_SPEED_SCALE,
+    canonical_lang,
+    prepare_text_for_synthesis,
+    split_slow_segments,
+    strip_slow_markers,
+)
 
 AVAILABLE_LANGS = ["en", "es", "de", "it", "he"]
 BLUE_SYNTH_MAX_CHUNK_LEN = 300
@@ -80,19 +91,40 @@ class TextProcessor:
     :class:`UnicodeProcessor` can route segments by language downstream.
     """
 
-    def __init__(self, renikud_path: Optional[str] = None):
+    def __init__(
+        self,
+        renikud_path: Optional[str] = None,
+        speaker: int = 0,
+        target_speaker: int = 0,
+    ):
+        """``renikud_path`` is optional: RenikudPlus fetches its own weights.
+
+        The G2P is built on first Hebrew segment, so Latin-only synthesis never
+        pulls the Hebrew weights. ``speaker`` / ``target_speaker`` are RenikudPlus
+        speaker hints applied to every Hebrew segment (0 unknown, 1 male, 2 female).
+        """
         self.renikud = None
-        if renikud_path is None and os.path.exists("model.onnx"):
-            renikud_path = "model.onnx"
-        if renikud_path and os.path.exists(renikud_path):
+        self.renikud_path = renikud_path
+        self.speaker = speaker
+        self.target_speaker = target_speaker
+        if renikud_path and not os.path.exists(renikud_path):
+            raise FileNotFoundError(f"Renikud weights not found: {renikud_path}")
+
+    def _load_renikud(self):
+        """Build the RenikudPlus G2P on demand (downloads weights if needed)."""
+        if self.renikud is None:
             try:
                 from renikud_onnx import G2P
-                self.renikud = G2P(renikud_path)
-                print(f"[INFO] Loaded Renikud G2P from {renikud_path}")
             except ImportError as e:
                 raise RuntimeError(
-                    "Hebrew G2P needs `renikud-onnx`. Install: `uv sync`."
+                    "Hebrew G2P needs `renikud-plus`. Install: `uv sync`."
                 ) from e
+            self.renikud = G2P(self.renikud_path)
+            print(
+                "[INFO] Loaded RenikudPlus G2P from "
+                f"{self.renikud_path or 'auto-download'}"
+            )
+        return self.renikud
 
     # Cache EspeakBackend instances per language: the espeak-ng ctypes binding
     # leaks per backend construction and each init costs ~600 ms, so reuse them.
@@ -142,12 +174,9 @@ class TextProcessor:
         if has_hebrew or lang == "he":
             if not has_hebrew:
                 return content
-            if self.renikud is None:
-                raise ValueError(
-                    "Hebrew text requires Renikud weights. Download:\n"
-                    "  wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx"
-                )
-            return self.renikud.phonemize(content)
+            return self._load_renikud().phonemize(
+                content, speaker=self.speaker, target_speaker=self.target_speaker
+            )
         return self._espeak(content, lang)
 
     def phonemize(self, text: str, lang: str = "he") -> str:
@@ -201,6 +230,11 @@ class UnicodeProcessor:
                 else {int(k): int(v) for k, v in raw.items()}
 
     def _preprocess_text(self, text: str, lang: str) -> str:
+        # Drop inline <lang>…</lang> spans first: they are routing metadata, never
+        # speech, and the "/" -> " " replacement below would mangle a closing tag
+        # into "< he>", which then survives as literal "he" characters plus pad
+        # ids in the encoded sequence.
+        text = strip_lang_tags_from_phoneme_string(text)
         # TODO: Need advanced normalizer for better performance
         text = normalize("NFKD", text)
 
@@ -283,11 +317,8 @@ class UnicodeProcessor:
 
         if lang not in AVAILABLE_LANGS:
             raise ValueError(f"Invalid language: {lang}")
-        # If the text already contains <lang>…</lang> spans (e.g. output from
-        # :class:`TextProcessor`), don't wrap again.
-        if not _INLINE_LANG_PAIR.search(text):
-            text = f"<{lang}>" + text + f"</{lang}>"
-        return text
+        # Tags were stripped above, so this always wraps exactly once.
+        return f"<{lang}>" + text + f"</{lang}>"
 
     def _get_text_mask(self, text_ids_lengths: np.ndarray) -> np.ndarray:
         text_mask = length_to_mask(text_ids_lengths)
@@ -466,6 +497,7 @@ class TextToSpeech:
         text_is_phonemes: bool = False,
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
+        normalize_text: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Synthesize speech.
 
@@ -473,6 +505,13 @@ class TextToSpeech:
           match batch size; no chunking).
         - ``text`` as ``str`` → chunked single-speaker synthesis, concatenated with
           ``silence_duration`` seconds of silence between chunks.
+
+        ``normalize_text=True`` runs :func:`prepare_text_for_synthesis` first, so
+        digits, dates, clock times, prices, emails and ticket codes become words
+        instead of reaching G2P as symbols. Spans it marks slow (spelled codes,
+        phone numbers, dates, times) are synthesized separately at
+        :data:`SLOW_SPEED_SCALE` — pass ``text`` through the normalizer yourself
+        to see exactly what will be spoken.
 
         ``cfg_scale`` enables classifier-free guidance when uncond embeddings are
         available (loaded from ``uncond.npz`` by :func:`load_text_to_speech`) or when
@@ -492,6 +531,24 @@ class TextToSpeech:
         to :data:`DEFAULT_MIXED_PACE_BLEND`, while single-language defaults to 0.
         """
         phonemize = not text_is_phonemes
+        if normalize_text:
+            if text_is_phonemes:
+                raise ValueError(
+                    "normalize_text and text_is_phonemes are mutually exclusive: "
+                    "the normalizer rewrites words, not phonemes."
+                )
+            if isinstance(text, list):
+                langs = lang if isinstance(lang, list) else [lang] * len(text)
+                # Batched rows are synthesized in one pass, so there is nothing to
+                # schedule slow spans against — keep the text plain.
+                text = [
+                    prepare_text_for_synthesis(t, lang=lg, mark_slow=False)
+                    for t, lg in zip(text, langs)
+                ]
+            else:
+                text = prepare_text_for_synthesis(text, lang=lang)
+        # Computed after normalization: it can introduce <en> spans (emails,
+        # spelled codes, loanwords) that should count as mixed-language text.
         if isinstance(text, list):
             has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text)
         else:
@@ -526,33 +583,44 @@ class TextToSpeech:
         assert (
             style.ttl.shape[0] == 1
         ), "Single speaker text to speech only supports single style"
-        if phonemize and self.g2p is not None:
-            text = self.g2p.phonemize(text, lang=lang)
-        text = strip_lang_tags_from_phoneme_string(text)
         max_len = 120 if lang == "ko" else 300
-        text_list = chunk_text(text, max_len=max_len)
+        # Without slow markers this is a single ``(text, False)`` segment, i.e. the
+        # plain phonemize → chunk → synthesize path.
+        segments = split_slow_segments(text)
         wav_cat = None
         dur_cat = None
-        for chunk in text_list:
-            wav, dur_onnx = self._infer(
-                [chunk],
-                [lang],
-                style,
-                total_step,
-                speed,
-                cfg_scale,
-                pace_blend=pace_blend_eff,
-                pace_dpt_ref=pace_dpt_ref,
-            )
-            if wav_cat is None:
-                wav_cat = wav
-                dur_cat = dur_onnx
-            else:
-                silence = np.zeros(
-                    (1, int(silence_duration * self.sample_rate)), dtype=np.float32
+        prev_is_slow = False
+        for seg_text, is_slow in segments:
+            seg_speed = speed * SLOW_SPEED_SCALE if is_slow else speed
+            seg_pace_blend = SLOW_PACE_BLEND if is_slow else pace_blend_eff
+            seg_pace_dpt = SLOW_PACE_DPT_REF if is_slow else pace_dpt_ref
+            if phonemize and self.g2p is not None:
+                seg_text = self.g2p.phonemize(seg_text, lang=lang)
+            seg_text = strip_lang_tags_from_phoneme_string(seg_text)
+            for chunk in chunk_text(seg_text, max_len=max_len):
+                wav, dur_onnx = self._infer(
+                    [chunk],
+                    [lang],
+                    style,
+                    total_step,
+                    seg_speed,
+                    cfg_scale,
+                    pace_blend=seg_pace_blend,
+                    pace_dpt_ref=seg_pace_dpt,
                 )
-                wav_cat = np.concatenate([wav_cat, silence, wav], axis=1)
-                dur_cat = dur_cat + dur_onnx + silence_duration
+                if wav_cat is None:
+                    wav_cat = wav
+                    dur_cat = dur_onnx
+                else:
+                    gap = SLOW_SILENCE if (is_slow or prev_is_slow) else silence_duration
+                    silence = np.zeros(
+                        (1, int(gap * self.sample_rate)), dtype=np.float32
+                    )
+                    wav_cat = np.concatenate([wav_cat, silence, wav], axis=1)
+                    dur_cat = dur_cat + dur_onnx + gap
+            prev_is_slow = is_slow
+        if wav_cat is None:  # nothing speakable survived normalization
+            return np.zeros((1, 0), dtype=np.float32), np.zeros((1,), dtype=np.float32)
         return wav_cat, dur_cat
 
     def batch(
@@ -566,16 +634,34 @@ class TextToSpeech:
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
         text_is_phonemes: bool = False,
+        normalize_text: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Batched synthesis for a list of strings (no sentence chunking).
 
         Matches list-mode :meth:`__call__`: runs G2P when ``text_is_phonemes`` is
         ``False`` and a processor was wired via :func:`load_text_to_speech`, then
         strips inline ``<lang>…</lang>`` markers before encoding.
+        ``normalize_text=True`` runs :func:`prepare_text_for_synthesis` per row;
+        rows are one pass each, so slow spans are not marked.
+
+        Every row of the returned waveform is as long as the longest item in the
+        batch; use the returned per-item durations to trim. Requires graphs
+        exported with a dynamic batch axis (``exports/export_onnx.py``); older
+        batch-1 bundles raise an ONNX Runtime shape error.
         """
         assert len(text_list) == len(lang_list), (
             "`text_list` and `lang_list` must have the same length."
         )
+        if normalize_text:
+            if text_is_phonemes:
+                raise ValueError(
+                    "normalize_text and text_is_phonemes are mutually exclusive: "
+                    "the normalizer rewrites words, not phonemes."
+                )
+            text_list = [
+                prepare_text_for_synthesis(t, lang=lang_code, mark_slow=False)
+                for t, lang_code in zip(text_list, lang_list)
+            ]
         has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text_list)
         pace_blend_eff = (
             float(pace_blend)
@@ -675,8 +761,25 @@ def text_to_indices(text: str, lang: str = "he") -> list[int]:
     return text_ids[0].astype(np.int64).tolist()
 
 
+def load_uncond(onnx_dir: str) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Load CFG null embeddings from ``uncond.npz`` next to the graphs.
+
+    Only needed for bundles whose ``vector_estimator.onnx`` has no ``cfg_scale``
+    input (older exports that did not bake ``u_text``/``u_ref`` into the graph);
+    without them ``cfg_scale`` has no effect.
+    """
+    path = os.path.join(onnx_dir, "uncond.npz")
+    if not os.path.exists(path):
+        return None, None
+    with np.load(path) as z:
+        u_text = z["u_text"].astype(np.float32) if "u_text" in z else None
+        u_ref = z["u_ref"].astype(np.float32) if "u_ref" in z else None
+    return u_text, u_ref
+
+
 def load_text_to_speech(
     onnx_dir: str, use_gpu: bool = False, config_path: str = "config/tts.json",
+    renikud_path: Optional[str] = None,
 ) -> TextToSpeech:
     opts = ort.SessionOptions()
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -696,10 +799,13 @@ def load_text_to_speech(
         onnx_dir, opts, providers
     )
     text_processor = load_text_processor(onnx_dir)
-    g2p = TextProcessor()
+    g2p = TextProcessor(renikud_path)
+    u_text, u_ref = load_uncond(onnx_dir)
+    if u_text is None and "cfg_scale" not in {i.name for i in vector_est_ort.get_inputs()}:
+        print("[WARN] no cfg_scale graph input and no uncond.npz — cfg_scale will be ignored.")
     return TextToSpeech(
         cfgs, text_processor, dp_ort, text_enc_ort, vector_est_ort, vocoder_ort,
-        g2p=g2p,
+        g2p=g2p, u_text=u_text, u_ref=u_ref,
     )
 
 
@@ -732,6 +838,106 @@ def load_voice_style(voice_style_paths: list[str], verbose: bool = False) -> Sty
     if verbose:
         print(f"Loaded {bsz} voice styles")
     return Style(ttl_style, dp_style)
+
+
+def limit_peak(audio: np.ndarray, peak_limit: float = 0.95) -> np.ndarray:
+    """Scale ``audio`` down so ``max(|audio|) <= peak_limit``; quieter audio is
+    returned untouched.
+
+    The vocoder occasionally overshoots ±1.0 (peaks of ~1.1-1.25 have been
+    observed), and both ``soundfile.write`` to a PCM WAV and most players clip
+    there, so scale once instead of distorting. This only ever attenuates — it
+    never boosts quiet output, which would change perceived loudness.
+    """
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.size == 0 or not np.isfinite(audio).all():
+        return audio
+    peak = float(np.max(np.abs(audio)))
+    if peak <= peak_limit or peak < 1e-9:
+        return audio
+    return (audio * (peak_limit / peak)).astype(np.float32)
+
+
+class BlueTTS:
+    """One-call TTS front end: graphs + voice style in, ``(samples, sample_rate)`` out.
+
+    ``style_json`` takes a single voice JSON (see ``voices/``) or several, in which
+    case the styles are averaged into one speaker. For per-text styles, batched
+    synthesis or phoneme-level control, use :class:`TextToSpeech` directly via
+    :func:`load_text_to_speech`.
+    """
+
+    def __init__(
+        self,
+        onnx_dir: str = "onnx_models",
+        style_json: Union[str, list[str]] = "voices/female1.json",
+        renikud_path: Optional[str] = None,
+        config_path: str = "config/tts.json",
+    ):
+        self.tts = load_text_to_speech(
+            onnx_dir, config_path=config_path, renikud_path=renikud_path
+        )
+        paths = [style_json] if isinstance(style_json, str) else list(style_json)
+        style = load_voice_style(paths)
+        if style.ttl.shape[0] > 1:
+            style = Style(
+                style.ttl.mean(axis=0, keepdims=True),
+                style.dp.mean(axis=0, keepdims=True),
+            )
+        self.style = style
+
+    @property
+    def sample_rate(self) -> int:
+        return self.tts.sample_rate
+
+    def synthesize(
+        self,
+        text: str,
+        lang: str = "he",
+        total_step: int = 5,
+        cfg_scale: float = DEFAULT_CFG_SCALE,
+        speed: float = 1.0,
+        silence_duration: float = 0.0,
+        text_is_phonemes: bool = False,
+        pace_blend: Optional[float] = None,
+        pace_dpt_ref: Optional[float] = None,
+        peak_limit: Optional[float] = 0.95,
+        normalize_text: bool = True,
+    ) -> tuple[np.ndarray, int]:
+        """Synthesize ``text`` and return mono float32 samples plus the sample rate.
+
+        Accepts inline ``<lang>…</lang>`` spans and splits long input into chunks
+        joined by ``silence_duration`` seconds of silence, as
+        :meth:`TextToSpeech.__call__` does.
+
+        Text is normalized first (``normalize_text=True``), so numbers, dates,
+        times, prices, emails and ticket codes are spoken as words — this front
+        end takes arbitrary text, not curated strings. Pass
+        ``normalize_text=False`` to synthesize exactly what you wrote.
+
+        Output is scaled down to ``peak_limit`` when it overshoots, so writing it
+        straight to a PCM WAV never clips (see :func:`limit_peak`). Pass
+        ``peak_limit=None`` for the raw vocoder output.
+        """
+        audio, _ = self.tts(
+            text,
+            lang=lang,
+            style=self.style,
+            total_step=total_step,
+            speed=speed,
+            cfg_scale=cfg_scale,
+            silence_duration=silence_duration,
+            text_is_phonemes=text_is_phonemes,
+            pace_blend=pace_blend,
+            pace_dpt_ref=pace_dpt_ref,
+            normalize_text=normalize_text and not text_is_phonemes,
+        )
+        audio = np.asarray(audio, dtype=np.float32)
+        if audio.ndim == 2:
+            audio = audio[0]
+        if peak_limit is not None:
+            audio = limit_peak(audio, peak_limit)
+        return audio, self.sample_rate
 
 
 @contextmanager
