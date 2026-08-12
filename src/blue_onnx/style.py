@@ -158,7 +158,9 @@ class VoiceStyleExtractor:
         style_dp = self.duration_style_encoder.run(None, {"z_ref": z_ref, "ref_mask": ref_mask})[0].astype(np.float32)
         metadata = {
             "sr": self.cfg["sample_rate"],
-            "ref_wav": os.path.abspath(ref_wav),
+            # Basename, not abspath: voice JSONs get shared and committed, and the
+            # full path leaks the exporter's home directory and dataset layout.
+            "ref_wav": os.path.basename(ref_wav),
             "z_ref_norm_shape": list(z_ref.shape),
             "style_ttl_stats": _stats(style_ttl),
             "style_dp_stats": _stats(style_dp),
