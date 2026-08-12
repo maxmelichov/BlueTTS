@@ -8,7 +8,7 @@ from src.blue_onnx import limit_peak, load_text_to_speech, load_voice_style
 
 onnx_dir = os.environ.get("ONNX_DIR", "onnx_models")
 tts = load_text_to_speech(onnx_dir=onnx_dir)
-style = load_voice_style(["voices/female1.json"])
+style = load_voice_style(["voices/noa.json"])
 
 text = (
     "<en>Yeah, but listen to this. It doesn't bleed the accents any more when you mix them. So I can be talking in English.</en> "

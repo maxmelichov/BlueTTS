@@ -27,7 +27,7 @@ Path("examples/out").mkdir(parents=True, exist_ok=True)
 
 onnx_dir = os.environ.get("ONNX_DIR", "onnx_models")
 tts = load_text_to_speech(onnx_dir=onnx_dir)
-style = load_voice_style(["voices/female1.json"])
+style = load_voice_style(["voices/noa.json"])
 
 SAMPLES = [
     ("he", 'ההזמנה IL-4829-7361-05 תגיע ב 12/05/2024 בשעה 08:15, מחיר 1,500 ש"ח (50% הנחה).'),
