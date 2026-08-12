@@ -1,10 +1,11 @@
 <p align="center">
-  <img src="assets/logo.png" alt="BlueTTS" width="200">
+  <img src="assets/logo.png" alt="BlueTTS" width="280">
 </p>
 
-<h1 align="center">BlueTTS</h1>
-
-<p align="center">Multilingual text-to-speech on ONNX Runtime — Hebrew, English, Spanish, Italian, German.</p>
+<p align="center">
+  <b>Multilingual text-to-speech on ONNX Runtime</b><br>
+  Hebrew &middot; English &middot; Spanish &middot; Italian &middot; German
+</p>
 
 <p align="center">
   <a href="https://huggingface.co/spaces/notmax123/BlueV2"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Try%20Live%20Demo-FFD21E?style=for-the-badge" alt="Try Live Demo on Hugging Face"></a>
@@ -85,8 +86,7 @@ the graphs, so nothing to configure.
 This bundle is also the input to [`create_tensorrt.py`](exports/README.md#build-tensorrt-engines):
 its file names line up with the engines `blue_trt` expects.
 
-**Previous — [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2)**,
-plus an INT8 build at [notmax123/bluev2-onnx-int8](https://huggingface.co/notmax123/bluev2-onnx-int8).
+**Previous — [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2)**.
 Still supported and still the only bundle with the zero-shot voice-conversion graphs
 (`codec_encoder`, `style_encoder`, `duration_style_encoder`) that `examples/zero_shot.py`
 and `blue_onnx.style` need.
