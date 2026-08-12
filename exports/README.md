@@ -86,10 +86,17 @@ Useful flags:
 
 ## Build TensorRT Engines
 
-This is optional and requires NVIDIA TensorRT.
+Optional, NVIDIA only. `tensorrt-cu12` installs separately from the extra
+(see [astral-sh/uv#14313](https://github.com/astral-sh/uv/issues/14313)):
 
 ```bash
 uv sync --extra tensorrt
+uv pip install tensorrt-cu12
+```
+
+Then build every engine in a directory:
+
+```bash
 uv run python exports/create_tensorrt.py \
   --onnx_dir onnx_models \
   --engine_dir trt_engines \

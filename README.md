@@ -1,6 +1,10 @@
-# Blue
+<p align="center">
+  <img src="assets/logo.png" alt="Blue" width="200">
+</p>
 
-Text-to-speech inference with ONNX Runtime; optional TensorRT acceleration on NVIDIA GPUs.
+<h1 align="center">Blue</h1>
+
+<p align="center">Multilingual text-to-speech on ONNX Runtime — Hebrew, English, Spanish, Italian, German.</p>
 
 <p align="center">
   <a href="https://pypi.org/project/blue-onnx/"><img src="https://img.shields.io/pypi/v/blue-onnx?style=for-the-badge&amp;label=PyPI" alt="PyPI version"></a>
@@ -10,44 +14,56 @@ Text-to-speech inference with ONNX Runtime; optional TensorRT acceleration on NV
   <a href="https://lightbluetts.com/"><img src="https://img.shields.io/badge/%F0%9F%8C%90%20Website-lightbluetts.com-2563EB?style=for-the-badge" alt="lightbluetts.com"></a>
 </p>
 
-<p align="center">Hebrew, English, Spanish, Italian, and German — samples and a live demo on the site and Space above.</p>
+---
 
-## Install
-
-Requires **Python 3.12+** (see `requires-python` in `pyproject.toml`).
-
-**Users (PyPI)**
-
-The PyPI package is **inference only** (ONNX TTS in Python). It does not ship training code or the repo examples.
+## Quick start
 
 ```bash
-pip install "blue-onnx"
+pip install blue-onnx
+hf download notmax123/blue-onnx-v2 --repo-type model --local-dir ./onnx_models
 ```
 
-For Rust ONNX inference, see [blue-rs](https://github.com/thewh1teagle/blue-rs).
-
-**Inference with pip in three steps:** (1) install as above, (2) put ONNX in `./onnx_models` (see [Models](#models) — `hf download` from [`blue-onnx-v2`](https://huggingface.co/notmax123/blue-onnx-v2), or the int8 [INT8 bundle](https://huggingface.co/notmax123/bluev2-onnx-int8) into another folder), (3) copy a style JSON (e.g. from [voices/](https://github.com/maxmelichov/BlueTTS/tree/main/voices)), then use this from your project:
+Grab a voice JSON from [`voices/`](voices/), then:
 
 ```python
 import soundfile as sf
 from blue_onnx import BlueTTS
 
-tts = BlueTTS(
-    onnx_dir="onnx_models",
-    style_json="voices/female1.json",
-)
-s, sr = tts.synthesize("Hello", lang="en")
-sf.write("out.wav", s, sr)
+tts = BlueTTS(onnx_dir="onnx_models", style_json="voices/noa.json")
+samples, sr = tts.synthesize("שלום, זהו מודל דיבור בעברית.", lang="he")
+sf.write("out.wav", samples, sr)
 ```
 
-Hebrew G2P ([RenikudPlus](https://github.com/maxmelichov/RenikudPlus)) downloads its own weights on first use; pass `renikud_path="model.onnx"` to point at a local copy instead.
+Numbers, dates, prices and codes are spoken as words automatically. Mix languages
+inline with `<en>…</en>`:
 
-Optional accelerators (PyPI): install the extra, then drop the stock CPU wheel so a single build owns `onnxruntime`:
+```python
+samples, sr = tts.synthesize("שלום לכולם, <en>welcome to the presentation</en>.", lang="he")
+```
 
-- Intel OpenVINO: `pip install "blue-onnx[openvino]"` then `pip uninstall onnxruntime`
-- NVIDIA CUDA: `pip install "blue-onnx[gpu]"` then `pip uninstall onnxruntime`
+Hebrew G2P ([RenikudPlus](https://github.com/maxmelichov/RenikudPlus)) downloads its own
+weights the first time you synthesize Hebrew.
 
-**This repository**
+## Documentation
+
+| | |
+|---|---|
+| [`src/blue_onnx/`](src/blue_onnx/README.md) | **Inference API** — entry points, text normalization, language spans, accelerators |
+| [`examples/`](examples/README.md) | Runnable scripts for every feature |
+| [`exports/`](exports/README.md) | New voices, ONNX export, TensorRT engines |
+| [`training/`](training/README.md) | Dataset prep and the three training stages |
+
+## Install
+
+Requires **Python 3.12+**.
+
+**From PyPI** — inference only; no training code or repo examples.
+
+```bash
+pip install blue-onnx
+```
+
+**From source** — everything, including examples and export tools.
 
 ```bash
 git clone https://github.com/maxmelichov/BlueTTS.git
@@ -55,119 +71,30 @@ cd BlueTTS
 uv sync
 ```
 
-Optional extras:
+Optional extras are documented per use case: [accelerators](src/blue_onnx/README.md#accelerators)
+(OpenVINO, CUDA), [`--extra export`](exports/README.md) for voice/ONNX export, and
+[`--extra tensorrt`](exports/README.md#build-tensorrt-engines).
 
-```bash
-uv sync --extra openvino   # Intel OpenVINO EP (then: uv pip uninstall onnxruntime)
-uv sync --extra gpu        # NVIDIA CUDA ORT (then: uv pip uninstall onnxruntime)
-```
-
-The default environment uses the stock `onnxruntime` CPU wheel. **OpenVINO** and **CUDA (`gpu`)** are optional; each adds a second ONNX Runtime distribution until you remove the stock CPU wheel so the accelerator build owns the `onnxruntime` import (`uv pip uninstall onnxruntime`, or the same with `pip` after a PyPI install with `[openvino]` or `[gpu]`). Do not combine the `openvino` and `gpu` extras. For **TensorRT**, use `uv sync --extra tensorrt` in [TensorRT](#tensorrt-nvidia-only). For **voice or ONNX export**, add `--extra export` in [Models](#models) (with the PyTorch checkpoint download).
+For Rust ONNX inference, see [blue-rs](https://github.com/thewh1teagle/blue-rs).
 
 ## Models
 
-**FP32 bundle (recommended)** — [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2): **onnxslim**–cleaned, **full precision**. Includes the four core graphs (`text_encoder`, `vector_estimator`, `vocoder`, `duration_predictor`), runtime **`tts.json`** / **`vocab.json`**, and ONNX graphs for **zero-shot voice conversion** from a reference clip (`codec_encoder`, `style_encoder`, `duration_style_encoder`).
+**FP32 (recommended)** — [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2).
+onnxslim-cleaned, full precision. Ships the four core graphs (`text_encoder`,
+`vector_estimator`, `vocoder`, `duration_predictor`), the runtime `tts.json` / `vocab.json`,
+and the graphs for zero-shot voice conversion from a reference clip.
 
 ```bash
 uv run hf download notmax123/blue-onnx-v2 --repo-type model --local-dir ./onnx_models
 ```
 
-**INT8 bundle (experimental)** — [notmax123/bluev2-onnx-int8](https://huggingface.co/notmax123/bluev2-onnx-int8): weight-only quantized graphs for a smaller footprint; **not** slimmed after export. Same filenames and layout as the FP32 bundle—set `onnx_dir` to the downloaded folder. Prefer FP32 for best quality.
+**INT8 (experimental)** — [notmax123/bluev2-onnx-int8](https://huggingface.co/notmax123/bluev2-onnx-int8).
+Weight-only quantized, smaller footprint, not slimmed. Same filenames and layout; point
+`onnx_dir` at it. Prefer FP32 for quality.
 
-```bash
-uv run hf download notmax123/bluev2-onnx-int8 --repo-type model --local-dir ./onnx_int8
-```
-
-Local export with [exports/export_onnx.py](exports/export_onnx.py): use `--slim` for FP32 (matches the published FP32 style) or `--int8` without `--slim` for INT8; INT8 remains experimental.
-
-The Hub bundles do **not** include per-voice **style JSON**; use the sample `voices/*.json` from **this repository** (or on [GitHub](https://github.com/maxmelichov/BlueTTS/tree/main/voices)), or **export a new voice** from a reference clip (see [exports/README.md](exports/README.md), PyTorch weights below). If you use `pip` without `uv`, the same CLI is available after install because `blue-onnx` depends on `huggingface-hub` — run `hf download ...` with the same arguments and point `style_json` at a file under `voices/` (e.g. `voices/female1.json`).
-
-**Optional**
-
-- Hebrew G2P: nothing to do — [RenikudPlus](https://github.com/maxmelichov/RenikudPlus) pulls [`notmax123/RenikudPlus`](https://huggingface.co/notmax123/RenikudPlus) (~310 MB) on first Hebrew synthesis and caches it. To pre-fetch or pin a local copy:
-  ```bash
-  uv run hf download notmax123/RenikudPlus model.onnx --local-dir .
-  ```
-  then pass `renikud_path="model.onnx"` (`BlueTTS`, `load_text_to_speech`).
-- PyTorch checkpoints ([notmax123/blue-v2](https://huggingface.co/notmax123/blue-v2)) for **exporting new voice JSON** and ONNX: `uv sync --extra export` then
-  ```bash
-  uv run hf download notmax123/blue-v2 --repo-type model --local-dir ./pt_models
-  ```
-
-## Usage
-
-Examples below use `voices/female1.json` from this repo, or a JSON you produced with `exports/export_new_voice.py`.
-
-## Quick start
-
-After the `BlueTTS(...)` setup in [Install](#install) (PyPI) or the same paths in a clone (`import soundfile as sf` and build `tts` as there):
-
-```python
-samples, sr = tts.synthesize("שלום, זהו מודל דיבור בעברית.", lang="he")
-sf.write("output.wav", samples, sr)
-
-mixed = "שלום לכולם, <en>welcome to the presentation</en>, <es>espero que lo disfruten</es>."
-samples, sr = tts.synthesize(mixed, lang="he")
-sf.write("mixed_output.wav", samples, sr)
-```
-
-If you are editing **this repo** without installing the package, import from `src.blue_onnx` (as `examples/` do) or put `src` on `PYTHONPATH`.
-
-`BlueTTS` is the one-voice convenience front end. For per-text styles, batched synthesis or phoneme input, use `load_text_to_speech` / `load_voice_style` directly, as `examples/` do.
-
-### Text normalization
-
-The model only speaks phonemes, so digits and symbols have to become words first. `BlueTTS.synthesize` does this by default; on `TextToSpeech` it is opt-in:
-
-```python
-samples, _ = tts("ההזמנה IL-4829 תגיע ב 12/05/2024 בשעה 08:15, מחיר 1,500 ש\"ח (50% הנחה).",
-                 lang="he", style=style, total_step=8, normalize_text=True)
-```
-
-Numbers, prices, percentages, ratios, dates, clock times, phone numbers, emails, ticket/model codes, bracketed asides, markdown headers, repeated punctuation and Hebrew spelling quirks (gershayim, phonetic geresh, hyphenated compounds) are all handled — locale-aware, so `1,500` is a thousand in English/Hebrew and `1.500` is a thousand in German/Spanish/Italian. Spelled codes, phone numbers, dates and times are synthesized as separate slower spans so digit groups stay intelligible.
-
-Inspect exactly what will be spoken without synthesizing:
-
-```python
-from blue_onnx import prepare_text_for_synthesis, split_slow_segments
-
-prepared = prepare_text_for_synthesis(text, lang="he")   # mark_slow=False for plain text
-for segment, is_slow in split_slow_segments(prepared):
-    print(is_slow, segment)
-```
-
-`uv run python examples/normalize.py` prints both and writes the audio.
-
-## Examples
-
-Get models into `./onnx_models` (see [Models](#models)) and `voices/*.json` from the repo, then from the **repository root** use either `uv` or a PyPI install:
-
-```bash
-uv run python examples/basic.py   # he / en / es / it / de + mixed in one run
-uv run python examples/mixed.py
-uv run python examples/normalize.py   # numbers, dates, times, codes, emails
-uv run python examples/app.py --lang en --text "Hello world."
-```
-
-With **`pip install "blue-onnx"`** (and the same `onnx_models` + `voices/`), the same files use `import blue_onnx` automatically; a dev tree without the package falls back to `src.blue_onnx`. If your graphs live somewhere else, set `ONNX_DIR` for `basic.py` / `mixed.py`, or pass `--onnx-dir` to `app.py`. Default `app` output: `examples/out/app_output.wav`.
-
-Edit voice JSON paths or `ONNX_DIR` if your layout differs. See [examples/voices.md](examples/voices.md) for `app.py` and voice selection.
-
-## TensorRT (NVIDIA only)
-
-1. Dependencies:
-
-```bash
-uv sync --extra tensorrt
-uv pip install tensorrt-cu12   # separate install; see astral-sh/uv#14313
-```
-
-2. Build engines (see also [exports/README.md](exports/README.md#build-tensorrt-engines)):
-
-```bash
-uv run python exports/create_tensorrt.py \
-  --onnx_dir onnx_models --engine_dir trt_engines --precision fp32 --config config/tts.json
-```
+Neither bundle includes per-voice **style JSON** — use [`voices/*.json`](voices/) from this
+repo, or [export your own](exports/README.md#export-a-new-voice) from a reference clip
+(needs the PyTorch checkpoints at [notmax123/blue-v2](https://huggingface.co/notmax123/blue-v2)).
 
 ## Citations
 
@@ -198,12 +125,17 @@ uv run python exports/create_tensorrt.py \
 
 ## Acknowledgments
 
-Hebrew G2P uses [RenikudPlus](https://github.com/maxmelichov/RenikudPlus), built on [renikud](https://github.com/thewh1teagle/renikud). Thanks to [thewh1teagle](https://github.com/thewh1teagle).
+Hebrew G2P uses [RenikudPlus](https://github.com/maxmelichov/RenikudPlus), built on
+[renikud](https://github.com/thewh1teagle/renikud). Thanks to
+[thewh1teagle](https://github.com/thewh1teagle).
 
 ## License
 
-MIT
+MIT.
 
 ## Voice cloning and responsibility
 
-This software can produce speech that mimics a reference voice. **The maintainers and contributors are not responsible** for what you do with it—compliance with law, consent from voice owners, and ethical use are **entirely your responsibility**. Do not use it to deceive, impersonate without permission, or infringe anyone’s rights.
+This software can produce speech that mimics a reference voice. **The maintainers and
+contributors are not responsible** for what you do with it — compliance with law, consent
+from voice owners, and ethical use are **entirely your responsibility**. Do not use it to
+deceive, impersonate without permission, or infringe anyone's rights.
