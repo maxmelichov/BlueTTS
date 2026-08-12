@@ -12,7 +12,6 @@ one such stale checkpoint; use a current one that matches ``config/tts.json``.
 import json
 import os
 import re
-import sys
 import time
 from contextlib import contextmanager
 from typing import Optional, Tuple, Union
@@ -240,7 +239,10 @@ class TextToSpeech:
                 "Batch mode requires `lang` to be a list of the same length as `text`."
             )
             if phonemize and self.g2p is not None:
-                text = [self.g2p.phonemize(t, lang=l) for t, l in zip(text, lang)]
+                text = [
+                    self.g2p.phonemize(t, lang=lang_code)
+                    for t, lang_code in zip(text, lang)
+                ]
             text = [strip_lang_tags_from_phoneme_string(t) for t in text]
             return self._infer(
                 text,

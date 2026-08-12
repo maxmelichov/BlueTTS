@@ -362,6 +362,7 @@ class TextToSpeech:
         g2p: Optional[TextProcessor] = None,
         u_text: Optional[np.ndarray] = None,
         u_ref: Optional[np.ndarray] = None,
+        latent_stats: Optional[tuple[np.ndarray, np.ndarray, float]] = None,
     ):
         self.cfgs = cfgs
         self.text_processor = text_processor
@@ -377,6 +378,35 @@ class TextToSpeech:
         self._u_text = u_text
         self._u_ref = u_ref
         self._vf_inputs = {i.name for i in vector_est_ort.get_inputs()}
+        voc_shape = vocoder_ort.get_inputs()[0].shape
+        self._vocoder_in_channels = voc_shape[1] if isinstance(voc_shape[1], int) else None
+        self._latent_mean, self._latent_std, self._normalizer_scale = (
+            latent_stats if latent_stats is not None else (None, None, 1.0)
+        )
+
+    def _prepare_vocoder_latent(self, xt: np.ndarray) -> np.ndarray:
+        """Feed the vocoder whatever shape its graph declares.
+
+        Two export vintages ship in the wild. The ``VocoderWithStats`` wrapper in
+        ``exports/export_onnx.py`` bakes the de-normalization and the
+        ``latent_dim*factor -> latent_dim`` time shuffle into the graph, so it takes
+        the flow output as-is. Older/leaner bundles export the bare decoder, which
+        expects the already de-normalized and decompressed ``latent_dim`` tensor and
+        ships ``mean``/``std`` alongside in ``stats.npz``. Detect which from the
+        graph's own input channel count rather than from the directory name.
+        """
+        if self._vocoder_in_channels != self.ldim:
+            return xt
+        if self._latent_mean is None or self._latent_std is None:
+            raise RuntimeError(
+                f"This vocoder takes {self.ldim}-channel latents, so it needs "
+                "mean/std from a stats.npz next to the graphs — none was found."
+            )
+        z = (xt / self._normalizer_scale) * self._latent_std + self._latent_mean
+        bsz, _, t = z.shape
+        # Inverse of the channel-major compression: (B, ldim*f, T) -> (B, ldim, T*f).
+        z = z.reshape(bsz, self.ldim, self.chunk_compress_factor, t)
+        return z.transpose(0, 1, 3, 2).reshape(bsz, self.ldim, t * self.chunk_compress_factor)
 
     def sample_noisy_latent(
         self, duration: np.ndarray
@@ -474,7 +504,7 @@ class TextToSpeech:
                 xt = v_uncond + cfg_scale * (v_cond - v_uncond)
             else:
                 xt, *_ = self.vector_est_ort.run(None, cond)
-        wav, *_ = self.vocoder_ort.run(None, {"latent": xt})
+        wav, *_ = self.vocoder_ort.run(None, {"latent": self._prepare_vocoder_latent(xt)})
         frame_len = self.base_chunk_size * self.chunk_compress_factor
         if wav.shape[-1] > 2 * frame_len:
             wav = wav[..., frame_len:-frame_len]
@@ -746,7 +776,12 @@ def load_onnx_all(
     ort.InferenceSession,
     ort.InferenceSession,
 ]:
-    dp_onnx_path = os.path.join(onnx_dir, "duration_predictor.onnx")
+    # `_infer` feeds the duration head a `style_dp` vector. Some bundles put that
+    # variant in `duration_predictor_style.onnx` and reserve `duration_predictor.onnx`
+    # for the reference-audio (`z_ref`) form, which takes different inputs entirely.
+    dp_onnx_path = os.path.join(onnx_dir, "duration_predictor_style.onnx")
+    if not os.path.exists(dp_onnx_path):
+        dp_onnx_path = os.path.join(onnx_dir, "duration_predictor.onnx")
     text_enc_onnx_path = os.path.join(onnx_dir, "text_encoder.onnx")
     vector_est_onnx_path = os.path.join(onnx_dir, "vector_estimator.onnx")
     vocoder_onnx_path = os.path.join(onnx_dir, "vocoder.onnx")
@@ -775,7 +810,14 @@ def load_text_processor(onnx_dir: str = "") -> UnicodeProcessor:
     The file lives *inside* the package: at ``src/vocab.json`` it resolved to
     ``site-packages/vocab.json`` in an installed wheel and was not packaged at all,
     so every entry point died with FileNotFoundError on `pip install blue-onnx`.
+
+    A bundle may ship its own ``vocab.json``, and that one wins when present: the
+    ids have to match the checkpoint the graphs were exported from, and newer
+    bundles extend the alphabet. The packaged copy is the fallback.
     """
+    bundled = os.path.join(onnx_dir, "vocab.json") if onnx_dir else ""
+    if bundled and os.path.exists(bundled):
+        return UnicodeProcessor(bundled)
     return UnicodeProcessor(os.path.join(os.path.dirname(__file__), "vocab.json"))
 
 
@@ -802,6 +844,26 @@ def load_uncond(onnx_dir: str) -> tuple[Optional[np.ndarray], Optional[np.ndarra
         u_text = z["u_text"].astype(np.float32) if "u_text" in z else None
         u_ref = z["u_ref"].astype(np.float32) if "u_ref" in z else None
     return u_text, u_ref
+
+
+def load_latent_stats(
+    onnx_dir: str,
+) -> Optional[tuple[np.ndarray, np.ndarray, float]]:
+    """Load ``mean``/``std``/``normalizer_scale`` from ``stats.npz`` if present.
+
+    Only bundles whose vocoder graph expects the de-normalized latent ship this;
+    the ``VocoderWithStats`` exports bake the same numbers into the graph.
+    """
+    path = os.path.join(onnx_dir, "stats.npz")
+    if not os.path.exists(path):
+        return None
+    with np.load(path) as z:
+        if "mean" not in z or "std" not in z:
+            return None
+        mean = z["mean"].astype(np.float32).reshape(1, -1, 1)
+        std = z["std"].astype(np.float32).reshape(1, -1, 1)
+        scale = float(np.asarray(z["normalizer_scale"]).reshape(-1)[0]) if "normalizer_scale" in z else 1.0
+    return mean, std, (scale or 1.0)
 
 
 def load_text_to_speech(
@@ -833,6 +895,7 @@ def load_text_to_speech(
     return TextToSpeech(
         cfgs, text_processor, dp_ort, text_enc_ort, vector_est_ort, vocoder_ort,
         g2p=g2p, u_text=u_text, u_ref=u_ref,
+        latent_stats=load_latent_stats(onnx_dir),
     )
 
 

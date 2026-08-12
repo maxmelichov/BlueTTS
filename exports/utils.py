@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Optional
 
 
 def _resolve_vocab_size(char_dict_path: Optional[str], default: int = 256) -> int:

@@ -22,7 +22,7 @@
 git clone https://github.com/maxmelichov/BlueTTS.git
 cd BlueTTS
 uv sync
-uv run hf download notmax123/blue-onnx-v2 --repo-type model --local-dir ./onnx_models
+uv run hf download notmax123/BlueTTS2.5-onnx --repo-type model --local-dir ./onnx_models
 ```
 
 Voice JSONs ship in [`voices/`](voices/), so you are ready to synthesize:
@@ -71,18 +71,27 @@ Optional extras are documented per use case: [accelerators](src/blue_onnx/README
 
 ## Models
 
-**FP32 (recommended)** — [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2).
-onnxslim-cleaned, full precision. Ships the four core graphs (`text_encoder`,
-`vector_estimator`, `vocoder`, `duration_predictor`), the runtime `tts.json` / `vocab.json`,
-and the graphs for zero-shot voice conversion from a reference clip.
+**Current — [notmax123/BlueTTS2.5-onnx](https://huggingface.co/notmax123/BlueTTS2.5-onnx)**
 
 ```bash
-uv run hf download notmax123/blue-onnx-v2 --repo-type model --local-dir ./onnx_models
+uv run hf download notmax123/BlueTTS2.5-onnx --repo-type model --local-dir ./onnx_models
 ```
 
-**INT8 (experimental)** — [notmax123/bluev2-onnx-int8](https://huggingface.co/notmax123/bluev2-onnx-int8).
-Weight-only quantized, smaller footprint, not slimmed. Same filenames and layout; point
-`onnx_dir` at it. Prefer FP32 for quality.
+Ships the core graphs (`text_encoder`, `vector_estimator`, `vocoder`,
+`duration_predictor_style`), the runtime `tts.json` / `vocab.json`, `stats.npz` and
+`uncond.npz`, a `reference_encoder` for reference-audio conditioning, and five voice
+JSONs under `voices/`. Guidance comes from `uncond.npz` rather than a baked `cfg_scale`
+input, and the vocoder takes the de-normalized latent — `blue_onnx` detects both from
+the graphs, so nothing to configure.
+
+This bundle is also the input to [`create_tensorrt.py`](exports/README.md#build-tensorrt-engines):
+its file names line up with the engines `blue_trt` expects.
+
+**Previous — [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2)**,
+plus an INT8 build at [notmax123/bluev2-onnx-int8](https://huggingface.co/notmax123/bluev2-onnx-int8).
+Still supported and still the only bundle with the zero-shot voice-conversion graphs
+(`codec_encoder`, `style_encoder`, `duration_style_encoder`) that `examples/zero_shot.py`
+and `blue_onnx.style` need.
 
 Neither bundle includes per-voice **style JSON** — use [`voices/*.json`](voices/) from this
 repo, or [export your own](exports/README.md#export-a-new-voice) from a reference clip
