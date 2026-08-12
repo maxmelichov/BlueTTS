@@ -1,4 +1,13 @@
-"""Blue PT TTS — PyTorch inference module mirroring ``blue_onnx`` layout."""
+"""BlueTTS PT — PyTorch inference module mirroring ``blue_onnx`` layout.
+
+**Checkpoint compatibility.** This loads whatever checkpoint you point it at, and
+architecture drift between generations is silent unless caught: ``ConvNeXtStack``
+is fixed at ``expansion=2`` (pwconv width ``2 * hidden``), matching the shipped
+ONNX graphs. An older checkpoint built at expansion 4 will fail in
+:func:`_load_into` with a shape mismatch — that is the intended outcome, not a
+bug to work around. ``pt_models/checkpoints/text2latent/ckpt_step_767000.pt`` is
+one such stale checkpoint; use a current one that matches ``config/tts.json``.
+"""
 
 import json
 import os
