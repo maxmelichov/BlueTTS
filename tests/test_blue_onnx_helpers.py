@@ -12,9 +12,15 @@ from src.blue_onnx import (
     UnicodeProcessor,
     blend_duration_pace,
     chunk_text,
+    get_latent_mask,
+    latent_frames_for_duration,
     length_to_mask,
     strip_lang_tags_from_phoneme_string,
 )
+
+# Shipped config/tts.json: ae.sample_rate, ae.base_chunk_size, ttl.chunk_compress_factor.
+SR, BASE_CHUNK, CCF = 44100, 512, 6
+FRAME_LEN = BASE_CHUNK * CCF
 
 
 class TestBlendDurationPace(unittest.TestCase):
@@ -54,11 +60,26 @@ class TestLengthToMask(unittest.TestCase):
         m = length_to_mask(np.array([2, 3], dtype=np.int64))
         self.assertEqual(m.shape, (2, 1, 3))
 
+    def test_zero_length_does_not_raise(self):
+        # Regression: `mask.reshape(-1, 1, 0)` cannot infer the batch dim.
+        mask = length_to_mask(np.array([0], dtype=np.int64))
+        self.assertEqual(mask.shape, (1, 1, 0))
+
+    def test_explicit_zero_max_len_is_honoured(self):
+        # Regression: `max_len or lengths.max()` treated 0 as "not given".
+        mask = length_to_mask(np.array([5], dtype=np.int64), max_len=0)
+        self.assertEqual(mask.shape, (1, 1, 0))
+
+    def test_padded_rows_are_masked_off(self):
+        mask = length_to_mask(np.array([1, 3], dtype=np.int64))
+        np.testing.assert_array_equal(mask[0, 0], [1.0, 0.0, 0.0])
+        np.testing.assert_array_equal(mask[1, 0], [1.0, 1.0, 1.0])
+
 
 class TestUnicodeProcessor(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        vocab = Path(__file__).resolve().parents[1] / "src" / "vocab.json"
+        vocab = Path(__file__).resolve().parents[1] / "src" / "blue_onnx" / "vocab.json"
         cls.proc = UnicodeProcessor(str(vocab))
 
     def test_invalid_lang_raises(self):
@@ -67,6 +88,35 @@ class TestUnicodeProcessor(unittest.TestCase):
 
     def test_available_langs_nonempty(self):
         self.assertIn("he", AVAILABLE_LANGS)
+
+
+class TestLatentFrameMath(unittest.TestCase):
+    """The seconds → latent-frame conversion shared by blue_onnx and blue_trt."""
+
+    def frames(self, seconds: float) -> int:
+        return latent_frames_for_duration(seconds, SR, BASE_CHUNK, CCF)
+
+    def test_ceils_to_whole_frames(self):
+        self.assertEqual(self.frames(FRAME_LEN / SR), 1)
+        self.assertEqual(self.frames(FRAME_LEN / SR + 1e-4), 2)
+        self.assertEqual(self.frames(0.0), 0)
+
+    def test_known_duration(self):
+        # 2.489 s at 44.1 kHz over 3072-sample frames.
+        self.assertEqual(self.frames(2.489233), 36)
+
+    def test_never_shorter_than_the_audio_it_must_hold(self):
+        for seconds in (0.001, 0.5, 2.489233, 9.999, 30.0, 123.456):
+            self.assertGreaterEqual(self.frames(seconds) * FRAME_LEN, int(seconds * SR))
+
+    def test_matches_the_mask_width_get_latent_mask_derives(self):
+        # Regression: the noise tensor width and the mask width were computed by
+        # two different expressions (one on the float duration, one on the
+        # truncated sample count) that had to agree for the product to broadcast.
+        for seconds in (0.0, 0.001, 0.5, 2.489233, 9.999, 30.0, 123.456):
+            wav_lengths = np.array([int(seconds * SR)], dtype=np.int64)
+            mask = get_latent_mask(wav_lengths, BASE_CHUNK, CCF)
+            self.assertEqual(mask.shape[2], self.frames(seconds), seconds)
 
 
 if __name__ == "__main__":

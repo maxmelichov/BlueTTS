@@ -19,6 +19,7 @@ from ..blue_onnx import (
     UnicodeProcessor,
     blend_duration_pace,
     chunk_text,
+    latent_frames_for_duration,
     load_text_processor as _load_text_processor_onnx,
     strip_lang_tags_from_phoneme_string,
 )
@@ -87,9 +88,13 @@ class TextToSpeech:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         bsz = duration.shape[0]
         wav_lengths = (duration * self.sample_rate).to(torch.long)
-        wav_len_max = int(wav_lengths.max().item())
         chunk_size = self.base_chunk_size * self.chunk_compress_factor
-        latent_len = (wav_len_max + chunk_size - 1) // chunk_size
+        # Shared with blue_onnx/blue_trt so all three mirrors size the latent the
+        # same way (see CLAUDE.md — mirrors import helpers, they don't copy them).
+        latent_len = latent_frames_for_duration(
+            float(duration.max().item()), self.sample_rate,
+            self.base_chunk_size, self.chunk_compress_factor,
+        )
         latent_dim = self.compressed_channels
         gen = torch.Generator(device=self.device).manual_seed(self.seed)
         noisy = torch.randn(bsz, latent_dim, latent_len, generator=gen, device=self.device)
