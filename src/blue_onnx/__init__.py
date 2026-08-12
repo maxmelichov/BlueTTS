@@ -382,14 +382,20 @@ class TextToSpeech:
         self, duration: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
         bsz = len(duration)
-        wav_len_max = duration.max() * self.sample_rate
         wav_lengths = (duration * self.sample_rate).astype(np.int64)
-        chunk_size = self.base_chunk_size * self.chunk_compress_factor
-        latent_len = ((wav_len_max + chunk_size - 1) / chunk_size).astype(np.int32)
+        # One expression for the width, then handed to the mask explicitly: the
+        # noise width used to come from the float duration and the mask width from
+        # the truncated sample count, two computations that had to agree for
+        # `noisy_latent * latent_mask` to broadcast.
+        latent_len = latent_frames_for_duration(
+            float(duration.max()), self.sample_rate,
+            self.base_chunk_size, self.chunk_compress_factor,
+        )
         latent_dim = self.ldim * self.chunk_compress_factor
         noisy_latent = np.random.randn(bsz, latent_dim, latent_len).astype(np.float32)
         latent_mask = get_latent_mask(
-            wav_lengths, self.base_chunk_size, self.chunk_compress_factor
+            wav_lengths, self.base_chunk_size, self.chunk_compress_factor,
+            max_len=latent_len,
         )
         noisy_latent = noisy_latent * latent_mask
         return noisy_latent, latent_mask
@@ -689,18 +695,40 @@ def length_to_mask(lengths: np.ndarray, max_len: Optional[int] = None) -> np.nda
     Returns:
         mask: (B, 1, max_len)
     """
-    max_len = max_len or lengths.max()
+    # `max_len or lengths.max()` treated an explicit 0 as "not given", and the
+    # `-1` batch dim is unresolvable when max_len is 0 (a zero-size array has no
+    # unique batch size), so a zero-length row used to raise from reshape.
+    max_len = int(lengths.max()) if max_len is None else int(max_len)
     ids = np.arange(0, max_len)
     mask = (ids < np.expand_dims(lengths, axis=1)).astype(np.float32)
-    return mask.reshape(-1, 1, max_len)
+    return mask.reshape(mask.shape[0], 1, max_len)
+
+
+def latent_frames_for_duration(
+    seconds: float, sample_rate: int, base_chunk_size: int, chunk_compress_factor: int
+) -> int:
+    """Latent frames needed to hold ``seconds`` of audio (integer ceil-div).
+
+    The flow-matching latent runs at ``base_chunk_size * chunk_compress_factor``
+    samples per frame. Shared with the PyTorch and TensorRT mirrors; TRT in
+    particular has to derive its ``T_lat`` from the duration predictor's
+    **seconds** output using exactly this arithmetic — reading that scalar as a
+    frame count instead pins every utterance to the clamp floor.
+
+    Negative input clamps to 0 frames rather than returning a negative width,
+    which would surface as an unreadable allocation error downstream.
+    """
+    frame_len = base_chunk_size * chunk_compress_factor
+    return max(0, (int(seconds * sample_rate) + frame_len - 1) // frame_len)
 
 
 def get_latent_mask(
-    wav_lengths: np.ndarray, base_chunk_size: int, chunk_compress_factor: int
+    wav_lengths: np.ndarray, base_chunk_size: int, chunk_compress_factor: int,
+    max_len: Optional[int] = None,
 ) -> np.ndarray:
     latent_size = base_chunk_size * chunk_compress_factor
     latent_lengths = (wav_lengths + latent_size - 1) // latent_size
-    latent_mask = length_to_mask(latent_lengths)
+    latent_mask = length_to_mask(latent_lengths, max_len=max_len)
     return latent_mask
 
 
@@ -740,7 +768,15 @@ def load_cfgs(onnx_dir: str, config_path: str = "config/tts.json") -> dict:
 
 
 def load_text_processor(onnx_dir: str = "") -> UnicodeProcessor:
-    return UnicodeProcessor(os.path.join(os.path.dirname(__file__), "..", "vocab.json"))
+    """Load the bundled vocabulary. ``onnx_dir`` is ignored — a bundle's own
+    ``vocab.json`` is never used, because the ids have to match the checkpoint the
+    graphs were exported from.
+
+    The file lives *inside* the package: at ``src/vocab.json`` it resolved to
+    ``site-packages/vocab.json`` in an installed wheel and was not packaged at all,
+    so every entry point died with FileNotFoundError on `pip install blue-onnx`.
+    """
+    return UnicodeProcessor(os.path.join(os.path.dirname(__file__), "vocab.json"))
 
 
 def text_to_indices(text: str, lang: str = "he") -> list[int]:
@@ -861,7 +897,7 @@ class BlueTTS:
     def __init__(
         self,
         onnx_dir: str = "onnx_models",
-        style_json: Union[str, list[str]] = "voices/female1.json",
+        style_json: Union[str, list[str]] = "voices/noa.json",
         renikud_path: Optional[str] = None,
         config_path: str = "config/tts.json",
     ):

@@ -368,7 +368,10 @@ def main():
     print(f"[INFO] config: {args.config} (v{cfg['full_config'].get('tts_version', '?')})")
     os.makedirs(args.onnx_dir, exist_ok=True)
     shutil.copyfile(args.config, os.path.join(args.onnx_dir, "tts.json"))
-    shutil.copyfile(os.path.join(_ROOT, "src", "vocab.json"), os.path.join(args.onnx_dir, "vocab.json"))
+    shutil.copyfile(
+        os.path.join(_ROOT, "src", "blue_onnx", "vocab.json"),
+        os.path.join(args.onnx_dir, "vocab.json"),
+    )
 
     # ---- load checkpoints ---------------------------------------------------
     t2l = _load_state(args.ttl_ckpt)
