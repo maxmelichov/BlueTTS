@@ -402,11 +402,18 @@ class BlueTRT:
 
         # Text encoder.
         te_in = set(self._text_enc.input_names())
+        # Engine input names vary by export vintage; feed only what this one declares.
         te_feed: Dict[str, torch.Tensor] = {"text_ids": text_ids}
-        if "text_mask" in te_in: te_feed["text_mask"] = text_mask
-        if "style_ttl" in te_in: te_feed["style_ttl"] = ref_values
-        if "ref_values" in te_in: te_feed["ref_values"] = ref_values
-        if "ref_keys" in te_in: te_feed["ref_keys"] = ref_keys
+        te_feed.update({
+            name: value
+            for name, value in (
+                ("text_mask", text_mask),
+                ("style_ttl", ref_values),
+                ("ref_values", ref_values),
+                ("ref_keys", ref_keys),
+            )
+            if name in te_in
+        })
         te_out = self._text_enc.run(te_feed)
         text_emb = te_out.get("text_emb")
         if text_emb is None:
@@ -510,17 +517,26 @@ class BlueTRT:
         vf_in = set(self._vf.input_names())
         total_t = torch.tensor([float(self.steps)], dtype=torch.float32, device=self.device)
         step_t = torch.tensor([float(step)], dtype=torch.float32, device=self.device)
+        # Engine input names vary by export vintage; feed only what this one declares.
         feed: Dict[str, torch.Tensor] = {"noisy_latent": noisy}
-        if "text_emb" in vf_in: feed["text_emb"] = text_emb
-        if "text_context" in vf_in: feed["text_context"] = text_emb
-        if "style_ttl" in vf_in: feed["style_ttl"] = ref_values
-        if "ref_values" in vf_in: feed["ref_values"] = ref_values
-        if "latent_mask" in vf_in: feed["latent_mask"] = latent_mask
-        if "text_mask" in vf_in: feed["text_mask"] = text_mask
+        feed.update({
+            name: value
+            for name, value in (
+                ("text_emb", text_emb),
+                ("text_context", text_emb),
+                ("style_ttl", ref_values),
+                ("ref_values", ref_values),
+                ("latent_mask", latent_mask),
+                ("text_mask", text_mask),
+                ("current_step", step_t),
+                ("total_step", total_t),
+            )
+            if name in vf_in
+        })
         if "style_mask" in vf_in:
-            feed["style_mask"] = torch.ones(1, 1, ref_values.shape[1], dtype=torch.float32, device=self.device)
-        if "current_step" in vf_in: feed["current_step"] = step_t
-        if "total_step" in vf_in: feed["total_step"] = total_t
+            feed["style_mask"] = torch.ones(
+                1, 1, ref_values.shape[1], dtype=torch.float32, device=self.device
+            )
         if "cfg_scale" in vf_in:
             feed["cfg_scale"] = torch.tensor(
                 [float(cfg_scale)], dtype=torch.float32, device=self.device
