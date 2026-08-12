@@ -21,8 +21,7 @@ Output goes to `examples/out/`; `app.py` defaults to `examples/out/app_output.wa
 ## Imports
 
 These files are **not** installed-package consumers. They `sys.path.append(".")` and
-import from `src.blue_onnx`, so they work in a fresh clone with no install. With
-`pip install blue-onnx` they fall back to the installed `blue_onnx` automatically.
+import from `src.blue_onnx`, so they work in a fresh clone after `uv sync`.
 
 ## Voices
 

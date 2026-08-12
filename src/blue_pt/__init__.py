@@ -1,9 +1,17 @@
-"""Blue PT TTS — PyTorch inference module mirroring ``blue_onnx`` layout."""
+"""BlueTTS PT — PyTorch inference module mirroring ``blue_onnx`` layout.
+
+**Checkpoint compatibility.** This loads whatever checkpoint you point it at, and
+architecture drift between generations is silent unless caught: ``ConvNeXtStack``
+is fixed at ``expansion=2`` (pwconv width ``2 * hidden``), matching the shipped
+ONNX graphs. An older checkpoint built at expansion 4 will fail in
+:func:`_load_into` with a shape mismatch — that is the intended outcome, not a
+bug to work around. ``pt_models/checkpoints/text2latent/ckpt_step_767000.pt`` is
+one such stale checkpoint; use a current one that matches ``config/tts.json``.
+"""
 
 import json
 import os
 import re
-import sys
 import time
 from contextlib import contextmanager
 from typing import Optional, Tuple, Union
@@ -231,7 +239,10 @@ class TextToSpeech:
                 "Batch mode requires `lang` to be a list of the same length as `text`."
             )
             if phonemize and self.g2p is not None:
-                text = [self.g2p.phonemize(t, lang=l) for t, l in zip(text, lang)]
+                text = [
+                    self.g2p.phonemize(t, lang=lang_code)
+                    for t, lang_code in zip(text, lang)
+                ]
             text = [strip_lang_tags_from_phoneme_string(t) for t in text]
             return self._infer(
                 text,
@@ -327,6 +338,53 @@ def _load_sd(path: str, *candidates: str) -> dict:
         if sub:
             return sub
     return raw
+
+
+def _align_state_dict(sd: dict, module: torch.nn.Module) -> dict:
+    """Strip whatever namespace a training checkpoint wraps its weights in.
+
+    Submodules are stored under the *trainer's* attribute path, which is not the
+    standalone module's: the text encoder lives at ``text_encoder.*`` and the
+    vector field at ``tts.ttl.vector_field.*`` in the same file. Rather than
+    hardcode either, try every dotted namespace present and keep the one that
+    matches the most of what the module actually expects.
+    """
+    want = set(module.state_dict())
+    best, best_n = sd, len(want & set(sd))
+    if best_n == len(want):
+        return sd
+    prefixes = set()
+    for key in sd:
+        parts = str(key).split(".")
+        for i in range(1, len(parts)):
+            prefixes.add(".".join(parts[:i]) + ".")
+    for p in prefixes:
+        stripped = {k[len(p):]: v for k, v in sd.items() if str(k).startswith(p)}
+        n = len(want & set(stripped))
+        if n > best_n:
+            best, best_n = stripped, n
+    return best
+
+
+def _load_into(module: torch.nn.Module, sd: dict, name: str) -> None:
+    """``load_state_dict(strict=False)`` that refuses to load silent garbage.
+
+    Non-strict loading is needed for legitimate back-compat (the ``style_key`` →
+    ``tile`` rename), but it also swallowed a whole-checkpoint key mismatch: the
+    text encoder and vector estimator were loading 14/143 and 1/355 parameters
+    and synthesizing from mostly random weights, with no error anywhere.
+    """
+    result = module.load_state_dict(_align_state_dict(sd, module), strict=False)
+    total = len(module.state_dict())
+    loaded = total - len(result.missing_keys)
+    if loaded < total:
+        print(f"[WARN] {name}: loaded {loaded}/{total} parameters")
+    if total and loaded < total * 0.5:
+        raise RuntimeError(
+            f"{name}: only {loaded}/{total} parameters matched the checkpoint "
+            f"(e.g. missing {result.missing_keys[:3]}). Refusing to run on "
+            f"random weights — the checkpoint layout does not match the model."
+        )
 
 
 def load_cfgs(weights_dir: str, config_path: str = "tts.json") -> dict:
@@ -439,7 +497,7 @@ def load_pt_models(
         expansion_factor=cfg.get("te_expansion_factor", 4),
         p_dropout=0.0,
     ).to(device).eval()
-    text_encoder.load_state_dict(te_sd, strict=False)
+    _load_into(text_encoder, te_sd, "text_encoder")
 
     vf_estimator = VectorFieldEstimator(
         in_channels=compressed,
@@ -452,7 +510,7 @@ def load_pt_models(
         time_embed_dim=cfg.get("vf_time_dim", 64),
         rope_gamma=cfg.get("vf_rotary_scale", 10.0),
     ).to(device).eval()
-    vf_estimator.load_state_dict(vf_sd, strict=False)
+    _load_into(vf_estimator, vf_sd, "vf_estimator")
 
     dp_path = dp_ckpt or os.path.join(weights_dir, "duration_predictor.pt")
     dp_sd = _load_sd(dp_path, "state_dict")
@@ -466,12 +524,12 @@ def load_pt_models(
         style_dp=cfg.get("dp_style_tokens", 8),
         style_dim=cfg.get("dp_style_dim", 16),
     ).to(device).eval()
-    dp_model.load_state_dict(dp_sd, strict=False)
+    _load_into(dp_model, dp_sd, "duration_predictor")
 
     voc_path = ae_ckpt or os.path.join(weights_dir, "vocoder.pt")
     voc_sd = _load_sd(voc_path, "decoder", "state_dict")
     vocoder = LatentDecoder1D(cfg=cfg.get("ae_dec_cfg", {})).to(device).eval()
-    vocoder.load_state_dict(voc_sd, strict=False)
+    _load_into(vocoder, voc_sd, "vocoder")
 
     return text_encoder, vf_estimator, dp_model, vocoder, u_text, u_ref
 

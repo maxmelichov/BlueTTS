@@ -1,7 +1,6 @@
 # `blue_onnx` — inference API
 
-The published package (`pip install blue-onnx`). Three entry points, in increasing
-order of control.
+The inference package. Three entry points, in increasing order of control.
 
 ## `BlueTTS` — one voice, one call
 
@@ -113,8 +112,8 @@ Exactly one build may own the `onnxruntime` import, so install the extra and the
 the stock CPU wheel:
 
 ```bash
-pip install "blue-onnx[openvino]" && pip uninstall onnxruntime   # Intel
-pip install "blue-onnx[gpu]"      && pip uninstall onnxruntime   # NVIDIA CUDA
+uv sync --extra openvino && uv pip uninstall onnxruntime   # Intel
+uv sync --extra gpu      && uv pip uninstall onnxruntime   # NVIDIA CUDA
 ```
 
 Do not combine `openvino` and `gpu`. For TensorRT, see [`exports/`](../../exports/README.md).
