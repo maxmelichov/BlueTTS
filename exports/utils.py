@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 def _resolve_vocab_size(char_dict_path: Optional[str], default: int = 256) -> int:
     """Helper to get vocab size from a vocab/char_dict JSON file.
 
-    Supports both the `src/vocab.json` schema (top-level `vocab_size` + `char_to_id`)
+    Supports both the `src/blue_onnx/vocab.json` schema (top-level `vocab_size` + `char_to_id`)
     and a raw {char: id} dict.
     """
     if not char_dict_path or not os.path.exists(char_dict_path):

@@ -5,8 +5,9 @@
 #          --exclude "voices/all_voices/**"
 #      optional 2000+ voices: uv run hf download notmax123/blue-onnx voices/all_voices/ \
 #          --repo-type model --local-dir ./onnx_models
-#      wget -O model.onnx https://huggingface.co/thewh1teagle/renikud/resolve/main/model.onnx
-#      (voices/ and config/tts.json ship with this repo)
+#      (voices/ and config/tts.json ship with this repo; the RenikudPlus Hebrew G2P
+#       weights are fetched at first use — pre-fetch with
+#       `uv run hf download notmax123/RenikudPlus model.onnx --local-dir .` to bake them in)
 #
 #   2. Build and run:
 #      docker build -t blue-tts .
