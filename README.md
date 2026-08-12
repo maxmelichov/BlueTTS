@@ -1,14 +1,13 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Blue" width="200">
+  <img src="assets/logo.png" alt="BlueTTS" width="280">
 </p>
 
-<h1 align="center">Blue</h1>
-
-<p align="center">Multilingual text-to-speech on ONNX Runtime — Hebrew, English, Spanish, Italian, German.</p>
+<p align="center">
+  <b>Multilingual text-to-speech on ONNX Runtime</b><br>
+  Hebrew &middot; English &middot; Spanish &middot; Italian &middot; German
+</p>
 
 <p align="center">
-  <a href="https://pypi.org/project/blue-onnx/"><img src="https://img.shields.io/pypi/v/blue-onnx?style=for-the-badge&amp;label=PyPI" alt="PyPI version"></a>
-  &nbsp;
   <a href="https://huggingface.co/spaces/notmax123/BlueV2"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Try%20Live%20Demo-FFD21E?style=for-the-badge" alt="Try Live Demo on Hugging Face"></a>
   &nbsp;
   <a href="https://lightbluetts.com/"><img src="https://img.shields.io/badge/%F0%9F%8C%90%20Website-lightbluetts.com-2563EB?style=for-the-badge" alt="lightbluetts.com"></a>
@@ -19,11 +18,13 @@
 ## Quick start
 
 ```bash
-pip install blue-onnx
-hf download notmax123/blue-onnx-v2 --repo-type model --local-dir ./onnx_models
+git clone https://github.com/maxmelichov/BlueTTS.git
+cd BlueTTS
+uv sync
+uv run hf download notmax123/BlueTTS2.5-onnx --repo-type model --local-dir ./onnx_models
 ```
 
-Grab a voice JSON from [`voices/`](voices/), then:
+Voice JSONs ship in [`voices/`](voices/), so you are ready to synthesize:
 
 ```python
 import soundfile as sf
@@ -41,8 +42,8 @@ inline with `<en>…</en>`:
 samples, sr = tts.synthesize("שלום לכולם, <en>welcome to the presentation</en>.", lang="he")
 ```
 
-Hebrew G2P ([RenikudPlus](https://github.com/maxmelichov/RenikudPlus)) downloads its own
-weights the first time you synthesize Hebrew.
+Hebrew grapheme-to-phoneme is handled by [RenikudPlus](https://github.com/maxmelichov/RenikudPlus),
+which downloads its own weights the first time you synthesize Hebrew.
 
 ## Documentation
 
@@ -55,15 +56,7 @@ weights the first time you synthesize Hebrew.
 
 ## Install
 
-Requires **Python 3.12+**.
-
-**From PyPI** — inference only; no training code or repo examples.
-
-```bash
-pip install blue-onnx
-```
-
-**From source** — everything, including examples and export tools.
+Requires **Python 3.12+** and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/maxmelichov/BlueTTS.git
@@ -75,22 +68,28 @@ Optional extras are documented per use case: [accelerators](src/blue_onnx/README
 (OpenVINO, CUDA), [`--extra export`](exports/README.md) for voice/ONNX export, and
 [`--extra tensorrt`](exports/README.md#build-tensorrt-engines).
 
-For Rust ONNX inference, see [blue-rs](https://github.com/thewh1teagle/blue-rs).
-
 ## Models
 
-**FP32 (recommended)** — [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2).
-onnxslim-cleaned, full precision. Ships the four core graphs (`text_encoder`,
-`vector_estimator`, `vocoder`, `duration_predictor`), the runtime `tts.json` / `vocab.json`,
-and the graphs for zero-shot voice conversion from a reference clip.
+**Current — [notmax123/BlueTTS2.5-onnx](https://huggingface.co/notmax123/BlueTTS2.5-onnx)**
 
 ```bash
-uv run hf download notmax123/blue-onnx-v2 --repo-type model --local-dir ./onnx_models
+uv run hf download notmax123/BlueTTS2.5-onnx --repo-type model --local-dir ./onnx_models
 ```
 
-**INT8 (experimental)** — [notmax123/bluev2-onnx-int8](https://huggingface.co/notmax123/bluev2-onnx-int8).
-Weight-only quantized, smaller footprint, not slimmed. Same filenames and layout; point
-`onnx_dir` at it. Prefer FP32 for quality.
+Ships the core graphs (`text_encoder`, `vector_estimator`, `vocoder`,
+`duration_predictor_style`), the runtime `tts.json` / `vocab.json`, `stats.npz` and
+`uncond.npz`, a `reference_encoder` for reference-audio conditioning, and five voice
+JSONs under `voices/`. Guidance comes from `uncond.npz` rather than a baked `cfg_scale`
+input, and the vocoder takes the de-normalized latent — `blue_onnx` detects both from
+the graphs, so nothing to configure.
+
+This bundle is also the input to [`create_tensorrt.py`](exports/README.md#build-tensorrt-engines):
+its file names line up with the engines `blue_trt` expects.
+
+**Previous — [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2)**.
+Still supported and still the only bundle with the zero-shot voice-conversion graphs
+(`codec_encoder`, `style_encoder`, `duration_style_encoder`) that `examples/zero_shot.py`
+and `blue_onnx.style` need.
 
 Neither bundle includes per-voice **style JSON** — use [`voices/*.json`](voices/) from this
 repo, or [export your own](exports/README.md#export-a-new-voice) from a reference clip
@@ -122,12 +121,6 @@ repo, or [export your own](exports/README.md#export-a-new-voice) from a referenc
       url={https://arxiv.org/abs/2512.17293},
 }
 ```
-
-## Acknowledgments
-
-Hebrew G2P uses [RenikudPlus](https://github.com/maxmelichov/RenikudPlus), built on
-[renikud](https://github.com/thewh1teagle/renikud). Thanks to
-[thewh1teagle](https://github.com/thewh1teagle).
 
 ## License
 

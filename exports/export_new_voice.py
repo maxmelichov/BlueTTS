@@ -262,7 +262,7 @@ def export_voice_style(
                 "z_ref_raw": z_ref_raw.cpu(),
                 "is_normalized": False,
                 "metadata": {
-                    "ref_wav": os.path.abspath(ref_wav),
+                    "ref_wav": os.path.basename(ref_wav),
                     "stats_path": stats_path,
                     "sr": sr,
                     "z_ref_raw_shape": list(z_ref_raw.shape),
@@ -349,7 +349,7 @@ def export_voice_style(
         "style_dp": {"data": style_dp.tolist(), "dims": list(style_dp.shape)},
         "metadata": {
             "sr": sr,
-            "ref_wav": os.path.abspath(ref_wav),
+            "ref_wav": os.path.basename(ref_wav),
             "stats_path": stats_path,
             "z_ref_norm_shape": list(z_ref_norm.shape),
             "normalizer_scale": normalizer_scale,
