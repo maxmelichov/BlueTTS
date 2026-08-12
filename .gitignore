@@ -45,3 +45,4 @@ onnx_models/
 *.tar.gz
 CLAUDE.md
 /logo.png
+.claude/
