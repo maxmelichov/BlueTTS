@@ -18,6 +18,7 @@ from ..blue_onnx import (
     TextProcessor,
     blend_duration_pace,
     chunk_text,
+    latent_frames_for_duration,
     strip_lang_tags_from_phoneme_string,
     text_to_indices,
 )
@@ -234,12 +235,7 @@ class BlueTRT:
         self.fade_duration = fade_duration
         self.device = device
 
-        if renikud_path is None:
-            for cand in ("model.onnx", os.path.join(trt_dir, "model.onnx")):
-                if os.path.exists(cand):
-                    renikud_path = cand
-                    break
-
+        # renikud_path stays optional: RenikudPlus fetches its own weights when omitted.
         cfgs = load_cfgs(config_path)
         ttl = cfgs.get("ttl", {}) or {}
         ae = cfgs.get("ae", {}) or {}
@@ -248,6 +244,9 @@ class BlueTRT:
         self.latent_dim = int(ttl.get("latent_dim", 24))
         self.chunk_compress_factor = int(ttl.get("chunk_compress_factor", 6))
         self.hop_length = int(spec.get("hop_length", 512))
+        # ``ae.base_chunk_size`` is the samples-per-latent-frame that blue_onnx uses;
+        # it equals hop_length in the shipped config, but that is a coincidence.
+        self.base_chunk_size = int(ae.get("base_chunk_size", self.hop_length))
         self.sample_rate = int(ae.get("sample_rate", 44100))
         self.compressed_channels = self.latent_dim * self.chunk_compress_factor
 
@@ -263,6 +262,11 @@ class BlueTRT:
         self._vf_has_velocity = "velocity" in vf_out
         if not (self._vf_has_denoised or self._vf_has_velocity):
             raise ValueError(f"Unsupported vector_estimator outputs: {vf_out}")
+        # Engines built from exports/export_onnx.py wrap the estimator in
+        # VectorFieldEstimatorCFG, which bakes u_text/u_ref and already returns
+        # u + cfg*(c - u). Running the two-pass formula on top of that would apply
+        # guidance twice. Same precedence as blue_onnx._infer.
+        self._vf_has_cfg_input = "cfg_scale" in set(self._vf.input_names())
 
         self.mean, self.std, ns_from_stats = load_stats(trt_dir, device)
         if ns_from_stats != 1.0:
@@ -424,6 +428,36 @@ class BlueTRT:
         # Decode.
         return self._decode(latent)
 
+    def _seconds_to_latent_frames(
+        self,
+        seconds: float,
+        text_mask: torch.Tensor,
+        pace_blend: float,
+        pace_dpt_ref: Optional[float],
+    ) -> int:
+        """Duration-predictor seconds → latent frames, as ``blue_onnx`` does it.
+
+        The graph emits one **seconds** scalar per batch item (``duration [B]`` in
+        ``exports/export_onnx.py``), not a frame count: pace blending has to happen
+        in seconds for :data:`DURATION_PACE_DPT_REF` (seconds per text token) to
+        mean anything, and the frame conversion is
+        ``ceil(seconds * sample_rate / (base_chunk_size * chunk_compress_factor))``
+        — the same arithmetic as :meth:`blue_onnx.TextToSpeech.sample_noisy_latent`.
+        """
+        ref = float(pace_dpt_ref) if pace_dpt_ref is not None else DURATION_PACE_DPT_REF
+        blended = float(
+            blend_duration_pace(
+                np.array([seconds], dtype=np.float32),
+                text_mask.detach().cpu().numpy(),
+                pace_blend,
+                ref,
+            )[0]
+        )
+        return latent_frames_for_duration(
+            blended / max(self.speed, 1e-6), self.sample_rate,
+            self.base_chunk_size, self.chunk_compress_factor,
+        )
+
     def _predict_duration(
         self,
         text_ids: torch.Tensor,
@@ -434,8 +468,6 @@ class BlueTRT:
         pace_dpt_ref: Optional[float] = None,
     ) -> int:
         T_lat: Optional[int] = None
-        ref = float(pace_dpt_ref) if pace_dpt_ref is not None else DURATION_PACE_DPT_REF
-        tm_np = text_mask.detach().cpu().numpy()
 
         if style_dp is not None and self._dp_style is not None:
             if style_dp.dim() == 2:
@@ -443,24 +475,21 @@ class BlueTRT:
             out = self._dp_style.run({"text_ids": text_ids, "style_dp": style_dp, "text_mask": text_mask})
             val = float(out["duration"].sum())
             if np.isfinite(val):
-                d = blend_duration_pace(
-                    np.array([val], dtype=np.float32), tm_np, pace_blend, ref
+                T_lat = self._seconds_to_latent_frames(
+                    val, text_mask, pace_blend, pace_dpt_ref
                 )
-                val = float(d[0])
-                T_lat = int(np.round(val / max(self.speed, 1e-6)))
 
         if T_lat is None and z_ref_norm is not None and self._dp is not None:
             ref_mask = torch.ones(1, 1, z_ref_norm.shape[2], dtype=torch.float32, device=self.device)
             out = self._dp.run({"text_ids": text_ids, "z_ref": z_ref_norm, "text_mask": text_mask, "ref_mask": ref_mask})
             val = float(out["duration"].sum())
             if np.isfinite(val):
-                d = blend_duration_pace(
-                    np.array([val], dtype=np.float32), tm_np, pace_blend, ref
+                T_lat = self._seconds_to_latent_frames(
+                    val, text_mask, pace_blend, pace_dpt_ref
                 )
-                val = float(d[0])
-                T_lat = int(np.round(val / max(self.speed, 1e-6)))
 
         if T_lat is None:
+            # No duration engine at all — fall back to a frames-per-token guess.
             T_lat = int(text_ids.shape[1] * 1.3)
 
         txt_len = int(text_mask.sum())
@@ -510,7 +539,12 @@ class BlueTRT:
         x = torch.randn(1, self.compressed_channels, T_lat, dtype=torch.float32, device=self.device)
         latent_mask = torch.ones(1, 1, T_lat, dtype=torch.float32, device=self.device)
 
-        use_cfg = cfg_scale != 1.0 and self._u_text is not None and self._u_ref is not None
+        use_cfg = (
+            cfg_scale != 1.0
+            and not self._vf_has_cfg_input  # the graph already did it
+            and self._u_text is not None
+            and self._u_ref is not None
+        )
         u_text_mask = torch.ones(1, 1, 1, dtype=torch.float32, device=self.device) if use_cfg else None
 
         for s in range(self.steps):
@@ -549,7 +583,7 @@ class BlueTRT:
         if wav is None:
             wav = next(iter(voc_out.values()))
 
-        frame_len = self.hop_length * self.chunk_compress_factor
+        frame_len = self.base_chunk_size * self.chunk_compress_factor
         if wav.shape[-1] > 2 * frame_len:
             wav = wav[..., frame_len:-frame_len]
 

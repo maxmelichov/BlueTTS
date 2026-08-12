@@ -43,3 +43,6 @@ Thumbs.db
 pt_models/
 onnx_models/
 *.tar.gz
+CLAUDE.md
+/logo.png
+.claude/
