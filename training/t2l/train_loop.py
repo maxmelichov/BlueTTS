@@ -22,6 +22,7 @@ from training.data.audio_utils import ensure_sr
 from training.data.text_vocab import normalize_text, text_to_indices_multilang
 from training.utils import check_stats_provenance, compress_latents
 from training.t2l.builders import build_models
+from training.t2l.ema import ModelEMA
 from training.t2l.cfg_utils import (
     DistributedWeightedSampler,
     _latest_ckpt_in_dir,
@@ -182,6 +183,7 @@ def train(
     train_cfg = ttl_cfg.get("train", {})
     weight_decay = float(train_cfg.get("weight_decay", 0.01))
     lr_milestones = [int(m) for m in train_cfg.get("lr_milestones", [300_000, 600_000])]
+    ema_decay = float(train_cfg.get("ema_decay", 0.0))  # 0 = no EMA
 
     um_cfg = ttl_cfg["uncond_masker"]
     prob_both_uncond = um_cfg["prob_both_uncond"]
@@ -357,6 +359,19 @@ def train(
         if 'scheduler' in checkpoint and not shapes_changed: scheduler_state = checkpoint['scheduler']
 
     scheduler = build_lr_scheduler(optimizer, lr, lr_milestones, global_step, scheduler_state, finetune)
+
+    # EMA of TE / VF / reference encoder, on rank 0 only (DDP keeps every rank's weights identical).
+    # Restored from the resumed checkpoint's 'ema', else initialised from the current weights.
+    ema = None
+    if ema_decay > 0 and rank == 0:
+        ema = ModelEMA([("vf_estimator", vf_estimator), ("text_encoder", text_encoder),
+                        ("reference_encoder", reference_encoder)], decay=ema_decay)
+        ema_state = checkpoint.get("ema") if latest_ckpt is not None else None
+        if ema_state is not None:
+            n_loaded = ema.load_state_dicts(ema_state)
+            print(f"[EMA] decay {ema_decay}: restored {n_loaded} tensors (updates={ema.updates})")
+        else:
+            print(f"[EMA] decay {ema_decay}: initialised {len(ema.params)} tensors from the current weights")
 
     if dist.is_initialized():
         text_encoder = DDP(text_encoder, device_ids=[local_rank], find_unused_parameters=True)
@@ -702,6 +717,8 @@ def train(
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+                if ema is not None:
+                    ema.update()
                 global_step += 1
 
             epoch_loss += loss.item() * accumulation_steps
@@ -720,6 +737,7 @@ def train(
             if global_step % 1000 == 0 and global_step != last_saved_step and rank == 0:
                 last_saved_step = global_step
                 ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{global_step}.pt")
+                ema_sd = ema.state_dicts() if ema is not None else None
                 torch.save({
                     "vf_estimator": ddp_state_dict(vf_estimator),
                     "text_encoder": ddp_state_dict(text_encoder),
@@ -732,8 +750,28 @@ def train(
                     "global_step": global_step,
                     "edge_fill": int(ttl_cfg.get("edge_fill", False)),  # 1 = trained on the exact-length layout
                     "latent_flush": 1,  # trained on exact-length latents: no masked frame after the longest row
+                    **({"ema": ema_sd} if ema is not None else {}),
                 }, ckpt_path)
                 print(f"Saved checkpoint to {ckpt_path}")
+                if ema is not None:
+                    # The EMA weights as an ordinary checkpoint (no optimizer), loadable by inference / export as is.
+                    ema_path = os.path.join(checkpoint_dir, "ema", f"ckpt_step_{global_step}.pt")
+                    os.makedirs(os.path.dirname(ema_path), exist_ok=True)
+                    torch.save({
+                        "vf_estimator": ema_sd["vf_estimator"],
+                        "text_encoder": ema_sd["text_encoder"],
+                        "reference_encoder": ema_sd["reference_encoder"],
+                        "u_text": u_text.data,
+                        "u_ref": u_ref.data,
+                        **({"u_key": u_key.data} if u_key is not None else {}),
+                        "global_step": global_step,
+                        "edge_fill": int(ttl_cfg.get("edge_fill", False)),
+                        "latent_flush": 1,
+                        "ema_decay": ema_sd["decay"],
+                        "ema_updates": ema_sd["updates"],
+                    }, ema_path)
+                    print(f"Saved EMA checkpoint to {ema_path}")
+                    del ema_sd
                 print("Running inference (periodic log)...")
 
                 # Unwrap for inference to avoid DDP sync issues on single rank
@@ -927,6 +965,8 @@ def train(
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update()
             global_step += 1
 
         if spfm_call_batches > 0:
