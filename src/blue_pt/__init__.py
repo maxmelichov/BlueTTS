@@ -1,12 +1,13 @@
 """BlueTTS PT — PyTorch inference module mirroring ``blue_onnx`` layout.
 
 **Checkpoint compatibility.** This loads whatever checkpoint you point it at, and
-architecture drift between generations is silent unless caught: ``ConvNeXtStack``
-is fixed at ``expansion=2`` (pwconv width ``2 * hidden``), matching the shipped
-ONNX graphs. An older checkpoint built at expansion 4 will fail in
+architecture drift between generations is silent unless caught: the
+``ConvNeXtStack`` width comes from the config's ``intermediate_dim``
+(``2 * hidden`` in ``config/tts.json``, ``4 * hidden`` in the 64M
+``config/tts_st3.json``). A checkpoint loaded with the wrong config fails in
 :func:`_load_into` with a shape mismatch — that is the intended outcome, not a
 bug to work around. ``pt_models/checkpoints/text2latent/ckpt_step_767000.pt`` is
-one such stale checkpoint; use a current one that matches ``config/tts.json``.
+one such stale checkpoint; use a current one that matches its config.
 """
 
 import json
@@ -496,6 +497,7 @@ def load_pt_models(
         n_attn_layers=cfg.get("te_attn_n_layers", 4),
         expansion_factor=cfg.get("te_expansion_factor", 4),
         p_dropout=0.0,
+        dilation_lst=cfg.get("te_dilation_lst"),
     ).to(device).eval()
     _load_into(text_encoder, te_sd, "text_encoder")
 
@@ -509,6 +511,10 @@ def load_pt_models(
         num_superblocks=cfg.get("vf_n_blocks", 4),
         time_embed_dim=cfg.get("vf_time_dim", 64),
         rope_gamma=cfg.get("vf_rotary_scale", 10.0),
+        main_blocks_cfg=cfg.get("vf_main_blocks"),
+        last_convnext_cfg=cfg.get("vf_last_convnext"),
+        text_n_heads=cfg.get("vf_text_n_heads", 4),
+        text_n_units=cfg.get("vf_text_n_units", 256),
     ).to(device).eval()
     _load_into(vf_estimator, vf_sd, "vf_estimator")
 
