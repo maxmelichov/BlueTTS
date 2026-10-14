@@ -403,6 +403,7 @@ def main():
         n_attn_layers=cfg["te_attn_n_layers"],
         expansion_factor=cfg["te_expansion_factor"],
         p_dropout=cfg["te_attn_p_dropout"],
+        dilation_lst=cfg["te_dilation_lst"],
     ).eval()
     _load_into(text_enc, t2l, "text_encoder")
 
@@ -422,6 +423,8 @@ def main():
         text_dim=cfg["vf_text_dim"], style_dim=cfg["vf_style_dim"],
         num_style_tokens=n_style, num_superblocks=cfg["vf_n_blocks"],
         time_embed_dim=cfg["vf_time_dim"], rope_gamma=cfg["vf_rotary_scale"],
+        main_blocks_cfg=cfg["vf_main_blocks"], last_convnext_cfg=cfg["vf_last_convnext"],
+        text_n_heads=cfg["vf_text_n_heads"], text_n_units=cfg["vf_text_n_units"],
     ).eval()
     _load_into(vf, t2l, "vf_estimator")
 

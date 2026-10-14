@@ -53,6 +53,7 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
     vf_n_blocks = vf_cfg["main_blocks"]["n_blocks"]
     vf_text_dim = vf_cfg["main_blocks"]["text_cond_layer"]["text_dim"]
     vf_text_n_heads = vf_cfg["main_blocks"]["text_cond_layer"]["n_heads"]
+    vf_text_n_units = vf_cfg["main_blocks"]["text_cond_layer"].get("n_units", 256)
     vf_style_dim = vf_cfg["main_blocks"]["style_cond_layer"]["style_dim"]
     vf_rotary_scale = vf_cfg["main_blocks"]["text_cond_layer"]["rotary_scale"]
     vf_use_residual = vf_cfg["main_blocks"]["text_cond_layer"].get("use_residual", True)
@@ -129,6 +130,7 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         time_hdim=vf_time_hdim,
         use_residual=vf_use_residual,
         rotary_base=vf_rotary_base,
+        text_n_units=vf_text_n_units,
     ).to(device)
 
     uncond_params = UncondParams(

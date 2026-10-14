@@ -124,10 +124,10 @@ class ConvNeXtBlock1D(nn.Module):
 
 
 class ConvNeXtStack(nn.Module):
-    def __init__(self, channels, kernel_size, dilations):
+    def __init__(self, channels, kernel_size, dilations, expansion=2):
         super().__init__()
         self.convnext = nn.ModuleList([
-            ConvNeXtBlock1D(channels, kernel_size=kernel_size, dilation=d, expansion=2)
+            ConvNeXtBlock1D(channels, kernel_size=kernel_size, dilation=d, expansion=expansion)
             for d in dilations
         ])
 
@@ -372,6 +372,7 @@ class VectorFieldEstimator(nn.Module):
         time_hdim: int = 256,
         use_residual: bool = True,
         rotary_base: float = 10000.0,
+        text_n_units: int = 256,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -398,22 +399,31 @@ class VectorFieldEstimator(nn.Module):
         c1_cfg = mb_cfg.get("convnext_1", {})
         c2_cfg = mb_cfg.get("convnext_2", {})
 
+        def expansion(c):
+            # config: <stack>.intermediate_dim (1024 = 2x hidden; the 64M VF uses 2048 = 4x).
+            inter = c.get("intermediate_dim", 2 * hidden_channels)
+            if inter % hidden_channels:
+                raise ValueError(f"ConvNeXt intermediate_dim {inter} is not a multiple of hidden {hidden_channels}")
+            return inter // hidden_channels
+
         for _ in range(num_superblocks):
             self.main_blocks.append(
-                ConvNeXtStack(hidden_channels, kernel_size=c0_cfg.get("ksz", 5), dilations=c0_cfg.get("dilation_lst", [1, 2, 4, 8]))
+                ConvNeXtStack(hidden_channels, kernel_size=c0_cfg.get("ksz", 5), dilations=c0_cfg.get("dilation_lst", [1, 2, 4, 8]),
+                              expansion=expansion(c0_cfg))
             )
             self.main_blocks.append(
                 TimeCondBlock(time_dim=time_embed_dim, channels=hidden_channels)
             )
             self.main_blocks.append(
-                ConvNeXtStack(hidden_channels, kernel_size=c1_cfg.get("ksz", 5), dilations=c1_cfg.get("dilation_lst", [1]))
+                ConvNeXtStack(hidden_channels, kernel_size=c1_cfg.get("ksz", 5), dilations=c1_cfg.get("dilation_lst", [1]),
+                              expansion=expansion(c1_cfg))
             )
             self.main_blocks.append(
                 CrossAttentionBlock(
                     d_model=hidden_channels,
                     d_context=text_dim,
                     num_heads=text_n_heads,
-                    attn_dim=256,
+                    attn_dim=text_n_units,  # 64M: 8 heads x 64 = 512; the scale stays sqrt(256)
                     use_rope=True,
                     rope_gamma=self.rope_gamma,
                     attn_scale=shared_attn_scale,
@@ -422,7 +432,8 @@ class VectorFieldEstimator(nn.Module):
                 )
             )
             self.main_blocks.append(
-                ConvNeXtStack(hidden_channels, kernel_size=c2_cfg.get("ksz", 5), dilations=c2_cfg.get("dilation_lst", [1]))
+                ConvNeXtStack(hidden_channels, kernel_size=c2_cfg.get("ksz", 5), dilations=c2_cfg.get("dilation_lst", [1]),
+                              expansion=expansion(c2_cfg))
             )
             self.main_blocks.append(
                 CrossAttentionBlock(
@@ -438,7 +449,8 @@ class VectorFieldEstimator(nn.Module):
             )
 
         self.last_convnext = ConvNeXtStack(
-            hidden_channels, kernel_size=lc_cfg.get("ksz", 5), dilations=lc_cfg.get("dilation_lst", [1, 1, 1, 1])
+            hidden_channels, kernel_size=lc_cfg.get("ksz", 5), dilations=lc_cfg.get("dilation_lst", [1, 1, 1, 1]),
+            expansion=expansion(lc_cfg),
         )
         self.proj_out = ProjectionWrapper(hidden_channels, out_channels)
 

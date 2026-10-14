@@ -139,6 +139,7 @@ def load_ttl_config(config_path="configs/tts.json"):
         # Text Encoder
         "te_d_model":           te["text_embedder"]["char_emb_dim"],
         "te_convnext_layers":   te["convnext"]["num_layers"],
+        "te_dilation_lst":      te["convnext"].get("dilation_lst", [1] * te["convnext"]["num_layers"]),
         "te_expansion_factor":  te["convnext"]["intermediate_dim"] // te["text_embedder"]["char_emb_dim"],
         "te_attn_n_layers":     te["attn_encoder"]["n_layers"],
         "te_attn_p_dropout":    te["attn_encoder"]["p_dropout"],
@@ -165,6 +166,9 @@ def load_ttl_config(config_path="configs/tts.json"):
         "vf_n_blocks":      vf["main_blocks"]["n_blocks"],
         "vf_text_dim":      vf["main_blocks"]["text_cond_layer"]["text_dim"],
         "vf_text_n_heads":  vf["main_blocks"]["text_cond_layer"]["n_heads"],
+        "vf_text_n_units":  vf["main_blocks"]["text_cond_layer"].get("n_units", 256),
+        "vf_main_blocks":   vf["main_blocks"],
+        "vf_last_convnext": vf.get("last_convnext", {}),
         "vf_style_dim":     vf["main_blocks"]["style_cond_layer"]["style_dim"],
         "vf_rotary_scale":  vf["main_blocks"]["text_cond_layer"]["rotary_scale"],
 
