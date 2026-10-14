@@ -23,7 +23,7 @@ Defaults suited to arbitrary user text: `normalize_text=True` and peak limiting 
 | `cfg_scale` | `4.0` | classifier-free guidance |
 | `speed` | `1.0` | duration is divided by this |
 | `normalize_text` | `True` | see [Text normalization](#text-normalization) |
-| `peak_limit` | `0.95` | `None` for raw vocoder output |
+| `peak_limit` | `0.95` | output ceiling (see `limit_peak`); `None` for raw vocoder output |
 
 ## `load_text_to_speech` — per-call style, chunking, phonemes
 
@@ -122,7 +122,8 @@ CPU thread count is `min(8, cpu_count)`, overridable with `ORT_NUM_THREADS`.
 ## Notes
 
 - Always pass vocoder output through `limit_peak()` before writing a PCM WAV — the
-  vocoder overshoots ±1.0 and would clip. `BlueTTS.synthesize` does this for you.
+  vocoder overshoots ±1.0 and would clip. Short bursts are soft-limited under the
+  ceiling, a hot render is scaled. `BlueTTS.synthesize` does this for you.
 - Hebrew G2P weights (~310 MB) download lazily on the first Hebrew segment, so
   Latin-only synthesis never fetches them.
 - Output is **not** seeded: `blue_onnx` draws its initial latent from the global NumPy

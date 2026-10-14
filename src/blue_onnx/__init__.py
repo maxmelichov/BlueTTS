@@ -417,6 +417,10 @@ class TextToSpeech:
         expects the already de-normalized and decompressed ``latent_dim`` tensor and
         ships ``mean``/``std`` alongside in ``stats.npz``. Detect which from the
         graph's own input channel count rather than from the directory name.
+
+        For the bare decoder the latent's near-zero tail is dropped here, before
+        decoding (see :func:`latent_keep_frames`); the ``VocoderWithStats`` graph
+        does its own de-normalization, so its input is passed through whole.
         """
         if self._vocoder_in_channels != self.ldim:
             return xt
@@ -429,7 +433,8 @@ class TextToSpeech:
         bsz, _, t = z.shape
         # Inverse of the channel-major compression: (B, ldim*f, T) -> (B, ldim, T*f).
         z = z.reshape(bsz, self.ldim, self.chunk_compress_factor, t)
-        return z.transpose(0, 1, 3, 2).reshape(bsz, self.ldim, t * self.chunk_compress_factor)
+        z = z.transpose(0, 1, 3, 2).reshape(bsz, self.ldim, t * self.chunk_compress_factor)
+        return np.ascontiguousarray(z[:, :, : latent_keep_frames(z[0])])
 
     def sample_noisy_latent(
         self, duration: np.ndarray
@@ -529,12 +534,16 @@ class TextToSpeech:
                 xt = v_uncond + cfg_scale * (v_cond - v_uncond)
             else:
                 xt, *_ = self.vector_est_ort.run(None, cond)
-        wav, *_ = self.vocoder_ort.run(None, {"latent": self._prepare_vocoder_latent(xt)})
-        frame_len = self.base_chunk_size * self.chunk_compress_factor
-        if wav.shape[-1] > 2 * frame_len:
-            wav = wav[..., frame_len:-frame_len]
-        if wav.ndim == 3 and wav.shape[1] == 1:
-            wav = wav[:, 0, :]
+        # Decode each row on its own valid frames, then clean it up as one chunk.
+        wavs = []
+        for i in range(bsz):
+            n = int(latent_mask[i].sum())
+            latent = self._prepare_vocoder_latent(xt[i : i + 1, :, :n])
+            wav, *_ = self.vocoder_ort.run(None, {"latent": latent})
+            wavs.append(clean_chunk_audio(wav.reshape(-1), self.sample_rate, float(dur_onnx[i])))
+        wav = np.zeros((bsz, max(len(w) for w in wavs)), dtype=np.float32)
+        for i, w in enumerate(wavs):
+            wav[i, : len(w)] = w
         return wav, dur_onnx
 
     def __call__(
@@ -957,22 +966,125 @@ def load_voice_style(voice_style_paths: list[str], verbose: bool = False) -> Sty
     return Style(ttl_style, dp_style)
 
 
-def limit_peak(audio: np.ndarray, peak_limit: float = 0.95) -> np.ndarray:
-    """Scale ``audio`` down so ``max(|audio|) <= peak_limit``; quieter audio is
-    returned untouched.
+def latent_keep_frames(z: np.ndarray) -> int:
+    """How many frames of one de-normalized, decompressed latent ``z`` [C, T] to decode.
 
-    The vocoder occasionally overshoots ±1.0 (peaks of ~1.1-1.25 have been
-    observed), and both ``soundfile.write`` to a PCM WAV and most players clip
-    there, so scale once instead of distorting. This only ever attenuates — it
-    never boosts quiet output, which would change perceived loudness.
+    Drops the trailing run of frames whose norm is under 0.3x the body's median.
+    Training targets were zero-padded to whole compressed frames, so the flow
+    model learned to end on near-zero codes, and the decoder, never trained past
+    a clip's edge, renders those as a loud burst.
+    """
+    norms = np.linalg.norm(np.asarray(z, dtype=np.float32), axis=0)
+    body = np.sort(norms[: max(1, norms.size - 12)])
+    median = body[(body.size - 1) // 2]  # lower median, like torch.median
+    keep = norms.size
+    while keep > 1 and norms[keep - 1] < 0.3 * median:
+        keep -= 1
+    return keep
+
+
+def clean_chunk_audio(wav: np.ndarray, sample_rate: int, duration: float) -> np.ndarray:
+    """Post-decode cleanup of one chunk: cut, edge fades, declick.
+
+    1. Cut to the duration predictor's length: the latent is whole frames, so up
+       to one frame (70 ms) of decode runs past the predicted end.
+    2. Cut a hot tail: if any 5 ms frame in the last 60 ms is 6 dB over the
+       chunk's own p90 level and no speech follows it, cut from there. This is
+       the decoder's end-of-latent burst; a final plosive with speech after it,
+       or a fricative (under the p90), is left alone.
+    3. 20 ms fades at both ends, then repair isolated impulses (<= 3 ms).
+    """
+    wav = np.asarray(wav, dtype=np.float32).reshape(-1)
+    n = int(float(duration) * sample_rate)
+    if 0 < n < wav.shape[-1]:
+        wav = wav[:n]
+
+    hop = max(1, int(0.005 * sample_rate))
+    m = wav.shape[-1] // hop
+    if m > 8:
+        db = 20.0 * np.log10(np.sqrt((wav[: m * hop].reshape(m, hop) ** 2).mean(1)) + 1e-9)
+        p90 = float(np.percentile(db, 90))
+        win = min(m, 12)
+        hot = np.where(db[m - win :] > p90 + 6.0)[0]
+        if hot.size:
+            cut = m - win + int(hot[0])
+            speech = np.where((db > p90 - 20.0) & (db <= p90 + 6.0))[0]
+            if not speech.size or int(speech[-1]) < cut:
+                wav = wav[: cut * hop]
+
+    fade = min(int(0.020 * sample_rate), wav.shape[-1] // 4)
+    if fade > 0:
+        ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+        wav = wav.copy()
+        wav[:fade] *= ramp
+        wav[-fade:] *= ramp[::-1]
+    return _declick(wav, sample_rate)
+
+
+def _declick(w: np.ndarray, sr: int, factor: float = 8.0, max_width_ms: float = 3.0) -> np.ndarray:
+    """Repair isolated impulses (vocoder edge artifacts) by linear interpolation.
+
+    Flagged against the LOCAL 50 ms envelope, so a loud plosive, which sits in a
+    loud neighbourhood, is not touched; only bursts up to ``max_width_ms`` wide.
+    """
+    if w.size < sr // 10:
+        return w
+    a = np.abs(w)
+    win = max(1, int(0.050 * sr))
+    k = np.ones(win, dtype=np.float32) / win
+    local = np.sqrt(np.convolve(w.astype(np.float32) ** 2, k, mode="same")) + 1e-8
+    hot = np.where(a > factor * local)[0]
+    if hot.size == 0:
+        return w
+    max_width = int(max_width_ms * 1e-3 * sr)
+    w = w.copy()
+    start = prev = hot[0]
+    for i in list(hot[1:]) + [hot[-1] + max_width + 2]:
+        if i - prev <= max_width:
+            prev = i
+            continue
+        lo, hi = max(start - 1, 0), min(prev + 1, len(w) - 1)
+        if hi - lo <= max_width + 2:
+            w[lo : hi + 1] = np.linspace(w[lo], w[hi], hi - lo + 1)
+        start = prev = i
+    return w
+
+
+def limit_peak(
+    audio: np.ndarray, peak_limit: Optional[float] = 0.95, *, sample_rate: int = 44100
+) -> np.ndarray:
+    """Keep ``max(|audio|) <= peak_limit``; ``None``/``0`` returns ``audio`` untouched.
+
+    The vocoder is not level-constrained and two causes push it over the
+    ceiling, which need opposite treatments:
+
+    - a burst (a click at a chunk join, an end-of-chunk explosion): at most
+      60 ms over ``0.99 * peak_limit`` in total, or under 0.1% of the samples.
+      Scaling the whole file for it would bury the speech, so everything above
+      ``0.9 * peak_limit`` is soft-limited into ``[0.9, 1.0] * peak_limit`` with
+      tanh, the level left alone.
+    - a hot render: anything wider. Here the whole render is scaled so its
+      peak is ``0.99 * peak_limit``.
+
+    Output whose peak is at most ``0.99 * peak_limit`` is returned untouched.
+    ``peak_limit=1.0`` guards full scale for a PCM WAV.
     """
     audio = np.asarray(audio, dtype=np.float32)
-    if audio.size == 0 or not np.isfinite(audio).all():
+    if not peak_limit or audio.size == 0 or not np.isfinite(audio).all():
         return audio
+    ceiling = float(peak_limit)
     peak = float(np.max(np.abs(audio)))
-    if peak <= peak_limit or peak < 1e-9:
+    if peak <= 0.99 * ceiling:
         return audio
-    return (audio * (peak_limit / peak)).astype(np.float32)
+    over = np.abs(audio) > 0.99 * ceiling
+    if float(over.mean()) < 1e-3 or float(over.sum()) / sample_rate * 1000.0 <= 60.0:
+        knee = 0.90 * ceiling
+        a = np.abs(audio)
+        hot = a > knee
+        audio = audio.copy()
+        audio[hot] = np.sign(audio[hot]) * (knee + (ceiling - knee) * np.tanh((a[hot] - knee) / (ceiling - knee)))
+        return audio
+    return (audio * (0.99 * ceiling / peak)).astype(np.float32)
 
 
 class BlueTTS:
@@ -1032,9 +1144,9 @@ class BlueTTS:
         end takes arbitrary text, not curated strings. Pass
         ``normalize_text=False`` to synthesize exactly what you wrote.
 
-        Output is scaled down to ``peak_limit`` when it overshoots, so writing it
-        straight to a PCM WAV never clips (see :func:`limit_peak`). Pass
-        ``peak_limit=None`` for the raw vocoder output.
+        Output is kept under ``peak_limit`` (short bursts soft-limited, a hot
+        render scaled), so writing it straight to a PCM WAV never clips (see
+        :func:`limit_peak`). Pass ``peak_limit=None`` for the raw vocoder output.
         """
         audio, _ = self.tts(
             text,
@@ -1052,8 +1164,8 @@ class BlueTTS:
         audio = np.asarray(audio, dtype=np.float32)
         if audio.ndim == 2:
             audio = audio[0]
-        if peak_limit is not None:
-            audio = limit_peak(audio, peak_limit)
+        if peak_limit:
+            audio = limit_peak(audio, peak_limit, sample_rate=self.sample_rate)
         return audio, self.sample_rate
 
 

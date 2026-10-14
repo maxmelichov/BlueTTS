@@ -28,7 +28,9 @@ from ..blue_onnx import (
     UnicodeProcessor,
     blend_duration_pace,
     chunk_text,
+    clean_chunk_audio,
     latent_frames_for_duration,
+    latent_keep_frames,
     load_text_processor as _load_text_processor_onnx,
     strip_lang_tags_from_phoneme_string,
 )
@@ -196,23 +198,28 @@ class TextToSpeech:
                 v = v_cond
             xt = (xt + v * dt) * latent_mask
 
-        # Decode.
-        wav = self._decode(xt)
-        return wav, dur.detach().cpu().numpy()
+        # Decode each row on its own valid frames, then clean it up as one chunk.
+        dur_np = dur.detach().cpu().numpy()
+        wavs = []
+        for i in range(bsz):
+            n = int(latent_mask[i].sum().item())
+            wavs.append(clean_chunk_audio(self._decode(xt[i : i + 1, :, :n]), self.sample_rate, float(dur_np[i])))
+        wav = np.zeros((bsz, max(len(w) for w in wavs)), dtype=np.float32)
+        for i, w in enumerate(wavs):
+            wav[i, : len(w)] = w
+        return wav, dur_np
 
     def _decode(self, x: torch.Tensor) -> np.ndarray:
+        """One row [1, C, T] -> waveform, without the latent's near-zero tail
+        (see :func:`blue_onnx.latent_keep_frames`)."""
         if self.mean is None or self.std is None:
             raise ValueError("Latent stats (mean/std) not loaded.")
         ns = self.normalizer_scale
         z = (x / ns) * self.std + self.mean if ns not in (0.0, 1.0) else x * self.std + self.mean
         z = decompress_latents(z, factor=self.chunk_compress_factor, target_channels=self.ldim)
+        z = z[:, :, : latent_keep_frames(z[0].detach().cpu().numpy())]
         wav = self.vocoder(z)
-        frame_len = self.base_chunk_size * self.chunk_compress_factor
-        if wav.shape[-1] > 2 * frame_len:
-            wav = wav[..., frame_len:-frame_len]
-        if wav.dim() == 3 and wav.shape[1] == 1:
-            wav = wav.squeeze(1)
-        return wav.detach().cpu().numpy().astype(np.float32)
+        return wav.detach().cpu().numpy().astype(np.float32).reshape(-1)
 
     # ── Public API ──────────────────────────────────────────────────────────
 
