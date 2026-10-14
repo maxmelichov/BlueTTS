@@ -110,7 +110,8 @@ class TimeCondBlock(nn.Module):
 
 
 class ConvNeXtBlock1D(nn.Module):
-    def __init__(self, dim: int, kernel_size: int = 5, expansion: int = 2, dropout: float = 0.0, dilation: int = 1):
+    def __init__(self, dim: int, kernel_size: int = 5, expansion: int = 2, dropout: float = 0.0, dilation: int = 1,
+                 layer_scale_init: float = 1e-6):
         super().__init__()
         self.pad = ((kernel_size - 1) // 2) * dilation
         self.dwconv = nn.Conv1d(dim, dim, kernel_size=kernel_size, padding=0, groups=dim, dilation=dilation)
@@ -118,7 +119,7 @@ class ConvNeXtBlock1D(nn.Module):
         self.pwconv1 = nn.Conv1d(dim, dim * expansion, kernel_size=1)
         self.act = nn.GELU()
         self.pwconv2 = nn.Conv1d(dim * expansion, dim, kernel_size=1)
-        self.gamma = nn.Parameter(torch.ones(1, dim, 1) * 1e-6)
+        self.gamma = nn.Parameter(torch.ones(1, dim, 1) * layer_scale_init)
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -145,10 +146,11 @@ class ConvNeXtBlock1D(nn.Module):
 
 
 class ConvNeXtStack(nn.Module):
-    def __init__(self, channels, kernel_size, dilations, expansion=2):
+    def __init__(self, channels, kernel_size, dilations, expansion=2, layer_scale_init=1e-6):
         super().__init__()
         self.convnext = nn.ModuleList([
-            ConvNeXtBlock1D(channels, kernel_size=kernel_size, dilation=d, expansion=expansion)
+            ConvNeXtBlock1D(channels, kernel_size=kernel_size, dilation=d, expansion=expansion,
+                            layer_scale_init=layer_scale_init)
             for d in dilations
         ])
 
@@ -395,6 +397,7 @@ class VectorFieldEstimator(nn.Module):
         rotary_base: float = 10000.0,
         text_n_units: int = 256,
         supertonic3_time_freqs: bool = False,
+        layer_scale_init: float = 1e-6,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -431,14 +434,14 @@ class VectorFieldEstimator(nn.Module):
         for _ in range(num_superblocks):
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c0_cfg.get("ksz", 5), dilations=c0_cfg.get("dilation_lst", [1, 2, 4, 8]),
-                              expansion=expansion(c0_cfg))
+                              expansion=expansion(c0_cfg), layer_scale_init=layer_scale_init)
             )
             self.main_blocks.append(
                 TimeCondBlock(time_dim=time_embed_dim, channels=hidden_channels)
             )
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c1_cfg.get("ksz", 5), dilations=c1_cfg.get("dilation_lst", [1]),
-                              expansion=expansion(c1_cfg))
+                              expansion=expansion(c1_cfg), layer_scale_init=layer_scale_init)
             )
             self.main_blocks.append(
                 CrossAttentionBlock(
@@ -455,7 +458,7 @@ class VectorFieldEstimator(nn.Module):
             )
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c2_cfg.get("ksz", 5), dilations=c2_cfg.get("dilation_lst", [1]),
-                              expansion=expansion(c2_cfg))
+                              expansion=expansion(c2_cfg), layer_scale_init=layer_scale_init)
             )
             self.main_blocks.append(
                 CrossAttentionBlock(
@@ -472,7 +475,7 @@ class VectorFieldEstimator(nn.Module):
 
         self.last_convnext = ConvNeXtStack(
             hidden_channels, kernel_size=lc_cfg.get("ksz", 5), dilations=lc_cfg.get("dilation_lst", [1, 1, 1, 1]),
-            expansion=expansion(lc_cfg),
+            expansion=expansion(lc_cfg), layer_scale_init=layer_scale_init,
         )
         self.proj_out = ProjectionWrapper(hidden_channels, out_channels)
 

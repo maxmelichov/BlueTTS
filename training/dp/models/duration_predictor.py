@@ -61,11 +61,11 @@ class DPReferenceEncoder(nn.Module):
 
 
 class DPTextEncoder(nn.Module):
-    def __init__(self, vocab_size=37, d_model=64):
+    def __init__(self, vocab_size=37, d_model=64, layer_scale_init=1e-6):
         super().__init__()
         self.d_model = d_model
         self.text_embedder = TextEmbedderWrapper(vocab_size, d_model)
-        self.convnext = ConvNeXtWrapper(d_model, n_layers=6, expansion_factor=4)
+        self.convnext = ConvNeXtWrapper(d_model, n_layers=6, expansion_factor=4, layer_scale_init=layer_scale_init)
         self.sentence_token = nn.Parameter(torch.randn(1, d_model, 1) * 0.02)
         self.attn_encoder = AttnEncoder(
             channels=d_model,
@@ -150,7 +150,10 @@ class TTSDurationModel(nn.Module):
         pr_text_dim = pr_cfg.get("sentence_dim", 64)
         pr_style_dim = pr_cfg.get("n_style", st_num_queries) * pr_cfg.get("style_dim", st_query_dim)
 
-        self.sentence_encoder = DPTextEncoder(vocab_size=vocab_size, d_model=se_d_model)
+        # config: sentence_encoder.layer_scale_init (default 1e-6). The 64M recipe uses 0.1 here only: from 1e-6 the
+        # sentence-encoder ConvNeXt blocks stay near zero and the attention stack carries the text alone.
+        self.sentence_encoder = DPTextEncoder(vocab_size=vocab_size, d_model=se_d_model,
+                                              layer_scale_init=se_cfg.get("layer_scale_init", 1e-6))
         self.ref_encoder = DPReferenceEncoder(
             in_channels=144,
             d_model=st_d_model,
