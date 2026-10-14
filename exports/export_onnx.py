@@ -404,6 +404,7 @@ def main():
         expansion_factor=cfg["te_expansion_factor"],
         p_dropout=cfg["te_attn_p_dropout"],
         dilation_lst=cfg["te_dilation_lst"],
+        edge_fill=cfg["edge_fill"],
     ).eval()
     _load_into(text_enc, t2l, "text_encoder")
 
@@ -413,6 +414,7 @@ def main():
         num_blocks=cfg["se_num_blocks"],
         num_tokens=n_style,
         num_heads=cfg["se_n_heads"],
+        edge_fill=cfg["edge_fill"],
     ).eval()
     _load_into(ref_enc, t2l, "reference_encoder")
     _replace_mha(ref_enc)
@@ -426,6 +428,7 @@ def main():
         main_blocks_cfg=cfg["vf_main_blocks"], last_convnext_cfg=cfg["vf_last_convnext"],
         text_n_heads=cfg["vf_text_n_heads"], text_n_units=cfg["vf_text_n_units"],
         supertonic3_time_freqs=cfg["vf_st3_time_freqs"],
+        edge_fill=cfg["edge_fill"],
     ).eval()
     _load_into(vf, t2l, "vf_estimator")
 
@@ -444,6 +447,7 @@ def main():
         vocab_size=dp_vocab_size,
         style_dp=cfg["dp_style_tokens"],
         style_dim=cfg["dp_style_dim"],
+        edge_fill=cfg["dp_edge_fill"],
     ).eval()
 
     # DP checkpoints may have been trained with a larger char-embedding table;
