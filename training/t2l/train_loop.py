@@ -507,6 +507,11 @@ def train(
             B = wavs.shape[0]
 
             with torch.no_grad():
+                # Zero-pad to a multiple of hop * chunk_compress_factor (3072 samples), the layout the AE
+                # and inference use: a row's valid frames, ceil(len / 3072), are its audio plus zeros.
+                chunk = hop_length * chunk_compress_factor
+                wavs = F.pad(wavs, (0, (-wavs.shape[-1]) % chunk))
+                ref_wavs = F.pad(ref_wavs, (0, (-ref_wavs.shape[-1]) % chunk))
                 mel = mel_spec(wavs.squeeze(1))
                 z = ae_encoder(mel)
                 z = compress_latents(z, factor=chunk_compress_factor)
@@ -520,6 +525,11 @@ def train(
             _, C, T = z_1.shape
             valid_mel_len = lengths.to(device).float() / hop_length
             valid_z_len = (valid_mel_len / chunk_compress_factor).ceil().long().clamp(min=1, max=T)
+            # End the batch at the longest row's last valid frame. The centred STFT adds a frame past the
+            # padded audio, so T is one longer and every row would end in a masked frame; inference has
+            # none, its latent length is exactly ceil(len / 3072).
+            T = int(valid_z_len.max())
+            z_1 = z_1[:, :, :T]
 
             latent_mask = (torch.arange(T, device=device).expand(B, T) < valid_z_len.unsqueeze(1)).unsqueeze(1).float()
             z_1 = z_1 * latent_mask
@@ -694,6 +704,7 @@ def train(
                     "scheduler": scheduler.state_dict(),
                     "global_step": global_step,
                     "edge_fill": int(ttl_cfg.get("edge_fill", False)),  # 1 = trained on the exact-length layout
+                    "latent_flush": 1,  # trained on exact-length latents: no masked frame after the longest row
                 }, ckpt_path)
                 print(f"Saved checkpoint to {ckpt_path}")
                 print("Running inference (periodic log)...")
