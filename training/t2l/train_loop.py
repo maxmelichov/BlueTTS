@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from training.t2l.data_module import Text2LatentDataset, collate_text2latent
 from training.data.audio_utils import ensure_sr
-from training.data.text_vocab import normalize_text, text_to_indices_multilang
+from training.data.text_vocab import normalize_text, text_to_indices_multilang, wrap_lang_tags
 from training.utils import check_stats_provenance, compress_latents
 from training.t2l.builders import build_models
 from training.t2l.ema import ModelEMA
@@ -174,6 +174,7 @@ def train(
     ttl_cfg = full_config["ttl"]
     ae_cfg_json = full_config.get("ae", {})
     affricate_ligatures = bool(full_config.get("affricate_ligatures", False))
+    lang_tags = bool(full_config.get("lang_tags", False))
 
     _validate_ttl_config(ttl_cfg)
 
@@ -211,6 +212,7 @@ def train(
             f"normalizer={normalizer_scale} | sig_min={sigma_min}\n"
             f"  uncond: prob_both={prob_both_uncond} prob_text={prob_text_uncond} total_puncond={puncond}\n"
             f"  optim: lr={lr} weight_decay={weight_decay} lr_milestones={lr_milestones} (gamma 0.5)\n"
+            f"  lang_tags={lang_tags}\n"
             f"{'=' * 60}\n"
         )
 
@@ -407,6 +409,7 @@ def train(
         max_wav_len=ae_sample_rate * 20,
         max_text_len=300,
         affricate_ligatures=affricate_ligatures,
+        lang_tags=lang_tags,
     )
     if rank == 0:
         print(f"Dataset loaded with {len(dataset)} samples.")
@@ -786,6 +789,7 @@ def train(
                     "edge_fill": int(ttl_cfg.get("edge_fill", False)),  # 1 = trained on the exact-length layout
                     "latent_flush": 1,  # trained on exact-length latents: no masked frame after the longest row
                     **({"ema": ema_sd} if ema is not None else {}),
+                    **({"lang_tags": 1} if lang_tags else {}),  # trained on <lang>...</lang> ids
                 }, ckpt_path)
                 print(f"Saved checkpoint to {ckpt_path}")
                 if ema is not None:
@@ -804,6 +808,7 @@ def train(
                         "latent_flush": 1,
                         "ema_decay": ema_sd["decay"],
                         "ema_updates": ema_sd["updates"],
+                        **({"lang_tags": 1} if lang_tags else {}),
                     }, ema_path)
                     print(f"Saved EMA checkpoint to {ema_path}")
                     del ema_sd
@@ -847,6 +852,8 @@ def train(
 
                         for i, text in enumerate(sentences):
                             ids = text_to_indices_multilang(text, base_lang=lang)
+                            if lang_tags:
+                                ids = wrap_lang_tags(ids, lang)
                             txt_ids = torch.tensor(ids, dtype=torch.long).unsqueeze(0).to(device)
                             txt_mask = torch.ones(1, 1, txt_ids.shape[1], device=device)
 
@@ -888,6 +895,8 @@ def train(
                         for lang, label, sentences in eval_phrase_rows:
                             for i, text in enumerate(sentences):
                                 ids = text_to_indices_multilang(text, base_lang=lang)
+                                if lang_tags:
+                                    ids = wrap_lang_tags(ids, lang)
                                 txt_ids = torch.tensor(ids, dtype=torch.long).unsqueeze(0).to(device)
                                 txt_mask = torch.ones(1, 1, txt_ids.shape[1], device=device)
 

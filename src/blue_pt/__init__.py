@@ -87,6 +87,8 @@ class TextToSpeech:
         self.compressed_channels = self.ldim * self.chunk_compress_factor
         # Text normalization the checkpoint was trained with (config key).
         self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
+        # Checkpoint trained on '<lang>' + text + '</lang>' ids (config key or checkpoint flag).
+        self.lang_tags = bool(cfgs.get("lang_tags", False))
 
         self._u_text = u_text
         self._u_ref = u_ref
@@ -135,7 +137,9 @@ class TextToSpeech:
         ), "Number of texts must match number of style vectors"
         bsz = len(text_list)
 
-        text_ids_np, text_mask_np = self.text_processor(text_list, lang_list, self.affricate_ligatures)
+        text_ids_np, text_mask_np = self.text_processor(
+            text_list, lang_list, self.affricate_ligatures, self.lang_tags
+        )
         text_ids = torch.from_numpy(text_ids_np).long().to(self.device)
         text_mask = torch.from_numpy(text_mask_np).float().to(self.device)
 
@@ -481,6 +485,8 @@ def load_pt_models(
         u_text = combined.get("u_text")
         u_ref = combined.get("u_ref")
         u_key = combined.get("u_key")
+        if combined.get("lang_tags"):
+            cfg["lang_tags"] = True  # trained on <lang>...</lang> ids: TextToSpeech must feed them
         if u_text is not None:
             u_text = u_text.to(device)
         if u_ref is not None:
