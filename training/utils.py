@@ -163,6 +163,7 @@ def load_ttl_config(config_path="configs/tts.json"):
         # Vector Field Estimator
         "vf_hidden":        vf["proj_in"]["odim"],
         "vf_time_dim":      vf["time_encoder"]["time_dim"],
+        "vf_st3_time_freqs": vf["time_encoder"].get("supertonic3_freqs", False),
         "vf_n_blocks":      vf["main_blocks"]["n_blocks"],
         "vf_text_dim":      vf["main_blocks"]["text_cond_layer"]["text_dim"],
         "vf_text_n_heads":  vf["main_blocks"]["text_cond_layer"]["n_heads"],

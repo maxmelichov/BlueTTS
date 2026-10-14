@@ -97,7 +97,8 @@
             },
             "time_encoder": {
                 "time_dim": 64,
-                "hdim": 256
+                "hdim": 256,
+                "supertonic3_freqs": true
             },
             "main_blocks": {
                 "n_blocks": 4,

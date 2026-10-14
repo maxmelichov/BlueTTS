@@ -41,27 +41,48 @@ class Mish(nn.Module):
         return x * torch.tanh(F.softplus(x))
 
 
+# Supertonic-3 vector_estimator.onnx time-encoder frequencies (float32, exact). exp(-i * ln(1e4) / 31) lands
+# 1 ulp off on some entries, and on a device-dependent set, so the 64M model uses the shipped table.
+SUPERTONIC3_TIME_FREQS = tuple(float.fromhex(h) for h in (
+    '0x1.0000000000000p+0', '0x1.7c65c40000000p-1', '0x1.1a9f260000000p-1', '0x1.a3f4960000000p-2',
+    '0x1.3803000000000p-2', '0x1.cfa0800000000p-3', '0x1.5875460000000p-3', '0x1.ffd7020000000p-4',
+    '0x1.7c47520000000p-4', '0x1.1a88860000000p-4', '0x1.a3d2fa0000000p-5', '0x1.37ea060000000p-5',
+    '0x1.cf7b620000000p-6', '0x1.5859b40000000p-6', '0x1.ffae060000000p-7', '0x1.7c28e00000000p-7',
+    '0x1.1a71e80000000p-7', '0x1.a3b15e0000000p-8', '0x1.37d1100000000p-8', '0x1.cf564c0000000p-9',
+    '0x1.583e280000000p-9', '0x1.ff850e0000000p-10', '0x1.7c0a700000000p-10', '0x1.1a5b4a0000000p-10',
+    '0x1.a38fc40000000p-11', '0x1.37b81a0000000p-11', '0x1.cf31340000000p-12', '0x1.58228c0000000p-12',
+    '0x1.ff5c1a0000000p-13', '0x1.7bec000000000p-13', '0x1.1a44ae0000000p-13', '0x1.a36e2c0000000p-14'))
+
+
 class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim: int, scale: float = 1000.0):
+    def __init__(self, dim: int, scale: float = 1000.0, supertonic3_freqs: bool = False):
         super().__init__()
         self.dim = dim
         self.scale = scale
+        if supertonic3_freqs and dim // 2 != len(SUPERTONIC3_TIME_FREQS):
+            raise ValueError(f"the Supertonic-3 time table has {len(SUPERTONIC3_TIME_FREQS)} frequencies; time_dim {dim} needs {dim // 2}")
+        # non-persistent: state_dict keys are unchanged
+        self.register_buffer("freqs", torch.tensor(SUPERTONIC3_TIME_FREQS, dtype=torch.float32)
+                             if supertonic3_freqs else None, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x * self.scale
         device = x.device
         half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        if self.freqs is not None:
+            emb = self.freqs
+        else:
+            emb = math.log(10000) / (half_dim - 1)
+            emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
         emb = x[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
 
 class TimeEncoder(nn.Module):
-    def __init__(self, embed_dim: int, hdim: int = 256):
+    def __init__(self, embed_dim: int, hdim: int = 256, supertonic3_freqs: bool = False):
         super().__init__()
-        self.sinusoidal = SinusoidalPosEmb(embed_dim, scale=1000.0)
+        self.sinusoidal = SinusoidalPosEmb(embed_dim, scale=1000.0, supertonic3_freqs=supertonic3_freqs)
         self.mlp = nn.Sequential(
             LinearWrapper(embed_dim, hdim),
             Mish(),
@@ -373,6 +394,7 @@ class VectorFieldEstimator(nn.Module):
         use_residual: bool = True,
         rotary_base: float = 10000.0,
         text_n_units: int = 256,
+        supertonic3_time_freqs: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -386,7 +408,7 @@ class VectorFieldEstimator(nn.Module):
         self.tile = nn.Parameter(torch.randn(1, num_style_tokens, style_dim) * 0.02)
 
         self.proj_in = ProjectionWrapper(in_channels, hidden_channels)
-        self.time_encoder = TimeEncoder(time_embed_dim, hdim=time_hdim)
+        self.time_encoder = TimeEncoder(time_embed_dim, hdim=time_hdim, supertonic3_freqs=supertonic3_time_freqs)
 
         self.main_blocks = nn.ModuleList()
 

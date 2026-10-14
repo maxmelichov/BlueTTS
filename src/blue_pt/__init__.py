@@ -515,6 +515,7 @@ def load_pt_models(
         last_convnext_cfg=cfg.get("vf_last_convnext"),
         text_n_heads=cfg.get("vf_text_n_heads", 4),
         text_n_units=cfg.get("vf_text_n_units", 256),
+        supertonic3_time_freqs=cfg.get("vf_st3_time_freqs", False),
     ).to(device).eval()
     _load_into(vf_estimator, vf_sd, "vf_estimator")
 
