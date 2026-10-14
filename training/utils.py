@@ -42,6 +42,43 @@ def decompress_latents(z: torch.Tensor, factor: int = 6, target_channels: int = 
     return z.view(B, target_channels, factor, T_low).permute(0, 1, 3, 2).flatten(2, 3)
 
 
+def encoder_fingerprint(encoder_state: dict) -> str:
+    """sha256 over an AE encoder state_dict, BatchNorm running stats included.
+
+    Latent stats depend on the encoder alone, so this is their identity; a checkpoint's md5 also
+    changes with the decoder or optimizer state. Keys in sorted order, tensors as float32 CPU bytes.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    for k in sorted(encoder_state):
+        v = encoder_state[k]
+        h.update(k.encode())
+        if torch.is_tensor(v):
+            t = v.detach().to("cpu")
+            t = t.float() if t.is_floating_point() else t.long()
+            h.update(str(tuple(t.shape)).encode())
+            h.update(t.contiguous().numpy().tobytes())
+    return h.hexdigest()
+
+
+def check_stats_provenance(stats: dict, encoder_state: dict) -> str:
+    """Refuse latent stats measured with a different AE encoder.
+
+    A checkpoint is only valid against the stats it was normalised with, and the stats only
+    against the encoder that produced them. Stats files without provenance can only be warned about.
+    """
+    prov = stats.get("provenance") or {}
+    if "enc_sha256" not in prov:
+        return "[stats] WARNING: no encoder fingerprint in the stats file; cannot check it matches this AE"
+    fp = encoder_fingerprint(encoder_state)
+    if fp != prov["enc_sha256"]:
+        raise ValueError(
+            f"latent stats were measured with a different AE encoder (stats {prov['enc_sha256'][:12]}, "
+            f"this encoder {fp[:12]}); recompute them with compute_latent_stats.py"
+        )
+    return f"[stats] encoder fingerprint {fp[:12]} matches"
+
+
 def _resolve_vocab_size(char_dict_path, default=256):
     import json as _json
     import os as _os
