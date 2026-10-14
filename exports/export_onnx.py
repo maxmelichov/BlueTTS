@@ -3,7 +3,7 @@
 
 Produces (in --onnx_dir):
   - text_encoder.onnx
-  - vector_estimator.onnx   (u_text / u_ref baked in; CFG done internally)
+  - vector_estimator.onnx   (u_text / u_ref, and u_key when the checkpoint has it, baked in; CFG done internally)
   - vocoder.onnx            (mean/std/normalizer_scale baked in; unnorm+reshape in-graph)
   - duration_predictor.onnx (style-conditioned: takes style_dp from the voice JSON)
 """
@@ -149,13 +149,18 @@ def _replace_mha(module: nn.Module) -> None:
 # ── graph wrappers that bake runtime conditioning into the ONNX graph ─────────
 
 class VectorFieldEstimatorCFG(nn.Module):
-    """Wraps VF and bakes u_text / u_ref so CFG is one ONNX call per diffusion step."""
+    """Wraps VF and bakes u_text / u_ref so CFG is one ONNX call per diffusion step.
 
-    def __init__(self, model: VectorFieldEstimator, u_text: torch.Tensor, u_ref: torch.Tensor):
+    u_key (Supertonic-3 layout): the unconditional pass keys the style attention on u_key instead of the
+    VF's `tile`. None keeps `tile`. The graph inputs are the same either way."""
+
+    def __init__(self, model: VectorFieldEstimator, u_text: torch.Tensor, u_ref: torch.Tensor,
+                 u_key: torch.Tensor | None = None):
         super().__init__()
         self.model = model
         self.register_buffer("u_text", u_text.detach().clone())
         self.register_buffer("u_ref", u_ref.detach().clone())
+        self.register_buffer("u_key", u_key.detach().clone() if u_key is not None else None)
 
     def forward(self, noisy_latent, text_emb, style_ttl, latent_mask, text_mask,
                 current_step, total_step, cfg_scale):
@@ -164,13 +169,14 @@ class VectorFieldEstimatorCFG(nn.Module):
         u_text_b = self.u_text.expand(B, -1, T_text)
         u_ref_b = self.u_ref.expand(B, -1, -1)
         u_mask = torch.ones_like(text_mask)
+        u_key_b = self.u_key.expand(B, -1, -1) if self.u_key is not None else None
 
         den_cond = self.model(noisy_latent=noisy_latent, text_emb=text_emb, style_ttl=style_ttl,
                               latent_mask=latent_mask, text_mask=text_mask,
                               current_step=current_step, total_step=total_step)
         den_uncond = self.model(noisy_latent=noisy_latent, text_emb=u_text_b, style_ttl=u_ref_b,
                                 latent_mask=latent_mask, text_mask=u_mask,
-                                current_step=current_step, total_step=total_step)
+                                current_step=current_step, total_step=total_step, style_keys=u_key_b)
         return den_uncond + cfg_scale * (den_cond - den_uncond)
 
 
@@ -381,7 +387,9 @@ def main():
     u_text, u_ref = t2l.get("u_text"), t2l.get("u_ref")
     if u_text is None or u_ref is None:
         raise RuntimeError(f"u_text/u_ref missing in {args.ttl_ckpt}; re-export with uncond params.")
-    print(f"[INFO] baking uncond: u_text {tuple(u_text.shape)}, u_ref {tuple(u_ref.shape)}")
+    u_key = t2l.get("u_key")
+    print(f"[INFO] baking uncond: u_text {tuple(u_text.shape)}, u_ref {tuple(u_ref.shape)}"
+          + (f", u_key {tuple(u_key.shape)}" if u_key is not None else ""))
 
     stats = _load_state(args.stats)
     mean = stats["mean"].to(torch.float32)
@@ -405,6 +413,7 @@ def main():
         p_dropout=cfg["te_attn_p_dropout"],
         dilation_lst=cfg["te_dilation_lst"],
         edge_fill=cfg["edge_fill"],
+        spte_key_mode=cfg["te_style_key_mode"],
     ).eval()
     _load_into(text_enc, t2l, "text_encoder")
 
@@ -500,7 +509,7 @@ def main():
         all_ok &= verify(text_enc, te_path, te_inputs, te_names, "text_encoder", atol=1e-4, rtol=1e-3)
 
     # ---- 2) vector field estimator (CFG baked in) --------------------------
-    vf_wrapped = VectorFieldEstimatorCFG(vf, u_text, u_ref).eval()
+    vf_wrapped = VectorFieldEstimatorCFG(vf, u_text, u_ref, u_key).eval()
     vf_path = os.path.join(args.onnx_dir, "vector_estimator.onnx")
     vf_inputs = (noisy_latent, text_emb, style_ttl, latent_mask, text_mask, cur_step, tot_step, cfg_scale)
     vf_names = ["noisy_latent", "text_emb", "style_ttl", "latent_mask", "text_mask",

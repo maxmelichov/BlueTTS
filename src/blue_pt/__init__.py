@@ -65,6 +65,7 @@ class TextToSpeech:
         mean: Optional[torch.Tensor] = None,
         std: Optional[torch.Tensor] = None,
         seed: int = 42,
+        u_key: Optional[torch.Tensor] = None,
     ):
         self.cfgs = cfgs
         self.text_processor = text_processor
@@ -87,6 +88,8 @@ class TextToSpeech:
 
         self._u_text = u_text
         self._u_ref = u_ref
+        # unconditional style keys (Supertonic-3 layout; load_pt_models attaches them to the VF); None = the VF's tile
+        self._u_key = u_key if u_key is not None else getattr(vector_estimator, "u_key", None)
         self.mean = mean
         self.std = std
 
@@ -160,11 +163,14 @@ class TextToSpeech:
         )
         h_text_null: Optional[torch.Tensor] = None
         h_ref_null: Optional[torch.Tensor] = None
+        key_null: Optional[torch.Tensor] = None
         u_mask: Optional[torch.Tensor] = None
         if use_cfg:
             assert self._u_text is not None and self._u_ref is not None
             h_text_null = self._u_text.expand(bsz, -1, h_text.shape[2])
             h_ref_null = self._u_ref.expand(bsz, -1, -1)
+            if self._u_key is not None:
+                key_null = self._u_key.expand(bsz, -1, -1)
             u_mask = torch.ones(bsz, 1, h_text.shape[2], device=self.device)
 
         for step in range(total_step):
@@ -177,7 +183,7 @@ class TextToSpeech:
             if use_cfg:
                 v_uncond = self.vector_estimator(
                     noisy_latent=x_in, text_emb=h_text_null, style_ttl=h_ref_null,
-                    latent_mask=latent_mask, text_mask=u_mask, current_step=t,
+                    latent_mask=latent_mask, text_mask=u_mask, current_step=t, style_keys=key_null,
                 )
                 v = v_uncond + cfg_scale * (v_cond - v_uncond)
             else:
@@ -457,23 +463,28 @@ def load_pt_models(
     Optional[torch.Tensor],
     Optional[torch.Tensor],
 ]:
+    """When the checkpoint has the Supertonic-3 unconditional style-key token u_key, it is attached to the
+    returned vf_estimator as a non-persistent buffer ``u_key`` (no state-dict key), which TextToSpeech uses."""
     vocab_size = cfg.get("vocab_size", 256)
     se_n_style = cfg.get("se_n_style", 50)
     latent_dim = int(cfg.get("latent_dim", 24))
     ccf = int(cfg.get("chunk_compress_factor", 6))
     compressed = latent_dim * ccf
 
-    u_text, u_ref = None, None
+    u_text, u_ref, u_key = None, None, None
     if text2latent_ckpt:
         combined = torch.load(text2latent_ckpt, map_location="cpu", weights_only=False)
         te_sd = combined["text_encoder"]
         vf_sd = combined["vf_estimator"]
         u_text = combined.get("u_text")
         u_ref = combined.get("u_ref")
+        u_key = combined.get("u_key")
         if u_text is not None:
             u_text = u_text.to(device)
         if u_ref is not None:
             u_ref = u_ref.to(device)
+        if u_key is not None:
+            u_key = u_key.to(device)
     else:
         te_sd = _load_sd(os.path.join(weights_dir, "text_encoder.pt"), "text_encoder")
         vf_sd = _load_sd(os.path.join(weights_dir, "vector_estimator.pt"), "vf_estimator")
@@ -485,6 +496,8 @@ def load_pt_models(
                     u_text = un["u_text"].to(device)
                 if "u_ref" in un:
                     u_ref = un["u_ref"].to(device)
+                if "u_key" in un:
+                    u_key = un["u_key"].to(device)
 
     emb_key = "text_embedder.char_embedder.weight"
     if emb_key in te_sd and te_sd[emb_key].shape[0] != vocab_size:
@@ -499,6 +512,7 @@ def load_pt_models(
         p_dropout=0.0,
         dilation_lst=cfg.get("te_dilation_lst"),
         edge_fill=cfg.get("edge_fill", False),
+        spte_key_mode=cfg.get("te_style_key_mode", "baked"),
     ).to(device).eval()
     _load_into(text_encoder, te_sd, "text_encoder")
 
@@ -520,6 +534,8 @@ def load_pt_models(
         edge_fill=cfg.get("edge_fill", False),
     ).to(device).eval()
     _load_into(vf_estimator, vf_sd, "vf_estimator")
+    if u_key is not None:
+        vf_estimator.register_buffer("u_key", u_key, persistent=False)
 
     dp_path = dp_ckpt or os.path.join(weights_dir, "duration_predictor.pt")
     dp_sd = _load_sd(dp_path, "state_dict")
