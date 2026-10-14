@@ -662,6 +662,7 @@ def train(
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "global_step": global_step,
+                    "edge_fill": int(ttl_cfg.get("edge_fill", False)),  # 1 = trained on the exact-length layout
                 }, ckpt_path)
                 print(f"Saved checkpoint to {ckpt_path}")
                 print("Running inference (periodic log)...")
