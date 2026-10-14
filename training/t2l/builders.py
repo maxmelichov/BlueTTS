@@ -37,12 +37,15 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
     spte_style_dim = spte_cfg.get("style_dim", 256)
     spte_n_units = spte_cfg.get("n_units", 256)
     spte_n_style = se_n_style
+    # "projected" = Supertonic-3 layout: tanh(W_key(style_key)) per layer from one style_key, tied to the VF tile
+    spte_key_mode = spte_cfg.get("style_key_mode", "baked")
 
     um_cfg = ttl_cfg["uncond_masker"]
     uncond_init_std = um_cfg["std"]
     um_text_dim = um_cfg["text_dim"]
     um_n_style = um_cfg["n_style"]
     um_style_value_dim = um_cfg["style_value_dim"]
+    um_style_key_uncond = um_cfg.get("style_key_uncond", False)
 
     vf_cfg = ttl_cfg["vector_field"]
     vf_in_channels = vf_cfg["proj_in"]["ldim"] * vf_cfg["proj_in"]["chunk_compress_factor"]
@@ -108,6 +111,7 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         spte_n_style=spte_n_style,
         layer_scale_init=layer_scale_init,
         edge_fill=edge_fill,
+        spte_key_mode=spte_key_mode,
     ).to(device)
 
     reference_encoder = ReferenceEncoder(
@@ -147,12 +151,17 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         layer_scale_init=layer_scale_init,
         edge_fill=edge_fill,
     ).to(device)
+    if spte_key_mode == "projected":
+        # One Parameter is both the text encoder's style_key and the VF's `tile`; each state_dict keeps its own key.
+        vf_estimator.tile = text_encoder.speech_prompted_text_encoder.style_key
 
     uncond_params = UncondParams(
         text_dim=um_text_dim,
         n_style=um_n_style,
         style_value_dim=um_style_value_dim,
         init_std=uncond_init_std,
+        uncond_key=um_style_key_uncond,
+        style_key_dim=um_cfg.get("style_key_dim", um_style_value_dim),
     ).to(device)
 
     dp_model = None
