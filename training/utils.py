@@ -173,6 +173,8 @@ def load_ttl_config(config_path="configs/tts.json"):
         "vocab_size":       vocab_size,
         "char_dict_path":   char_dict_path,
         "dp_vocab_size":    dp_vocab_size,
+        # Text normalization folds affricates to ligatures (training/data/text_vocab.normalize_text)
+        "affricate_ligatures": bool(full_config.get("affricate_ligatures", False)),
 
         # Latent space
         "latent_dim":           ttl["latent_dim"],

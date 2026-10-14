@@ -133,7 +133,9 @@ def train_duration_predictor(
     )
     
     optimizer = AdamW(model.parameters(), lr=lr)
-    dataloader = get_dp_dataloader(metadata_path, batch_size)
+    dataloader = get_dp_dataloader(
+        metadata_path, batch_size, affricate_ligatures=bool(full_cfg.get("affricate_ligatures", False))
+    )
     
     if not os.path.exists(stats_path):
         print(f"Error: Stats file {stats_path} not found.")

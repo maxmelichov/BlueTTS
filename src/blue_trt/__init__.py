@@ -249,6 +249,8 @@ class BlueTRT:
         self.base_chunk_size = int(ae.get("base_chunk_size", self.hop_length))
         self.sample_rate = int(ae.get("sample_rate", 44100))
         self.compressed_channels = self.latent_dim * self.chunk_compress_factor
+        # Text normalization the checkpoint was trained with (tts.json).
+        self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
 
         self._ref_enc = load_engine(trt_dir, "reference_encoder.trt", required=False)
         self._text_enc = load_engine(trt_dir, "text_encoder.trt")
@@ -378,7 +380,10 @@ class BlueTRT:
         if z_ref is None and style_ttl is None:
             raise ValueError("Provide style_json with z_ref or style_ttl content.")
 
-        text_ids = torch.tensor([text_to_indices(phonemes)], dtype=torch.int64, device=self.device)
+        text_ids = torch.tensor(
+            [text_to_indices(phonemes, affricate_ligatures=self.affricate_ligatures)],
+            dtype=torch.int64, device=self.device,
+        )
         text_mask = torch.ones(1, 1, text_ids.shape[1], dtype=torch.float32, device=self.device)
 
         # Normalize + crop z_ref.

@@ -89,6 +89,35 @@ class TestUnicodeProcessor(unittest.TestCase):
     def test_available_langs_nonempty(self):
         self.assertIn("he", AVAILABLE_LANGS)
 
+    def _ids(self, text, affricate_ligatures=False):
+        ids, _ = self.proc([text], ["en"], affricate_ligatures)
+        return ids[0].tolist()
+
+    def test_tag_and_affricate_ids(self):
+        c2i = self.proc._char_to_id
+        self.assertEqual((c2i["<"], c2i[">"], c2i["/"], c2i["ʣ"]), (255, 48, 200, 244))
+        self.assertNotIn("ǂ", c2i)
+        # off by default: affricates stay as two tokens
+        self.assertEqual(self._ids("dzu tʃa"), [c2i[c] for c in "dzu tʃa."])
+        # on: d͡z / dz -> ʣ, tʃ -> ʧ, dʒ -> ʤ, word-final ts -> ʦ (word-internal ts stays)
+        on = lambda t: self._ids(t, affricate_ligatures=True)
+        self.assertEqual(on("dzu tʃa dʒa kats tsa"), on("ʣu ʧa ʤa kaʦ tsa"))
+        self.assertEqual(on("d\u0361za"), on("ʣa"))
+
+    def test_normalization(self):
+        c2i = self.proc._char_to_id
+        # one terminal mark, never '..' or '?.'
+        self.assertEqual(self._ids("ɡaɪt?")[-1], c2i["?"])
+        self.assertEqual(self._ids("falən")[-2:], [26, 10])
+        self.assertEqual(self._ids("ʃalˈom」")[-1], c2i.get("」", 0))
+        # NFD keeps modifier letters ('ʰ' is its own token, not 'h')
+        self.assertIn(c2i["ʰ"], self._ids("pʰa"))
+        # '/', '\\', '#' are word breaks and '…' is three dots, as in training rows
+        self.assertEqual(self._ids("a/b\\c#d"), self._ids("a b c d"))
+        self.assertEqual(self._ids("a…"), self._ids("a..."))
+        # BOS/EOS characters never reach the ids
+        self.assertEqual(self._ids("^a$"), self._ids("a"))
+
 
 class TestLatentFrameMath(unittest.TestCase):
     """The seconds → latent-frame conversion shared by blue_onnx and blue_trt."""
