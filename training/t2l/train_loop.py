@@ -83,7 +83,9 @@ _PHRASE_ROWS: list[tuple[str, str | None, str, list[str]]] = [
 ]
 
 
-def _phonemize_eval_with_espeak(espeak_lang: str, label: str, lines: list[str]) -> list[str]:
+def _phonemize_eval_with_espeak(
+    espeak_lang: str, label: str, lines: list[str], affricate_ligatures: bool = False
+) -> list[str]:
     try:
         from phonemizer.backend import EspeakBackend
         from phonemizer.separator import Separator
@@ -94,19 +96,22 @@ def _phonemize_eval_with_espeak(espeak_lang: str, label: str, lines: list[str]) 
             with_stress=True,
             language_switch="remove-flags",
         )
-        return [normalize_text(s) for s in backend.phonemize(lines, separator=sep)]
+        return [
+            normalize_text(s, affricate_ligatures=affricate_ligatures)
+            for s in backend.phonemize(lines, separator=sep)
+        ]
     except Exception as e:  # noqa: BLE001
         print(f"[Inference] {label} phonemization failed: {e}")
         return []
 
 
-def build_periodic_eval_phrases() -> list[tuple[str, str, list[str]]]:
+def build_periodic_eval_phrases(affricate_ligatures: bool = False) -> list[tuple[str, str, list[str]]]:
     out: list[tuple[str, str, list[str]]] = []
     for lang, espeak, label, raw_lines in _PHRASE_ROWS:
         if espeak is None:
             out.append((lang, label, list(raw_lines)))
         else:
-            out.append((lang, label, _phonemize_eval_with_espeak(espeak, label, raw_lines)))
+            out.append((lang, label, _phonemize_eval_with_espeak(espeak, label, raw_lines, affricate_ligatures)))
     return out
 
 
@@ -168,6 +173,7 @@ def train(
         full_config = json.load(f)
     ttl_cfg = full_config["ttl"]
     ae_cfg_json = full_config.get("ae", {})
+    affricate_ligatures = bool(full_config.get("affricate_ligatures", False))
 
     _validate_ttl_config(ttl_cfg)
 
@@ -400,6 +406,7 @@ def train(
         sample_rate=ae_sample_rate,
         max_wav_len=ae_sample_rate * 20,
         max_text_len=300,
+        affricate_ligatures=affricate_ligatures,
     )
     if rank == 0:
         print(f"Dataset loaded with {len(dataset)} samples.")
@@ -813,7 +820,7 @@ def train(
                 dev = str(device) if isinstance(device, torch.device) else device
 
                 try:
-                    eval_phrase_rows = build_periodic_eval_phrases()
+                    eval_phrase_rows = build_periodic_eval_phrases(affricate_ligatures)
 
                     # Computes style_ttl + style_dp once from the reference wav,
                     # then reuses them across all sentences — matches ONNX inference pattern.

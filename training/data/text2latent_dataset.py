@@ -38,6 +38,7 @@ class Text2LatentDataset(Dataset):
         max_wav_len: int | None = None,      # e.g., 44100 * 20
         max_text_len: int | None = None,
         default_lang: str = "he",         # Fallback language if CSV has no 'lang' column
+        affricate_ligatures: bool = False,  # fold t͡s/tʃ/dʒ/dz into ʦ/ʧ/ʤ/ʣ (config key)
     ):
         self.sample_rate = sample_rate
         self.hop_length = hop_length
@@ -95,7 +96,7 @@ class Text2LatentDataset(Dataset):
         he_mask = self.df["lang"] == "he"
         if he_mask.any():
             self.df.loc[he_mask, "text"] = self.df[he_mask].apply(
-                lambda row: normalize_text(row["text"], apply_hebrew_fixes=True), axis=1
+                lambda row: normalize_text(row["text"], apply_hebrew_fixes=True, affricate_ligatures=affricate_ligatures), axis=1
             )
 
         # Non-Hebrew: phonemize only rows not already pre-computed by combine_datasets.py
@@ -108,18 +109,18 @@ class Text2LatentDataset(Dataset):
         if needs_phonemization.any():
             # Normalize raw text before phonemization to clean up emojis, punctuation, etc.
             self.df.loc[needs_phonemization, "text"] = self.df[needs_phonemization].apply(
-                lambda row: normalize_text(row["text"], apply_hebrew_fixes=False), axis=1
+                lambda row: normalize_text(row["text"], apply_hebrew_fixes=False, affricate_ligatures=affricate_ligatures), axis=1
             )
             self._phonemize_with_espeak(needs_phonemization)
             # Re-normalize to catch any post-phonemization spacing issues
             self.df.loc[needs_phonemization, "text"] = self.df[needs_phonemization].apply(
-                lambda row: normalize_text(row["text"], apply_hebrew_fixes=False), axis=1
+                lambda row: normalize_text(row["text"], apply_hebrew_fixes=False, affricate_ligatures=affricate_ligatures), axis=1
             )
         elif non_he_mask.any():
             print(f"[Dataset] Skipping espeak — {non_he_mask.sum()} non-Hebrew rows already phonemized.")
             # Still apply normalization to already phonemized text
             self.df.loc[non_he_mask, "text"] = self.df[non_he_mask].apply(
-                lambda row: normalize_text(row["text"], apply_hebrew_fixes=False), axis=1
+                lambda row: normalize_text(row["text"], apply_hebrew_fixes=False, affricate_ligatures=affricate_ligatures), axis=1
             )
 
         # Check vocab coverage for Hebrew only

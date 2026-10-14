@@ -85,6 +85,8 @@ class TextToSpeech:
         self.ldim = int(cfgs.get("latent_dim", cfgs.get("ttl", {}).get("latent_dim", 24)))
         self.normalizer_scale = float(cfgs.get("normalizer_scale", 1.0))
         self.compressed_channels = self.ldim * self.chunk_compress_factor
+        # Text normalization the checkpoint was trained with (config key).
+        self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
 
         self._u_text = u_text
         self._u_ref = u_ref
@@ -133,7 +135,7 @@ class TextToSpeech:
         ), "Number of texts must match number of style vectors"
         bsz = len(text_list)
 
-        text_ids_np, text_mask_np = self.text_processor(text_list, lang_list)
+        text_ids_np, text_mask_np = self.text_processor(text_list, lang_list, self.affricate_ligatures)
         text_ids = torch.from_numpy(text_ids_np).long().to(self.device)
         text_mask = torch.from_numpy(text_mask_np).float().to(self.device)
 
