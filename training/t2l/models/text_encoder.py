@@ -233,29 +233,42 @@ class TextEmbedderWrapper(nn.Module):
 
 
 class StyleAttentionLayer(nn.Module):
-    def __init__(self, text_dim: int, style_dim: int, n_units: int, num_heads: int = 2, num_style_tokens: int = 50):
+    def __init__(self, text_dim: int, style_dim: int, n_units: int, num_heads: int = 2, num_style_tokens: int = 50,
+                 key_mode: str = "baked"):
         super().__init__()
         assert n_units % num_heads == 0
+        if key_mode not in ("baked", "projected"):
+            raise ValueError(f"style_key_mode must be 'baked' or 'projected', got {key_mode!r}")
         self.num_heads = num_heads
         self.dim = n_units
         self.head_dim = n_units // num_heads
         self.scale = n_units ** -0.5
+        self.key_mode = key_mode
 
         self.W_query = LinearWrapped(text_dim, n_units)
+        if key_mode == "projected":
+            self.W_key = LinearWrapped(style_dim, n_units)
         self.W_value = LinearWrapped(style_dim, n_units)
         self.out_fc = LinearWrapped(n_units, text_dim)
 
-        # ONNX folds `tanh(W_key(style_key))` into a baked constant; mirror with a learnable parameter.
-        self.key_const = nn.Parameter(torch.randn(num_heads, 1, self.head_dim, num_style_tokens) * 0.02)
+        if key_mode == "baked":
+            # ONNX folds `tanh(W_key(style_key))` into a baked constant; mirror with a learnable parameter.
+            self.key_const = nn.Parameter(torch.randn(num_heads, 1, self.head_dim, num_style_tokens) * 0.02)
 
-    def forward(self, x: torch.Tensor, values: torch.Tensor, mask_t: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, values: torch.Tensor, mask_t: torch.Tensor | None = None,
+                style_key: torch.Tensor | None = None) -> torch.Tensor:
         B, T, C = x.shape
 
         q = self.W_query(x)
         qs = q.chunk(self.num_heads, dim=-1)
         q = torch.stack(qs, dim=0)
 
-        k = self.key_const
+        if self.key_mode == "projected":
+            # tanh(W_key(style_key)) per head: [1, K, n_units] -> [H, 1, head_dim, K]
+            k = self.W_key(style_key)
+            k = torch.tanh(torch.stack(k.chunk(self.num_heads, dim=-1), dim=0).transpose(-2, -1))
+        else:
+            k = self.key_const
 
         if values.dim() == 2:
             values = values.unsqueeze(0)
@@ -286,11 +299,18 @@ class StyleAttentionLayer(nn.Module):
 
 
 class StyleAttention(nn.Module):
-    def __init__(self, text_dim: int, style_dim: int, n_units: int, num_heads: int = 2, num_style_tokens: int = 50):
+    def __init__(self, text_dim: int, style_dim: int, n_units: int, num_heads: int = 2, num_style_tokens: int = 50,
+                 key_mode: str = "baked"):
         super().__init__()
-        # attention1 / attention2 are separate: each owns its baked key constant.
-        self.attention1 = StyleAttentionLayer(text_dim, style_dim, n_units, num_heads, num_style_tokens)
-        self.attention2 = StyleAttentionLayer(text_dim, style_dim, n_units, num_heads, num_style_tokens)
+        # key_mode "baked": attention1 / attention2 each own a baked key constant.
+        # key_mode "projected" (Supertonic-3 layout): one shared style-key bank, projected by each layer's W_key;
+        # the builder ties it to the vector field's `tile`, so both models key on the same tensor.
+        if key_mode == "projected":
+            self.style_key = nn.Parameter(torch.randn(1, num_style_tokens, style_dim) * 0.02)
+        else:
+            self.style_key = None
+        self.attention1 = StyleAttentionLayer(text_dim, style_dim, n_units, num_heads, num_style_tokens, key_mode)
+        self.attention2 = StyleAttentionLayer(text_dim, style_dim, n_units, num_heads, num_style_tokens, key_mode)
         self.norm = StyleNorm(text_dim)
 
     def forward(self, x: torch.Tensor, style_values: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
@@ -300,10 +320,10 @@ class StyleAttention(nn.Module):
         if mask is not None:
             mask_t = mask.transpose(1, 2)
 
-        out1 = self.attention1(x, style_values, mask_t=mask_t)
+        out1 = self.attention1(x, style_values, mask_t=mask_t, style_key=self.style_key)
         x1 = x + out1
 
-        out2 = self.attention2(x1, style_values, mask_t=mask_t)
+        out2 = self.attention2(x1, style_values, mask_t=mask_t, style_key=self.style_key)
         x2 = x + out2
 
         x = self.norm(x2)
@@ -332,6 +352,7 @@ class TextEncoder(nn.Module):
         spte_n_style: int = 50,
         layer_scale_init: float = 1e-6,
         edge_fill: bool = False,
+        spte_key_mode: str = "baked",
     ):
         super().__init__()
         self.d_model = d_model
@@ -353,6 +374,7 @@ class TextEncoder(nn.Module):
             n_units=spte_n_units,
             num_heads=spte_n_heads,
             num_style_tokens=spte_n_style,
+            key_mode=spte_key_mode,
         )
         self.proj_out = nn.Identity()
 

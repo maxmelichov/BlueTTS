@@ -262,9 +262,13 @@ def train(
     mel_spec.eval()
 
     u_text, u_ref = uncond_params.u_text, uncond_params.u_ref
+    u_key = getattr(uncond_params, "u_key", None)
+    shared_key = text_encoder.speech_prompted_text_encoder.style_key is not None
 
-    params = list(text_encoder.parameters()) + list(reference_encoder.parameters()) + \
-             list(vf_estimator.parameters()) + list(uncond_params.parameters())
+    # Each parameter once: with the projected style key, one tensor is in both the text encoder and the VF,
+    # and listing it twice would step it twice and count it twice in the gradient clip.
+    params = list({id(p): p for m in (text_encoder, reference_encoder, vf_estimator, uncond_params)
+                   for p in m.parameters()}.values())
     optimizer = AdamW(params, lr=lr)
 
     global_step = 0
@@ -297,6 +301,22 @@ def train(
         if 'reference_encoder' in checkpoint: reference_encoder.load_state_dict(checkpoint['reference_encoder'], strict=False)
         if 'u_text' in checkpoint: u_text.data = checkpoint['u_text']
         if 'u_ref' in checkpoint: u_ref.data = checkpoint['u_ref']
+        # The loads above are non-strict: refuse a checkpoint whose style-key layout differs from the config,
+        # which would otherwise train on randomly initialised keys.
+        ck_shared = 'speech_prompted_text_encoder.style_key' in checkpoint.get('text_encoder', {})
+        ck_ukey = checkpoint.get('u_key') is not None
+        if (ck_shared, ck_ukey) != (shared_key, u_key is not None):
+            raise RuntimeError(
+                f"{latest_ckpt}: style-key layout projected={ck_shared} u_key={ck_ukey}, but the config has "
+                f"style_key_mode projected={shared_key} style_key_uncond={u_key is not None}")
+        if shared_key or u_key is not None:
+            missing = [f"text_encoder.{k}" for k in text_encoder.state_dict() if k not in checkpoint.get('text_encoder', {})]
+            missing += [f"vf_estimator.{k}" for k in vf_estimator.state_dict() if k not in checkpoint.get('vf_estimator', {})]
+            if missing or shapes_changed:
+                raise RuntimeError(f"{latest_ckpt}: incomplete checkpoint for this config (missing {missing[:8]}, "
+                                   f"shapes_changed={shapes_changed})")
+            if u_key is not None:
+                u_key.data.copy_(checkpoint['u_key'])
 
         optimizer = AdamW(params, lr=lr)
         if 'optimizer' in checkpoint and not (finetune or shapes_changed):
@@ -552,6 +572,7 @@ def train(
                 device=device,
                 B=B,
                 rank=rank,
+                u_key=u_key,
             )
             spfm_mask = spfm_out.spfm_mask
             if spfm_out.ran_spfm:
@@ -602,6 +623,13 @@ def train(
             u_ref_batch = u_ref.expand(B_eff, -1, -1)
             ref_values_final = ref_values_exp * mask_style_cond + u_ref_batch * mask_style_uncond
 
+            # A style-dropped row (both-drop or SPFM-dirty) keys the VF style attention on u_key; a text-only
+            # drop keeps its style and the conditional keys.
+            style_keys_final = None
+            if u_key is not None:
+                tile = unwrap_ddp(vf_estimator).tile.expand(B_eff, -1, -1)
+                style_keys_final = torch.where(mask_style_uncond > 0.5, u_key.expand(B_eff, -1, -1), tile)
+
             x_t_in = x_t * latent_mask_exp
             v_pred = vf_estimator(
                 noisy_latent=x_t_in,
@@ -610,6 +638,7 @@ def train(
                 latent_mask=latent_mask_exp,
                 text_mask=text_mask_final,
                 current_step=t,
+                style_keys=style_keys_final,
             )
 
             final_mask = latent_mask_exp * target_loss_mask_exp
@@ -659,6 +688,7 @@ def train(
                     "reference_encoder": ddp_state_dict(reference_encoder),
                     "u_text": u_text.data,
                     "u_ref": u_ref.data,
+                    **({"u_key": u_key.data} if u_key is not None else {}),
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "global_step": global_step,

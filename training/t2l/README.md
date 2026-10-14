@@ -44,7 +44,11 @@ text encoder, reference encoder and vector field; default 1e-6; the DP sets it o
 only, under `dp.sentence_encoder.layer_scale_init`).
 It also sets `edge_fill` (in `ttl` and `dp`): inside every ConvNeXt the padded positions of a row take
 that row's last valid column, so each row of a padded training batch computes exactly what it computes
-alone at inference (B=1). It is a no-op on an unpadded batch. Pass it with `--config` to train
+alone at inference (B=1). It is a no-op on an unpadded batch.
+The style keys follow Supertonic-3 as well: `speech_prompted_text_encoder.style_key_mode` `"projected"`
+computes the text-encoder style keys as `tanh(W_key(style_key))` from one `style_key` tensor that is also the
+vector field's `tile`, and `uncond_masker.style_key_uncond` adds `u_key`, the style-attention keys of every
+row whose style is dropped (CFG both-drop, SPFM-dirty, and the CFG unconditional pass). Pass it with `--config` to train
 or export that model; `config/tts.json` stays the 33M model.
 
 ## Healthy Loss Curve
