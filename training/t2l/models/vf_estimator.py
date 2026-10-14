@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from training.t2l.models.text_encoder import fill_tail
+
 
 class LinearWrapper(nn.Module):
     def __init__(self, in_features: int, out_features: int):
@@ -111,8 +113,9 @@ class TimeCondBlock(nn.Module):
 
 class ConvNeXtBlock1D(nn.Module):
     def __init__(self, dim: int, kernel_size: int = 5, expansion: int = 2, dropout: float = 0.0, dilation: int = 1,
-                 layer_scale_init: float = 1e-6):
+                 layer_scale_init: float = 1e-6, edge_fill: bool = False):
         super().__init__()
+        self.edge_fill = edge_fill
         self.pad = ((kernel_size - 1) // 2) * dilation
         self.dwconv = nn.Conv1d(dim, dim, kernel_size=kernel_size, padding=0, groups=dim, dilation=dilation)
         self.norm = LayerNormWrapper(dim)
@@ -127,6 +130,8 @@ class ConvNeXtBlock1D(nn.Module):
             x = x * mask
         residual = x
 
+        if mask is not None and self.edge_fill:  # see text_encoder.ConvNeXtBlock
+            x = fill_tail(x, mask)
         x = F.pad(x, (self.pad, self.pad), mode="replicate")
         x = self.dwconv(x)
         if mask is not None:
@@ -146,11 +151,11 @@ class ConvNeXtBlock1D(nn.Module):
 
 
 class ConvNeXtStack(nn.Module):
-    def __init__(self, channels, kernel_size, dilations, expansion=2, layer_scale_init=1e-6):
+    def __init__(self, channels, kernel_size, dilations, expansion=2, layer_scale_init=1e-6, edge_fill=False):
         super().__init__()
         self.convnext = nn.ModuleList([
             ConvNeXtBlock1D(channels, kernel_size=kernel_size, dilation=d, expansion=expansion,
-                            layer_scale_init=layer_scale_init)
+                            layer_scale_init=layer_scale_init, edge_fill=edge_fill)
             for d in dilations
         ])
 
@@ -398,6 +403,7 @@ class VectorFieldEstimator(nn.Module):
         text_n_units: int = 256,
         supertonic3_time_freqs: bool = False,
         layer_scale_init: float = 1e-6,
+        edge_fill: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -434,14 +440,16 @@ class VectorFieldEstimator(nn.Module):
         for _ in range(num_superblocks):
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c0_cfg.get("ksz", 5), dilations=c0_cfg.get("dilation_lst", [1, 2, 4, 8]),
-                              expansion=expansion(c0_cfg), layer_scale_init=layer_scale_init)
+                              expansion=expansion(c0_cfg), layer_scale_init=layer_scale_init,
+                              edge_fill=edge_fill)
             )
             self.main_blocks.append(
                 TimeCondBlock(time_dim=time_embed_dim, channels=hidden_channels)
             )
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c1_cfg.get("ksz", 5), dilations=c1_cfg.get("dilation_lst", [1]),
-                              expansion=expansion(c1_cfg), layer_scale_init=layer_scale_init)
+                              expansion=expansion(c1_cfg), layer_scale_init=layer_scale_init,
+                              edge_fill=edge_fill)
             )
             self.main_blocks.append(
                 CrossAttentionBlock(
@@ -458,7 +466,8 @@ class VectorFieldEstimator(nn.Module):
             )
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c2_cfg.get("ksz", 5), dilations=c2_cfg.get("dilation_lst", [1]),
-                              expansion=expansion(c2_cfg), layer_scale_init=layer_scale_init)
+                              expansion=expansion(c2_cfg), layer_scale_init=layer_scale_init,
+                              edge_fill=edge_fill)
             )
             self.main_blocks.append(
                 CrossAttentionBlock(
@@ -475,7 +484,7 @@ class VectorFieldEstimator(nn.Module):
 
         self.last_convnext = ConvNeXtStack(
             hidden_channels, kernel_size=lc_cfg.get("ksz", 5), dilations=lc_cfg.get("dilation_lst", [1, 1, 1, 1]),
-            expansion=expansion(lc_cfg), layer_scale_init=layer_scale_init,
+            expansion=expansion(lc_cfg), layer_scale_init=layer_scale_init, edge_fill=edge_fill,
         )
         self.proj_out = ProjectionWrapper(hidden_channels, out_channels)
 

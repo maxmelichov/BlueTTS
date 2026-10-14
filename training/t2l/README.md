@@ -41,7 +41,10 @@ The `configs/tts.json` has several settings:
 `[1, 1, 2, 2, 4, 4]`, `sig_min` 1e-8, no attention dropout, the Supertonic-3 time-encoder frequency
 table (`time_encoder.supertonic3_freqs`) and `layer_scale_init` 0.1 (the initial ConvNeXt gamma of the
 text encoder, reference encoder and vector field; default 1e-6; the DP sets it on its sentence encoder
-only, under `dp.sentence_encoder.layer_scale_init`). Pass it with `--config` to train
+only, under `dp.sentence_encoder.layer_scale_init`).
+It also sets `edge_fill` (in `ttl` and `dp`): inside every ConvNeXt the padded positions of a row take
+that row's last valid column, so each row of a padded training batch computes exactly what it computes
+alone at inference (B=1). It is a no-op on an unpadded batch. Pass it with `--config` to train
 or export that model; `config/tts.json` stays the 33M model.
 
 ## Healthy Loss Curve

@@ -20,6 +20,7 @@ class DPReferenceEncoder(nn.Module):
         num_heads: int = 2,
         kernel_size: int = 5,
         dilation_lst: list = None,
+        edge_fill: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
@@ -34,6 +35,7 @@ class DPReferenceEncoder(nn.Module):
             expansion_factor=mlp_ratio,
             kernel_size=kernel_size,
             dilation_lst=dilation_lst,
+            edge_fill=edge_fill,
         )
         self.ref_keys = nn.Parameter(torch.randn(num_queries, query_dim) * 0.02)
         self.attn1 = nn.MultiheadAttention(
@@ -61,11 +63,12 @@ class DPReferenceEncoder(nn.Module):
 
 
 class DPTextEncoder(nn.Module):
-    def __init__(self, vocab_size=37, d_model=64, layer_scale_init=1e-6):
+    def __init__(self, vocab_size=37, d_model=64, layer_scale_init=1e-6, edge_fill=False):
         super().__init__()
         self.d_model = d_model
         self.text_embedder = TextEmbedderWrapper(vocab_size, d_model)
-        self.convnext = ConvNeXtWrapper(d_model, n_layers=6, expansion_factor=4, layer_scale_init=layer_scale_init)
+        self.convnext = ConvNeXtWrapper(d_model, n_layers=6, expansion_factor=4, layer_scale_init=layer_scale_init,
+                                        edge_fill=edge_fill)
         self.sentence_token = nn.Parameter(torch.randn(1, d_model, 1) * 0.02)
         self.attn_encoder = AttnEncoder(
             channels=d_model,
@@ -124,7 +127,8 @@ class DurationEstimator(nn.Module):
 
 
 class TTSDurationModel(nn.Module):
-    def __init__(self, vocab_size=37, style_dp=8, style_dim=16, sentence_encoder_cfg=None, style_encoder_cfg=None, predictor_cfg=None):
+    def __init__(self, vocab_size=37, style_dp=8, style_dim=16, sentence_encoder_cfg=None, style_encoder_cfg=None, predictor_cfg=None,
+                 edge_fill=False):
         super().__init__()
         self.vocab_size = vocab_size
 
@@ -153,7 +157,7 @@ class TTSDurationModel(nn.Module):
         # config: sentence_encoder.layer_scale_init (default 1e-6). The 64M recipe uses 0.1 here only: from 1e-6 the
         # sentence-encoder ConvNeXt blocks stay near zero and the attention stack carries the text alone.
         self.sentence_encoder = DPTextEncoder(vocab_size=vocab_size, d_model=se_d_model,
-                                              layer_scale_init=se_cfg.get("layer_scale_init", 1e-6))
+                                              layer_scale_init=se_cfg.get("layer_scale_init", 1e-6), edge_fill=edge_fill)
         self.ref_encoder = DPReferenceEncoder(
             in_channels=144,
             d_model=st_d_model,
@@ -163,6 +167,7 @@ class TTSDurationModel(nn.Module):
             query_dim=st_query_dim,
             num_heads=st_num_heads,
             dilation_lst=st_dilation,
+            edge_fill=edge_fill,
         )
         self.predictor = DurationEstimator(text_dim=pr_text_dim, style_dim=pr_style_dim)
 

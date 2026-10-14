@@ -15,9 +15,19 @@ class LayerNorm(nn.Module):
         return x
 
 
+def fill_tail(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """x [B, C, T] (already masked), mask [B, 1, T] with the valid columns first: padded positions take the
+    row's last valid column, so under a replicate pad the row sees what its exact-length (B=1) tensor sees."""
+    n = mask.sum(-1, keepdim=True).long().clamp(min=1)
+    last = x.gather(2, (n - 1).expand(-1, x.shape[1], 1))
+    return x * mask + last * (1 - mask)
+
+
 class ConvNeXtBlock(nn.Module):
-    def __init__(self, dim: int, expansion_factor: int = 4, kernel_size: int = 5, dilation: int = 1, layer_scale_init_value: float = 1e-6):
+    def __init__(self, dim: int, expansion_factor: int = 4, kernel_size: int = 5, dilation: int = 1, layer_scale_init_value: float = 1e-6,
+                 edge_fill: bool = False):
         super().__init__()
+        self.edge_fill = edge_fill
         hidden_dim = dim * expansion_factor
         if (kernel_size % 2) != 1:
             raise ValueError(f"ConvNeXtBlock expects odd kernel_size, got {kernel_size}")
@@ -34,6 +44,10 @@ class ConvNeXtBlock(nn.Module):
             x = x * mask
         residual = x
 
+        # edge_fill: a row shorter than its batch is followed by masked zeros, so without the fill its last
+        # columns see zeros where the same row alone (B=1 inference) sees its replicated last column.
+        if mask is not None and self.edge_fill:
+            x = fill_tail(x, mask)
         x = F.pad(x, (self.pad, self.pad), mode="replicate")
         x = self.dwconv(x)
         if mask is not None:
@@ -52,13 +66,14 @@ class ConvNeXtBlock(nn.Module):
 
 
 class ConvNeXtWrapper(nn.Module):
-    def __init__(self, d_model, n_layers, expansion_factor, kernel_size=5, dilation_lst=None, layer_scale_init=1e-6):
+    def __init__(self, d_model, n_layers, expansion_factor, kernel_size=5, dilation_lst=None, layer_scale_init=1e-6,
+                 edge_fill=False):
         super().__init__()
         if dilation_lst is None:
             dilation_lst = [1] * n_layers
         self.convnext = nn.ModuleList([
             ConvNeXtBlock(d_model, expansion_factor=expansion_factor, kernel_size=kernel_size, dilation=dilation_lst[i],
-                          layer_scale_init_value=layer_scale_init)
+                          layer_scale_init_value=layer_scale_init, edge_fill=edge_fill)
             for i in range(n_layers)
         ])
 
@@ -316,13 +331,14 @@ class TextEncoder(nn.Module):
         spte_n_units: int = 256,
         spte_n_style: int = 50,
         layer_scale_init: float = 1e-6,
+        edge_fill: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
         self.text_embedder = TextEmbedderWrapper(vocab_size, d_model)
         self.convnext = ConvNeXtWrapper(
             d_model, n_conv_layers, expansion_factor, kernel_size=kernel_size, dilation_lst=dilation_lst,
-            layer_scale_init=layer_scale_init,
+            layer_scale_init=layer_scale_init, edge_fill=edge_fill,
         )
         self.attn_encoder = AttnEncoder(
             d_model,
