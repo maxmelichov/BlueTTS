@@ -192,8 +192,7 @@ def train(
     if puncond is None:
         puncond = prob_both_uncond + prob_text_uncond
 
-    # RobustSpeechFlow (arXiv 2605.22083): plain flow matching until start_step, then the
-    # contrastive loss of training/t2l/rsf.py at full weight.
+    # RobustSpeechFlow (arXiv 2605.22083, training/t2l/rsf.py): plain flow matching until start_step.
     rsf_cfg = ttl_cfg.get("rsf", {})
     rsf_enabled = rsf_cfg.get("enabled", False)
     rsf_start_step = rsf_cfg.get("start_step", 0)
@@ -710,7 +709,8 @@ def train(
                         print(f"[RSF] on from step {global_step}: lambda_rand {rsf_cfg['lambda_rand']} "
                               f"lambda_aug {rsf_cfg['lambda_aug']}; silence latent norm {rsf_z_sil.norm().item():.3f}")
                 v_rand, v_aug, m_rand = rsf_negative_targets(
-                    z_1_exp, latent_mask_exp, x_0, valid_z_len.repeat_interleave(Ke), rsf_z_sil, Ke, sigma_min
+                    z_1_exp, latent_mask_exp, x_0, valid_z_len.repeat_interleave(Ke), rsf_z_sil, Ke, sigma_min,
+                    fps=ae_sample_rate / hop_length / chunk_compress_factor,
                 )
                 loss, rsf_rand, rsf_aug = rsf_loss(v_pred, v_target, mask_ct, v_rand, v_aug, m_rand,
                                                    rsf_cfg["lambda_rand"], rsf_cfg["lambda_aug"])
