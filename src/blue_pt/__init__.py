@@ -498,6 +498,7 @@ def load_pt_models(
         expansion_factor=cfg.get("te_expansion_factor", 4),
         p_dropout=0.0,
         dilation_lst=cfg.get("te_dilation_lst"),
+        edge_fill=cfg.get("edge_fill", False),
     ).to(device).eval()
     _load_into(text_encoder, te_sd, "text_encoder")
 
@@ -516,6 +517,7 @@ def load_pt_models(
         text_n_heads=cfg.get("vf_text_n_heads", 4),
         text_n_units=cfg.get("vf_text_n_units", 256),
         supertonic3_time_freqs=cfg.get("vf_st3_time_freqs", False),
+        edge_fill=cfg.get("edge_fill", False),
     ).to(device).eval()
     _load_into(vf_estimator, vf_sd, "vf_estimator")
 
@@ -530,6 +532,7 @@ def load_pt_models(
         latent_channels=compressed,
         style_dp=cfg.get("dp_style_tokens", 8),
         style_dim=cfg.get("dp_style_dim", 16),
+        edge_fill=cfg.get("dp_edge_fill", False),
     ).to(device).eval()
     _load_into(dp_model, dp_sd, "duration_predictor")
 

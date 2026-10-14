@@ -135,6 +135,8 @@ def load_ttl_config(config_path="configs/tts.json"):
         "normalizer_scale":     ttl["normalizer"]["scale"],
         "sigma_min":            ttl["flow_matching"]["sig_min"],
         "Ke":                   ttl["batch_expander"]["n_batch_expand"],
+        "edge_fill":            ttl.get("edge_fill", False),
+        "dp_edge_fill":         dp.get("edge_fill", False),
 
         # Text Encoder
         "te_d_model":           te["text_embedder"]["char_emb_dim"],
