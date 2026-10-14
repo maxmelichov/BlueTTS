@@ -35,6 +35,8 @@ The `configs/tts.json` has several settings:
 - `text_encoder`, `vector_field`: Architectural dimensions and layers.
 - `flow_matching.sig_min`: The minimum noise scale for Flow Matching.
 - `batch_expander.n_batch_expand`: The $K_e$ factor. 
+- `train.weight_decay` (optional, default `0.01`): AdamW weight decay. RobustSpeechFlow (arXiv 2605.22083, Sec. 4.3) trains with `0.0`.
+- `train.lr_milestones` (optional, default `[300000, 600000]`): steps at which the learning rate is halved. A resume uses these, not the milestones stored in the checkpoint; our current recipe uses `[350000, 700000]` with `weight_decay` `0.0`.
 
 `config/tts_st3.json` is the 64M layout (the Supertonic-3 `ttl` shapes): vector-field ConvNeXt
 `intermediate_dim` 2048, text attention `n_units` 512 over 8 heads, text-encoder dilations
