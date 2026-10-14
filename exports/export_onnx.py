@@ -509,7 +509,16 @@ def main():
         "denoised_latent": {0: "B", 2: "T_lat"},
     }, do_slim=args.slim, do_int8=args.int8)
     if do_verify:
-        all_ok &= verify(vf_wrapped, vf_path, vf_inputs, vf_names, "vector_estimator")
+        # Check on the conditioning the graph is run with (TE/RE outputs) at a mid step: random N(0,1) text_emb /
+        # style_ttl at step 0 of 1 are ill-conditioned for the 64M field (PyTorch fp32 alone is ~1e-3 off fp64
+        # there), and t = 0 never exercises the time encoder.
+        g = torch.Generator().manual_seed(0)
+        with torch.no_grad():
+            v_style = ref_enc(z_pred, mask=ref_mask)
+            v_text = text_enc(torch.randint(3, 100, (B, T_text), generator=g), v_style, text_mask)
+        vf_check = (noisy_latent, v_text, v_style, latent_mask, text_mask,
+                    torch.full((B,), 3.0), torch.full((B,), 8.0), cfg_scale)
+        all_ok &= verify(vf_wrapped, vf_path, vf_check, vf_names, "vector_estimator")
 
     # ---- 3) vocoder (stats+reshape baked in) -------------------------------
     voc_wrapped = VocoderWithStats(
