@@ -251,6 +251,8 @@ class BlueTRT:
         self.compressed_channels = self.latent_dim * self.chunk_compress_factor
         # Text normalization the checkpoint was trained with (tts.json).
         self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
+        # Checkpoint trained on '<lang>' + text + '</lang>' ids (export records it in tts.json).
+        self.lang_tags = bool(cfgs.get("lang_tags", False))
 
         self._ref_enc = load_engine(trt_dir, "reference_encoder.trt", required=False)
         self._text_enc = load_engine(trt_dir, "text_encoder.trt")
@@ -297,6 +299,7 @@ class BlueTRT:
             cfg_scale=cfg_scale,
             pace_blend=pace_blend,
             pace_dpt_ref=pace_dpt_ref,
+            lang=lang,
         )
 
     def create(
@@ -305,6 +308,7 @@ class BlueTRT:
         cfg_scale: Optional[float] = None,
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
+        lang: str = "he",
     ) -> Tuple[np.ndarray, int]:
         has_inline = _INLINE_LANG_PAIR.search(phonemes) is not None
         pace_blend_eff = (
@@ -324,6 +328,7 @@ class BlueTRT:
                     cfg_scale=cfg,
                     pace_blend=pace_blend_eff,
                     pace_dpt_ref=pace_dpt_ref,
+                    lang=lang,
                 )
             )
             if i < len(chunks) - 1:
@@ -367,6 +372,7 @@ class BlueTRT:
         cfg_scale: float,
         pace_blend: float = 0.0,
         pace_dpt_ref: Optional[float] = None,
+        lang: str = "he",
     ) -> np.ndarray:
         if self.mean is None or self.std is None:
             raise ValueError("stats not loaded.")
@@ -380,10 +386,10 @@ class BlueTRT:
         if z_ref is None and style_ttl is None:
             raise ValueError("Provide style_json with z_ref or style_ttl content.")
 
-        text_ids = torch.tensor(
-            [text_to_indices(phonemes, affricate_ligatures=self.affricate_ligatures)],
-            dtype=torch.int64, device=self.device,
-        )
+        # The language only enters the ids when tagged; untagged, encode as before ("he"),
+        # so a language outside AVAILABLE_LANGS still works with phoneme input.
+        ids = text_to_indices(phonemes, lang if self.lang_tags else "he", self.affricate_ligatures, self.lang_tags)
+        text_ids = torch.tensor([ids], dtype=torch.int64, device=self.device)
         text_mask = torch.ones(1, 1, text_ids.shape[1], dtype=torch.float32, device=self.device)
 
         # Normalize + crop z_ref.

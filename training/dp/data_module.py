@@ -155,7 +155,11 @@ def collate_dp(batch, spk2idx=None, unknown_spk=0):
     return _pad_wavs_texts(wavs, texts, speaker_ids)
 
 def get_dp_dataloader(
-    metadata_path: str, batch_size: int, num_workers: int = 16, affricate_ligatures: bool = False
+    metadata_path: str,
+    batch_size: int,
+    num_workers: int = 16,
+    affricate_ligatures: bool = False,
+    lang_tags: bool = False,
 ):
     dataset = Text2LatentDataset(
         metadata_path,
@@ -163,6 +167,7 @@ def get_dp_dataloader(
         max_wav_len=44100 * 20,
         max_text_len=800,
         affricate_ligatures=affricate_ligatures,
+        lang_tags=lang_tags,
     )
     speaker_ids = dataset.speaker_ids
     unique_speakers, counts = np.unique(speaker_ids, return_counts=True)

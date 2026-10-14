@@ -226,7 +226,9 @@ class UnicodeProcessor:
       - a path to a ``vocab.json`` with ``{pad_id, char_to_id, ...}`` (this repo), or
       - a path to a legacy unicode codepoint ``indexer.json`` (``{codepoint: id}``).
 
-    Unknown characters and stripped ``<lang>`` tags map to ``pad_id``.
+    Unknown characters map to ``pad_id``. Inline ``<lang>`` tags are dropped;
+    with ``lang_tags=True`` each text is instead encoded as ``<lang>`` + text +
+    ``</lang>``, every tag character a token, for checkpoints trained that way.
     """
 
     def __init__(self, indexer_path: str):
@@ -326,9 +328,10 @@ class UnicodeProcessor:
         text_mask = length_to_mask(text_ids_lengths)
         return text_mask
 
-    def _encode(self, text: str) -> np.ndarray:
-        # Strip any remaining language tags before encoding.
-        text = _LANG_TAG_RE.sub("", text)
+    def _encode(self, text: str, keep_tags: bool = False) -> np.ndarray:
+        # Strip the language tags before encoding unless the model reads them.
+        if not keep_tags:
+            text = _LANG_TAG_RE.sub("", text)
         if self._char_to_id is not None:
             pad = self.pad_id
             ids = [self._char_to_id.get(ch, pad) for ch in text]
@@ -339,13 +342,17 @@ class UnicodeProcessor:
         return np.array(ids, dtype=np.int64)
 
     def __call__(
-        self, text_list: list[str], lang_list: list[str], affricate_ligatures: bool = False
+        self,
+        text_list: list[str],
+        lang_list: list[str],
+        affricate_ligatures: bool = False,
+        lang_tags: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
         text_list = [
             self._preprocess_text(t, lang, affricate_ligatures)
             for t, lang in zip(text_list, lang_list)
         ]
-        encoded = [self._encode(t) for t in text_list]
+        encoded = [self._encode(t, keep_tags=lang_tags) for t in text_list]
         text_ids_lengths = np.array([len(e) for e in encoded], dtype=np.int64)
         text_ids = np.full(
             (len(encoded), int(text_ids_lengths.max())), self.pad_id, dtype=np.int64
@@ -389,6 +396,8 @@ class TextToSpeech:
         self.ldim = cfgs["ttl"]["latent_dim"]
         # Text normalization the checkpoint was trained with (tts.json).
         self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
+        # Checkpoint trained on '<lang>' + text + '</lang>' ids (export records it in tts.json).
+        self.lang_tags = bool(cfgs.get("lang_tags", False))
         self._u_text = u_text
         self._u_ref = u_ref
         self._vf_inputs = {i.name for i in vector_est_ort.get_inputs()}
@@ -459,7 +468,9 @@ class TextToSpeech:
             len(text_list) == style.ttl.shape[0]
         ), "Number of texts must match number of style vectors"
         bsz = len(text_list)
-        text_ids, text_mask = self.text_processor(text_list, lang_list, self.affricate_ligatures)
+        text_ids, text_mask = self.text_processor(
+            text_list, lang_list, self.affricate_ligatures, self.lang_tags
+        )
         dur_onnx, *_ = self.dp_ort.run(
             None, {"text_ids": text_ids, "style_dp": style.dp, "text_mask": text_mask}
         )
@@ -835,12 +846,14 @@ def load_text_processor(onnx_dir: str = "") -> UnicodeProcessor:
     return UnicodeProcessor(os.path.join(os.path.dirname(__file__), "vocab.json"))
 
 
-def text_to_indices(text: str, lang: str = "he", affricate_ligatures: bool = False) -> list[int]:
+def text_to_indices(
+    text: str, lang: str = "he", affricate_ligatures: bool = False, lang_tags: bool = False
+) -> list[int]:
     """Compatibility helper used by TRT: encode phoneme text with the bundled vocab."""
     global _TEXT_TO_INDICES_PROCESSOR
     if _TEXT_TO_INDICES_PROCESSOR is None:
         _TEXT_TO_INDICES_PROCESSOR = load_text_processor()
-    text_ids, _ = _TEXT_TO_INDICES_PROCESSOR([text], [lang], affricate_ligatures)
+    text_ids, _ = _TEXT_TO_INDICES_PROCESSOR([text], [lang], affricate_ligatures, lang_tags)
     return text_ids[0].astype(np.int64).tolist()
 
 
