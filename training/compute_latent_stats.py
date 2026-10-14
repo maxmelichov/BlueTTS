@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import hashlib
 import argparse
 from collections.abc import Mapping
 
@@ -13,7 +14,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from data.text2latent_dataset import Text2LatentDataset, collate_text2latent
 from bluecodec import LatentEncoder
 from bluecodec.utils import LinearMelSpectrogram
-from training.utils import compress_latents
+from training.utils import compress_latents, encoder_fingerprint
 
 
 def main():
@@ -173,8 +174,13 @@ def main():
         for batch in tqdm(dataloader):
             wavs, lengths = batch[0].to(device), batch[3]
 
-            mel = mel_spec(wavs.squeeze(1))
-            z   = compress_latents(encoder(mel), factor=compression_factor)
+            # Encode like the AE was trained: audio zero-padded to a multiple of hop * Kc samples,
+            # keeping the Kc * ceil(L / (hop * Kc)) frames that cover it (the centred STFT's extra
+            # frame is dropped), so every compressed frame is whole.
+            chunk = hop_length * compression_factor
+            wavs = torch.nn.functional.pad(wavs.squeeze(1), (0, (-wavs.shape[-1]) % chunk))
+            z   = encoder(mel_spec(wavs))[..., : wavs.shape[-1] // hop_length]
+            z   = compress_latents(z, factor=compression_factor)
             B, C, T_z = z.shape
 
             # Mask out padding frames based on original audio lengths
@@ -202,12 +208,27 @@ def main():
 
     print(f"Global mean: {mean.mean().item():.4f}, Global std: {std.mean().item():.4f}")
 
+    # Provenance: the stats are only valid for the encoder that produced them; the trainers
+    # refuse a stats file whose encoder fingerprint does not match their AE.
+    # edge_pad_chunks = -1: padded to a multiple of hop * Kc with no extra silent chunks.
+    ae_md5 = None
+    if os.path.exists(checkpoint_path):
+        with open(checkpoint_path, "rb") as fh:
+            ae_md5 = hashlib.file_digest(fh, "md5").hexdigest()
+    provenance = {
+        "enc_sha256": encoder_fingerprint(encoder.state_dict()),
+        "ae_md5": ae_md5,
+        "edge_pad_chunks": -1,
+    }
+    print(f"Encoder fingerprint: {provenance['enc_sha256'][:12]}")
+
     torch.save(
         {
             "mean":      mean.cpu(),
             "std":       std.cpu(),
             "Kc":        compression_factor,
             "latent_dim": latent_dim,
+            "provenance": provenance,
         },
         output_path,
     )
