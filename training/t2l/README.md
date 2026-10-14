@@ -38,8 +38,10 @@ The `configs/tts.json` has several settings:
 
 `config/tts_st3.json` is the 64M layout (the Supertonic-3 `ttl` shapes): vector-field ConvNeXt
 `intermediate_dim` 2048, text attention `n_units` 512 over 8 heads, text-encoder dilations
-`[1, 1, 2, 2, 4, 4]`, `sig_min` 1e-8, no attention dropout and the Supertonic-3 time-encoder frequency
-table (`time_encoder.supertonic3_freqs`). Pass it with `--config` to train
+`[1, 1, 2, 2, 4, 4]`, `sig_min` 1e-8, no attention dropout, the Supertonic-3 time-encoder frequency
+table (`time_encoder.supertonic3_freqs`) and `layer_scale_init` 0.1 (the initial ConvNeXt gamma of the
+text encoder, reference encoder and vector field; default 1e-6; the DP sets it on its sentence encoder
+only, under `dp.sentence_encoder.layer_scale_init`). Pass it with `--config` to train
 or export that model; `config/tts.json` stays the 33M model.
 
 ## Healthy Loss Curve

@@ -3,6 +3,7 @@
     "ttl": {
         "latent_dim": 24,
         "chunk_compress_factor": 6,
+        "layer_scale_init": 0.1,
         "batch_expander": {
             "n_batch_expand": 6
         },
@@ -258,6 +259,7 @@
         },
         "sentence_encoder": {
             "char_emb_dim": 64,
+            "layer_scale_init": 0.1,
             "char_dict_path": "src/vocab.json",
             "text_embedder": {
                 "char_dict_path": "src/vocab.json",
