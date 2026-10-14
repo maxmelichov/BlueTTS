@@ -26,6 +26,7 @@ from training.t2l.cfg_utils import (
     _latest_ckpt_in_dir,
     _validate_ttl_config,
     all_reduce_grads,
+    build_lr_scheduler,
     ddp_state_dict,
     seed_worker,
     unwrap_ddp,
@@ -175,6 +176,12 @@ def train(
     normalizer_scale = ttl_cfg["normalizer"]["scale"]
     sigma_min = ttl_cfg["flow_matching"]["sig_min"]
 
+    # ttl.train (optional): AdamW weight decay (torch default 0.01; RobustSpeechFlow Sec. 4.3 uses 0)
+    # and the steps at which the lr is halved.
+    train_cfg = ttl_cfg.get("train", {})
+    weight_decay = float(train_cfg.get("weight_decay", 0.01))
+    lr_milestones = [int(m) for m in train_cfg.get("lr_milestones", [300_000, 600_000])]
+
     um_cfg = ttl_cfg["uncond_masker"]
     prob_both_uncond = um_cfg["prob_both_uncond"]
     prob_text_uncond = um_cfg["prob_text_uncond"]
@@ -187,6 +194,7 @@ def train(
             f"ccf={chunk_compress_factor} | Ke={Ke} (config {cfg_Ke}) | "
             f"normalizer={normalizer_scale} | sig_min={sigma_min}\n"
             f"  uncond: prob_both={prob_both_uncond} prob_text={prob_text_uncond} total_puncond={puncond}\n"
+            f"  optim: lr={lr} weight_decay={weight_decay} lr_milestones={lr_milestones} (gamma 0.5)\n"
             f"{'=' * 60}\n"
         )
 
@@ -274,7 +282,7 @@ def train(
     # and listing it twice would step it twice and count it twice in the gradient clip.
     params = list({id(p): p for m in (text_encoder, reference_encoder, vf_estimator, uncond_params)
                    for p in m.parameters()}.values())
-    optimizer = AdamW(params, lr=lr)
+    optimizer = AdamW(params, lr=lr, weight_decay=weight_decay)
 
     global_step = 0
     scheduler_state = None
@@ -323,10 +331,12 @@ def train(
             if u_key is not None:
                 u_key.data.copy_(checkpoint['u_key'])
 
-        optimizer = AdamW(params, lr=lr)
+        optimizer = AdamW(params, lr=lr, weight_decay=weight_decay)
         if 'optimizer' in checkpoint and not (finetune or shapes_changed):
             try:
                 optimizer.load_state_dict(checkpoint['optimizer'])
+                for pg in optimizer.param_groups:
+                    pg['weight_decay'] = weight_decay  # the config, not the saved state, sets it
             except Exception as e:
                 if rank == 0:
                     print(f"Warning: Failed to load optimizer state: {e}")
@@ -345,14 +355,7 @@ def train(
                     )
         if 'scheduler' in checkpoint and not shapes_changed: scheduler_state = checkpoint['scheduler']
 
-    scheduler_last_epoch = -1 if finetune else (global_step - 1)
-    if scheduler_last_epoch != -1:
-        for pg in optimizer.param_groups: pg.setdefault('initial_lr', pg['lr'])
-
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[300_000, 600_000], gamma=0.5, last_epoch=scheduler_last_epoch)
-    if scheduler_state and not finetune:
-        try: scheduler.load_state_dict(scheduler_state)
-        except: pass
+    scheduler = build_lr_scheduler(optimizer, lr, lr_milestones, global_step, scheduler_state, finetune)
 
     if dist.is_initialized():
         text_encoder = DDP(text_encoder, device_ids=[local_rank], find_unused_parameters=True)

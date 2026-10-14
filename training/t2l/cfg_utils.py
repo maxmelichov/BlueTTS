@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import os
+from collections import Counter
 from typing import Optional
 
 import torch
@@ -102,6 +103,32 @@ def all_reduce_grads(params) -> None:
     for p in params:
         if p.grad is not None:
             dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+
+
+def build_lr_scheduler(optimizer, base_lr, milestones, global_step, scheduler_state=None, finetune=False):
+    """MultiStepLR (gamma 0.5) positioned at ``global_step``; finetune restarts from ``base_lr``.
+
+    On resume the lr is pinned to the schedule's closed form. Resuming exactly at a milestone
+    otherwise halves twice: the loaded optimizer already holds the decayed lr and
+    MultiStepLR(last_epoch=step - 1) steps onto the milestone and halves it again; a fresh
+    optimizer (state not loaded) would restart at ``base_lr`` instead."""
+    last_epoch = -1 if finetune else global_step - 1
+    if last_epoch != -1:
+        for pg in optimizer.param_groups:
+            pg.setdefault('initial_lr', pg['lr'])
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.5, last_epoch=last_epoch)
+    if scheduler_state and not finetune:
+        try:
+            scheduler.load_state_dict(scheduler_state)
+        except Exception:
+            pass
+    scheduler.milestones = Counter(milestones)  # a loaded state carries its own milestones
+    if not finetune and global_step > 0:
+        lr_now = base_lr * 0.5 ** sum(global_step >= m for m in milestones)
+        for pg in optimizer.param_groups:
+            pg['lr'] = lr_now
+        scheduler._last_lr = [lr_now for _ in optimizer.param_groups]
+    return scheduler
 
 
 def unwrap_ddp(module: nn.Module) -> nn.Module:
