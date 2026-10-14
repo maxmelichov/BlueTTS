@@ -3,7 +3,7 @@ import sys
 import os
 import torch
 
-from training.t2l.trainer import train
+from training.t2l.trainer import set_seed, train
 
 def main():
     parser = argparse.ArgumentParser()
@@ -43,6 +43,7 @@ def main():
     )
     args = parser.parse_args()
 
+    set_seed(42 + int(os.environ.get("RANK", "0")))  # per rank: one seed gave every rank the same t / noise draws
     train(
         finetune=args.finetune,
         config_path=args.config,
