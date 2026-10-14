@@ -8,6 +8,7 @@ __all__ = ["train", "set_seed"]
 
 if __name__ == "__main__":
     import argparse
+    import os
     parser = argparse.ArgumentParser()
     parser.add_argument("--finetune", action="store_true",
                         help="Finetune mode: lr=5e-4, SPFM starts after warm-up")
@@ -43,7 +44,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    set_seed(42)
+    set_seed(42 + int(os.environ.get("RANK", "0")))  # per rank: one seed gave every rank the same t / noise draws
     train(
         finetune=args.finetune,
         config_path=args.config,

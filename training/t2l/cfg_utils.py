@@ -5,6 +5,7 @@ import os
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -89,6 +90,18 @@ def _validate_ttl_config(ttl_cfg: dict) -> None:
 
 
 # --- dataloader / DDP / checkpoint helpers (kept with cfg to avoid extra tiny modules) ---
+
+
+def all_reduce_grads(params) -> None:
+    """Average gradients across ranks for parameters used outside a DDP forward.
+
+    u_text / u_ref (and u_key, when configured) are used as raw tensors (the DDP wrapper's
+    forward is never called), so DDP never all-reduces their gradients and each rank's copy drifts apart."""
+    if not dist.is_initialized():
+        return
+    for p in params:
+        if p.grad is not None:
+            dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
 
 
 def unwrap_ddp(module: nn.Module) -> nn.Module:
