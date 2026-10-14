@@ -39,6 +39,7 @@ The `configs/tts.json` has several settings:
 - `train.weight_decay` (optional, default `0.01`): AdamW weight decay. RobustSpeechFlow (arXiv 2605.22083, Sec. 4.3) trains with `0.0`.
 - `train.lr_milestones` (optional, default `[300000, 600000]`): steps at which the learning rate is halved. A resume uses these, not the milestones stored in the checkpoint; our current recipe uses `[350000, 700000]` with `weight_decay` `0.0`.
 - `train.ema_decay` (optional, default `0` = off): keep an exponential moving average of the text encoder, vector field and reference encoder, with warm-up `min(ema_decay, (1 + n) / (10 + n))` after n updates (our recipe: `0.9999`). Every checkpoint then also stores it under `ema`, and `<out>/ema/ckpt_step_N.pt` holds the EMA weights in the ordinary checkpoint layout, so inference and export load it like any other checkpoint.
+- `rsf`: RobustSpeechFlow contrastive loss (arXiv 2605.22083), off by default. With `enabled`, training is plain flow matching until `start_step`, then subtracts L1 distances to a length-matched in-batch negative (`lambda_rand`) and to a repeat/skip corruption of the target (`lambda_aug`); see `training/t2l/rsf.py`.
 
 `config/tts_st3.json` is the 64M layout (the Supertonic-3 `ttl` shapes): vector-field ConvNeXt
 `intermediate_dim` 2048, text attention `n_units` 512 over 8 heads, text-encoder dilations

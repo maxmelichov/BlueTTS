@@ -33,6 +33,7 @@ from training.t2l.cfg_utils import (
     seed_worker,
     unwrap_ddp,
 )
+from training.t2l.rsf import rsf_loss, rsf_negative_targets, silence_latent
 from training.t2l.sampling import build_reference_only, build_reference_from_latents, sample_audio
 from training.t2l.spfm import spfm_forward_mask
 
@@ -190,6 +191,13 @@ def train(
     prob_text_uncond = um_cfg["prob_text_uncond"]
     if puncond is None:
         puncond = prob_both_uncond + prob_text_uncond
+
+    # RobustSpeechFlow (arXiv 2605.22083): plain flow matching until start_step, then the
+    # contrastive loss of training/t2l/rsf.py at full weight.
+    rsf_cfg = ttl_cfg.get("rsf", {})
+    rsf_enabled = rsf_cfg.get("enabled", False)
+    rsf_start_step = rsf_cfg.get("start_step", 0)
+    rsf_z_sil = None
 
     if rank == 0:
         print(
@@ -506,6 +514,8 @@ def train(
         spfm_total_samples = 0
         spfm_score_sum = 0.0
         spfm_call_batches = 0
+        epoch_rsf_rand = 0.0
+        epoch_rsf_aug = 0.0
 
         for batch_idx, batch in enumerate(progress_bar):
             if global_step >= max_steps: break
@@ -691,9 +701,24 @@ def train(
             )
 
             final_mask = latent_mask_exp * target_loss_mask_exp
-            loss_raw = F.l1_loss(v_pred, v_target, reduction='none')
             mask_ct = final_mask.expand(-1, C, -1)
-            loss = (loss_raw * mask_ct).sum() / (mask_ct.sum() + 1e-8)
+            if rsf_enabled and global_step >= rsf_start_step:
+                if rsf_z_sil is None:
+                    rsf_z_sil = silence_latent(ae_encoder, mel_spec, mean, std, normalizer_scale,
+                                               chunk_compress_factor, ae_sample_rate, device)
+                    if rank == 0:
+                        print(f"[RSF] on from step {global_step}: lambda_rand {rsf_cfg['lambda_rand']} "
+                              f"lambda_aug {rsf_cfg['lambda_aug']}; silence latent norm {rsf_z_sil.norm().item():.3f}")
+                v_rand, v_aug, m_rand = rsf_negative_targets(
+                    z_1_exp, latent_mask_exp, x_0, valid_z_len.repeat_interleave(Ke), rsf_z_sil, Ke, sigma_min
+                )
+                loss, rsf_rand, rsf_aug = rsf_loss(v_pred, v_target, mask_ct, v_rand, v_aug, m_rand,
+                                                   rsf_cfg["lambda_rand"], rsf_cfg["lambda_aug"])
+                epoch_rsf_rand += rsf_rand
+                epoch_rsf_aug += rsf_aug
+            else:
+                loss_raw = F.l1_loss(v_pred, v_target, reduction='none')
+                loss = (loss_raw * mask_ct).sum() / (mask_ct.sum() + 1e-8)
 
             if global_step % 1000 == 0 and rank == 0:
                 with torch.no_grad():
@@ -730,6 +755,9 @@ def train(
             )
             if finetune:
                 postfix["mode"] = "FT"
+            if rsf_enabled and global_step >= rsf_start_step:
+                postfix["rsf_rand"] = epoch_rsf_rand / num_batches
+                postfix["rsf_aug"] = epoch_rsf_aug / num_batches
             progress_bar.set_postfix(**postfix)
 
             # Under accumulation global_step sits on a multiple of 1000 for several micro-batches:
