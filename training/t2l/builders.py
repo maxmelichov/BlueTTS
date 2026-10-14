@@ -50,6 +50,7 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
     vf_hidden = vf_cfg["proj_in"]["odim"]
     vf_time_dim = vf_cfg["time_encoder"]["time_dim"]
     vf_time_hdim = vf_cfg["time_encoder"].get("hdim", 256)
+    vf_st3_time_freqs = vf_cfg["time_encoder"].get("supertonic3_freqs", False)
     vf_n_blocks = vf_cfg["main_blocks"]["n_blocks"]
     vf_text_dim = vf_cfg["main_blocks"]["text_cond_layer"]["text_dim"]
     vf_text_n_heads = vf_cfg["main_blocks"]["text_cond_layer"]["n_heads"]
@@ -131,6 +132,7 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         use_residual=vf_use_residual,
         rotary_base=vf_rotary_base,
         text_n_units=vf_text_n_units,
+        supertonic3_time_freqs=vf_st3_time_freqs,
     ).to(device)
 
     uncond_params = UncondParams(

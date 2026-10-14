@@ -425,6 +425,7 @@ def main():
         time_embed_dim=cfg["vf_time_dim"], rope_gamma=cfg["vf_rotary_scale"],
         main_blocks_cfg=cfg["vf_main_blocks"], last_convnext_cfg=cfg["vf_last_convnext"],
         text_n_heads=cfg["vf_text_n_heads"], text_n_units=cfg["vf_text_n_units"],
+        supertonic3_time_freqs=cfg["vf_st3_time_freqs"],
     ).eval()
     _load_into(vf, t2l, "vf_estimator")
 
