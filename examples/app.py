@@ -21,7 +21,7 @@ audio, _ = tts(
     args.text,
     lang=args.lang,
     style=style,
-    total_step=5,
+    total_step=8,
     cfg_scale=4.0,
     text_is_phonemes=args.text_is_phonemes,
 )
