@@ -93,6 +93,34 @@ def _validate_ttl_config(ttl_cfg: dict) -> None:
 # --- dataloader / DDP / checkpoint helpers (kept with cfg to avoid extra tiny modules) ---
 
 
+class DistributedWeightedSampler(torch.utils.data.Sampler):
+    """Weighted draw with replacement; one epoch = floor(len(weights) / num_replicas) draws per rank.
+
+    Every rank draws the same sequence (seed + epoch) and takes its own stride, so the ranks
+    see disjoint slices of one weighted draw."""
+
+    def __init__(self, weights, num_replicas=1, rank=0, seed=42):
+        if len(weights) < num_replicas:
+            raise ValueError(f"sample_weight: {len(weights)} rows cannot be split across {num_replicas} ranks")
+        self.weights = weights
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.seed = seed
+        self.epoch = 0
+        self.num_samples = len(weights) // num_replicas
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __len__(self):
+        return self.num_samples
+
+    def __iter__(self):
+        g = torch.Generator().manual_seed(self.seed + self.epoch)
+        idx = torch.multinomial(self.weights, self.num_samples * self.num_replicas, replacement=True, generator=g)
+        return iter(idx[self.rank::self.num_replicas].tolist())
+
+
 def all_reduce_grads(params) -> None:
     """Average gradients across ranks for parameters used outside a DDP forward.
 

@@ -8,6 +8,7 @@ The dataset should be a CSV file with the following expected columns (or similar
 - `text`: Transcription text
 - `speaker_id`: Speaker identifier
 - `lang`: Language code
+- `sample_weight` (optional): per-row draw probability, up to normalisation. When present, every epoch draws rows with replacement by these weights, `floor(len(dataset) / world_size)` per rank (one weighted draw split across DDP ranks, or all of it on one GPU); rows with weight 0 are never drawn. Without it, one GPU samples speaker-balanced and DDP samples uniformly.
 
 Expected sample rate for training is typically 44.1kHz.
 
