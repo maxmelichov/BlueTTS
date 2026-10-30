@@ -1,4 +1,4 @@
-"""FlowTTS-GRPO math (arXiv 2606.23190): SDE step, Gaussian log-prob, KL, advantages, clipped ratio (needs torch)."""
+"""FlowTTS-GRPO math (arXiv 2606.23190): SDE step, Gaussian log-prob, KL, advantages, clipped ratio."""
 
 from __future__ import annotations
 
@@ -7,19 +7,24 @@ import random
 import unittest
 
 import numpy as np
-import torch
 
-from training.rl.flow_grpo import (
-    advantages,
-    gauss_logp,
-    gaussian_kl,
-    ppo_backward,
-    rollout,
-    sample_window,
-    sde_mean_std,
-)
+try:
+    import torch
+
+    from training.rl.flow_grpo import (
+        advantages,
+        gauss_logp,
+        gaussian_kl,
+        ppo_backward,
+        rollout,
+        sample_window,
+        sde_mean_std,
+    )
+except ImportError:  # the inference install has no torch
+    torch = None
 
 
+@unittest.skipIf(torch is None, "torch not installed")
 class TestFlowGRPO(unittest.TestCase):
     def test_sde_at_zero_noise_is_the_euler_step(self):
         x, v = torch.randn(2, 6, 5), torch.randn(2, 6, 5)
