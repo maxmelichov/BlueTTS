@@ -290,6 +290,7 @@ def sample_audio(
             else:
                 u_text = uncond_params.u_text.expand(B, -1, T_txt)
                 u_ref = uncond_params.u_ref.expand(B, -1, -1)
+            u_key = getattr(getattr(uncond_params, 'module', uncond_params), 'u_key', None)
 
             v_uncond = vf_estimator(
                 noisy_latent=x_in,
@@ -298,6 +299,7 @@ def sample_audio(
                 latent_mask=latent_mask,
                 text_mask=text_mask,
                 current_step=t,
+                style_keys=u_key.expand(B, -1, -1) if u_key is not None else None,
             )
             v = v_uncond + cfg_scale * (v_cond - v_uncond)
         else:

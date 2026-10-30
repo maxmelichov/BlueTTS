@@ -502,7 +502,9 @@ class VectorFieldEstimator(nn.Module):
         text_mask: torch.Tensor,
         current_step: torch.Tensor,
         total_step: Optional[torch.Tensor] = None,
+        style_keys: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """style_keys: style-attention keys [B, n_style, style_dim]; None = `tile`."""
         B = noisy_latent.shape[0]
 
         if total_step is not None:
@@ -534,7 +536,7 @@ class VectorFieldEstimator(nn.Module):
                 x = block(x, mask=latent_mask)
             elif idx_in_super == 5:
                 x = block(x, context=style_ttl,
-                          context_keys=self.tile.expand(B, -1, -1),
+                          context_keys=style_keys if style_keys is not None else self.tile.expand(B, -1, -1),
                           x_mask=latent_mask, context_mask=None)
 
         x = self.last_convnext(x, mask=latent_mask)
