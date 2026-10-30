@@ -1,4 +1,4 @@
-"""Latent-stats provenance check (needs torch; skipped in the ONNX-only environment)."""
+"""Latent-stats provenance check."""
 
 from __future__ import annotations
 
