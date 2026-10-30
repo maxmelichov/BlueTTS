@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import functools
 import numpy as np
 import soundfile as sf
 from typing import Optional
@@ -24,6 +25,7 @@ from training.t2l.builders import build_models
 from training.t2l.cfg_utils import (
     _latest_ckpt_in_dir,
     _validate_ttl_config,
+    all_reduce_grads,
     ddp_state_dict,
     seed_worker,
     unwrap_ddp,
@@ -265,6 +267,8 @@ def train(
     u_text, u_ref = uncond_params.u_text, uncond_params.u_ref
     u_key = getattr(uncond_params, "u_key", None)
     shared_key = text_encoder.speech_prompted_text_encoder.style_key is not None
+    # used outside any DDP forward: gradients averaged across ranks by hand
+    uncond_tokens = [p for p in (u_text, u_ref, u_key) if p is not None]
 
     # each parameter once: the projected style key is shared by the text encoder and the VF
     params = list({id(p): p for m in (text_encoder, reference_encoder, vf_estimator, uncond_params)
@@ -396,7 +400,7 @@ def train(
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=2,
-        worker_init_fn=seed_worker
+        worker_init_fn=functools.partial(seed_worker, rank=rank, start_step=global_step),
     )
     
     # Validation Batch
@@ -450,9 +454,11 @@ def train(
         print("Starting training loop...")
 
     epoch = 0
+    epoch_base = global_step  # offsets set_epoch so a resume does not replay the epoch-0 draw order
+    last_saved_step = global_step  # the checkpoint we resumed from (or step 0) is not written again
 
     while global_step < max_steps:
-        if dist.is_initialized() and hasattr(sampler, 'set_epoch'): sampler.set_epoch(epoch)
+        if dist.is_initialized() and hasattr(sampler, 'set_epoch'): sampler.set_epoch(epoch_base + epoch)
         epoch += 1
 
         text_encoder.train()
@@ -668,6 +674,7 @@ def train(
             loss.backward()
 
             if (batch_idx + 1) % accumulation_steps == 0:
+                all_reduce_grads(uncond_tokens)
                 torch.nn.utils.clip_grad_norm_(params, 10.0)
                 optimizer.step()
                 scheduler.step()
@@ -685,7 +692,9 @@ def train(
                 postfix["mode"] = "FT"
             progress_bar.set_postfix(**postfix)
 
-            if global_step % 1000 == 0 and rank == 0:
+            # under accumulation global_step stays on a multiple of 1000 for several micro-batches: save once
+            if global_step % 1000 == 0 and global_step != last_saved_step and rank == 0:
+                last_saved_step = global_step
                 ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{global_step}.pt")
                 torch.save({
                     "vf_estimator": ddp_state_dict(vf_estimator),
@@ -881,6 +890,12 @@ def train(
 
         # Flush remaining gradients if dataloader length is not divisible by accumulation_steps
         if num_batches % accumulation_steps != 0:
+            # rescale to the mean over the k micro-batches actually accumulated
+            k = num_batches % accumulation_steps
+            for p in params:
+                if p.grad is not None:
+                    p.grad.mul_(accumulation_steps / k)
+            all_reduce_grads(uncond_tokens)
             torch.nn.utils.clip_grad_norm_(params, 10.0)
             optimizer.step()
             scheduler.step()
