@@ -280,7 +280,6 @@ class Text2LatentDataset(Dataset):
         # Pad to at least one hop_length (prevents issues in latent encoding)
         if wav.numel() < self.hop_length:
             wav = F.pad(wav, (0, self.hop_length - wav.numel()))
-        # No trim to whole hops: lengths are the true clip lengths; trainers mask ceil(len / 3072) latent frames.
         return wav
 
     def __getitem__(self, idx):
