@@ -174,7 +174,6 @@ def load_ttl_config(config_path="configs/tts.json"):
         "char_dict_path":   char_dict_path,
         "dp_vocab_size":    dp_vocab_size,
         "affricate_ligatures": bool(full_config.get("affricate_ligatures", False)),
-        # Text is fed as '<lang>' + ids + '</lang>' (training/data/text_vocab.wrap_lang_tags)
         "lang_tags":        bool(full_config.get("lang_tags", False)),
 
         # Latent space
