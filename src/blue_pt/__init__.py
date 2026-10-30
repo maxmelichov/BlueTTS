@@ -85,7 +85,6 @@ class TextToSpeech:
         self.ldim = int(cfgs.get("latent_dim", cfgs.get("ttl", {}).get("latent_dim", 24)))
         self.normalizer_scale = float(cfgs.get("normalizer_scale", 1.0))
         self.compressed_channels = self.ldim * self.chunk_compress_factor
-        # Text normalization the checkpoint was trained with (config key).
         self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
         # Checkpoint trained on '<lang>' + text + '</lang>' ids (config key or checkpoint flag).
         self.lang_tags = bool(cfgs.get("lang_tags", False))
