@@ -16,8 +16,7 @@ class LayerNorm(nn.Module):
 
 
 def fill_tail(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """x [B, C, T] (already masked), mask [B, 1, T] with the valid columns first: padded positions take the
-    row's last valid column, so under a replicate pad the row sees what its exact-length (B=1) tensor sees."""
+    """Padded columns of each (masked) row take the row's last valid column."""
     n = mask.sum(-1, keepdim=True).long().clamp(min=1)
     last = x.gather(2, (n - 1).expand(-1, x.shape[1], 1))
     return x * mask + last * (1 - mask)
@@ -44,8 +43,7 @@ class ConvNeXtBlock(nn.Module):
             x = x * mask
         residual = x
 
-        # edge_fill: a row shorter than its batch is followed by masked zeros, so without the fill its last
-        # columns see zeros where the same row alone (B=1 inference) sees its replicated last column.
+        # edge_fill: under the replicate pad a padded row then sees what it sees alone (B=1 inference)
         if mask is not None and self.edge_fill:
             x = fill_tail(x, mask)
         x = F.pad(x, (self.pad, self.pad), mode="replicate")
@@ -237,8 +235,6 @@ class StyleAttentionLayer(nn.Module):
                  key_mode: str = "baked"):
         super().__init__()
         assert n_units % num_heads == 0
-        if key_mode not in ("baked", "projected"):
-            raise ValueError(f"style_key_mode must be 'baked' or 'projected', got {key_mode!r}")
         self.num_heads = num_heads
         self.dim = n_units
         self.head_dim = n_units // num_heads
@@ -302,13 +298,8 @@ class StyleAttention(nn.Module):
     def __init__(self, text_dim: int, style_dim: int, n_units: int, num_heads: int = 2, num_style_tokens: int = 50,
                  key_mode: str = "baked"):
         super().__init__()
-        # key_mode "baked": attention1 / attention2 each own a baked key constant.
-        # key_mode "projected" (Supertonic-3 layout): one shared style-key bank, projected by each layer's W_key;
-        # the builder ties it to the vector field's `tile`, so both models key on the same tensor.
-        if key_mode == "projected":
-            self.style_key = nn.Parameter(torch.randn(1, num_style_tokens, style_dim) * 0.02)
-        else:
-            self.style_key = None
+        # "baked": each layer owns a key constant; "projected": one style_key (tied to the VF tile) for both layers
+        self.style_key = nn.Parameter(torch.randn(1, num_style_tokens, style_dim) * 0.02) if key_mode == "projected" else None
         self.attention1 = StyleAttentionLayer(text_dim, style_dim, n_units, num_heads, num_style_tokens, key_mode)
         self.attention2 = StyleAttentionLayer(text_dim, style_dim, n_units, num_heads, num_style_tokens, key_mode)
         self.norm = StyleNorm(text_dim)
