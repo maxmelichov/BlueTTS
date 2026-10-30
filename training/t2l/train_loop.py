@@ -176,8 +176,7 @@ def train(
     normalizer_scale = ttl_cfg["normalizer"]["scale"]
     sigma_min = ttl_cfg["flow_matching"]["sig_min"]
 
-    # ttl.train (optional): AdamW weight decay (torch default 0.01; RobustSpeechFlow Sec. 4.3 uses 0)
-    # and the steps at which the lr is halved.
+    # ttl.train (optional): AdamW weight decay and the steps at which the lr is halved
     train_cfg = ttl_cfg.get("train", {})
     weight_decay = float(train_cfg.get("weight_decay", 0.01))
     lr_milestones = [int(m) for m in train_cfg.get("lr_milestones", [300_000, 600_000])]
