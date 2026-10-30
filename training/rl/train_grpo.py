@@ -1,13 +1,11 @@
 """FlowTTS-GRPO post-training of the T2L vector field (arXiv 2606.23190).
 
-Per iteration: `prompts_per_iter` (target text, reference clip) pairs, 30% of them hard cases (Table 1); a group of
-G latents per prompt from the inference sampler without CFG, with a 2-step SDE window (training/rl/flow_grpo.py);
-decode, score (ASR error rate, ECAPA similarity, DNSMOS; training/rl/rewards.py), advantages, then
+Per iteration: `prompts_per_iter` (text, reference clip) prompts, 30% hard cases (Table 1); G latents per prompt
+from the CFG-free sampler with an SDE window (flow_grpo.py); decode, score (rewards.py), advantages, then
 `updates_per_iter` clipped-ratio updates with a KL to the frozen starting VF.
 
-Only the vector field trains. The text encoder, reference encoder, unconditional tokens, DP and AE stay frozen, so
-voices exported from the base checkpoint stay valid. With the projected style key the VF's `tile` is also the text
-encoder's key, so it trains with the VF and is saved on both sides.
+Only the vector field trains, so voices exported from the base checkpoint stay valid. With the projected style key
+the VF's `tile` is also the text encoder's key, so it is saved on both sides.
 """
 
 import copy
@@ -36,9 +34,8 @@ def _split_punct(w):
 
 
 def hard_case(ipa, target, kind, rng):
-    """Table 1 augmentations, applied at the same word positions to the IPA and to the ASR target text:
-    lwr one word repeated 3-5 times; smr 2-3 words each repeated 2-3 times (punctuation stays on the last copy);
-    gsr the whole sentence repeated once after a comma. Returns (ipa, target) or None."""
+    """Table 1, at the same word positions in the IPA and the ASR text: lwr one word x3-5; smr 2-3 words x2-3
+    (punctuation on the last copy); gsr the sentence repeated after a comma. Returns (ipa, target) or None."""
     if kind == "gsr":
         return tuple(f"{re.sub(_PUNCT + '+$', '', s)}, {s}" + ("" if re.search(_PUNCT + "$", s) else ".")
                      for s in (ipa, target))
@@ -75,8 +72,8 @@ def _load_ae(ae_encoder, ae_decoder, path):
 
 
 def train_grpo(cfg, asr=None):
-    """cfg: the CLI namespace (training/rl/cli.py). asr: optional callable (wav, sr, target_text, lang) -> error
-    rate in [0, 1]; default Whisper large-v3 WER against the CSV's `asr_text_col`."""
+    """cfg: the CLI namespace (cli.py). asr: optional (wav, sr, target_text, lang) -> error rate in [0, 1];
+    default Whisper WER against the CSV's `asr_text_col`."""
     from training.rl.rewards import DNSMOS, SpeakerSim, WhisperASR
 
     dev = torch.device(cfg.device)
@@ -98,17 +95,15 @@ def train_grpo(cfg, asr=None):
     mean, std = stats["mean"].to(dev).view(1, -1, 1), stats["std"].to(dev).view(1, -1, 1)
     for m in (te, ref_enc, vf, dp, ae_encoder, ae_decoder, mel_spec):
         m.eval().requires_grad_(False)
-    # The KL reference is the starting policy end to end: a frozen copy of the text encoder and the VF, copied
-    # together so a projected style key stays tied in the copy and does not follow the trained one.
+    # KL reference: frozen copies of the starting TE and VF, copied together so a projected style key stays tied.
     te_ref, vf_ref = copy.deepcopy((te, vf))
     vf.requires_grad_(True)
     tied = te.speech_prompted_text_encoder.style_key is not None
-    # language-tagged input ('<lang>' + ids + '</lang>') when the model was trained with it
     lang_tags = bool(full.get("lang_tags", False) or base.get("lang_tags", 0))
     params = list(vf.parameters())
     print(f"[grpo] VF full fine-tune: {sum(p.numel() for p in params) / 1e6:.2f} M params, tied style key {tied}")
     opt = torch.optim.AdamW(params, lr=cfg.lr, betas=(0.9, 0.999), weight_decay=1e-4)
-    ups = max(1, min(cfg.updates_per_iter, cfg.prompts_per_iter))
+    ups = min(cfg.updates_per_iter, cfg.prompts_per_iter)
     total = cfg.iters * ups
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: max(0.0, 1.0 - s / total))   # linear decay to 0
     ema = {k: v.detach().clone() for k, v in vf.state_dict().items()} if cfg.ema > 0 else None
@@ -123,9 +118,9 @@ def train_grpo(cfg, asr=None):
         start = rs["iter"] + 1
         print(f"[grpo] resumed {cfg.resume} at iteration {rs['iter']}")
 
-    # ---- prompts and references from the dataset CSV (the T2L dataset's text pipeline), rewards
+    # ---- prompts and references from the dataset CSV, through the T2L dataset's text pipeline
     ds = Text2LatentDataset(cfg.data, sample_rate=sr, hop_length=hop,
-                            affricate_ligatures=bool(full.get("affricate_ligatures", False)))   # as the T2L trainer
+                            affricate_ligatures=bool(full.get("affricate_ligatures", False)))
     df = ds.df
     if asr is None and cfg.w_asr > 0:
         if cfg.asr_text_col not in df.columns:
@@ -224,7 +219,7 @@ def train_grpo(cfg, asr=None):
 
     @torch.no_grad()
     def ema_update():
-        for k, v in (vf.state_dict().items() if ema is not None else ()):
+        for k, v in vf.state_dict().items():
             if v.is_floating_point():
                 ema[k].mul_(cfg.ema).add_(v, alpha=1.0 - cfg.ema)
             else:
@@ -262,7 +257,8 @@ def train_grpo(cfg, asr=None):
             if used:                                           # no step when every group of the chunk was discarded
                 gn = torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
                 opt.step()
-                ema_update()
+                if ema is not None:
+                    ema_update()
             sched.step()
         n = max(1, st["n"])
         rec = dict(it=it, sec=round(time.time() - t0, 1), err=float(err.mean()), sim=float(sim.mean()), mos=float(mos.mean()),

@@ -81,12 +81,10 @@ uv run python -m training.t2l.cli \
 
 ## 5. GRPO (optional)
 
-FlowTTS-GRPO post-training of the T2L vector field (arXiv 2606.23190), rewarding speaker similarity (ECAPA) and
-quality (DNSMOS P.835). Only the vector field trains, so voices exported from the starting checkpoint stay valid.
-Extra dependencies: `uv pip install speechbrain speechmos onnxruntime transformers`.
-
-The intelligibility reward (Whisper large-v3 WER, `--w_asr`, default 1) needs the words of each row in a `transcript`
-column, which `combine_datasets.py` does not write. Add that column to use it; without it, pass `--w_asr 0` as below.
+FlowTTS-GRPO post-training of the T2L vector field (arXiv 2606.23190), rewarding speaker similarity, Whisper WER and
+DNSMOS. Only the vector field trains, so exported voices stay valid. Extra dependencies:
+`uv pip install speechbrain speechmos onnxruntime transformers`. The WER reward (`--w_asr`) needs a `transcript`
+column with each row's words; without one, pass `--w_asr 0` as below.
 
 ```bash
 uv run python -m training.rl.cli \
@@ -100,5 +98,3 @@ uv run python -m training.rl.cli \
   --w_asr 0 \
   --device cuda:0
 ```
-
-Score `ckpt_step_*.pt` like any T2L checkpoint, at the usual steps and CFG; the sampler is unchanged.
