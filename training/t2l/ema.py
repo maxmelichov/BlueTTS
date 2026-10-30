@@ -45,11 +45,14 @@ class ModelEMA:
 
     @torch.no_grad()
     def load_state_dicts(self, ema_state):
-        """Missing or reshaped entries keep the current weights, like the trainer's resume."""
+        """Missing or reshaped entries keep the current weights, like the trainer's resume. Returns the count loaded."""
         self.updates = int(ema_state.get("updates", 0))
+        n = 0
         for key, m in self.modules:
             sd = ema_state.get(key, {})
             for name, p in m.named_parameters(remove_duplicate=False):
                 v = sd.get(name)
                 if v is not None and v.shape == p.shape:
                     self._shadow_by_id[id(p)].copy_(v)
+                    n += 1
+        return n
