@@ -18,6 +18,7 @@ class ReferenceEncoder(nn.Module):
         prototype_dim: int = 256,
         n_units: int = 256,
         style_value_dim: int = 256,
+        layer_scale_init: float = 1e-6,
     ):
         super().__init__()
         self.d_model = d_model
@@ -34,6 +35,7 @@ class ReferenceEncoder(nn.Module):
             expansion_factor=mlp_ratio,
             kernel_size=kernel_size,
             dilation_lst=dilation_lst,
+            layer_scale_init=layer_scale_init,
         )
 
         self.ref_keys = nn.Parameter(torch.randn(num_tokens, prototype_dim) * 0.02)

@@ -52,12 +52,13 @@ class ConvNeXtBlock(nn.Module):
 
 
 class ConvNeXtWrapper(nn.Module):
-    def __init__(self, d_model, n_layers, expansion_factor, kernel_size=5, dilation_lst=None):
+    def __init__(self, d_model, n_layers, expansion_factor, kernel_size=5, dilation_lst=None, layer_scale_init=1e-6):
         super().__init__()
         if dilation_lst is None:
             dilation_lst = [1] * n_layers
         self.convnext = nn.ModuleList([
-            ConvNeXtBlock(d_model, expansion_factor=expansion_factor, kernel_size=kernel_size, dilation=dilation_lst[i])
+            ConvNeXtBlock(d_model, expansion_factor=expansion_factor, kernel_size=kernel_size, dilation=dilation_lst[i],
+                          layer_scale_init_value=layer_scale_init)
             for i in range(n_layers)
         ])
 
@@ -314,12 +315,14 @@ class TextEncoder(nn.Module):
         spte_style_dim: int = 256,
         spte_n_units: int = 256,
         spte_n_style: int = 50,
+        layer_scale_init: float = 1e-6,
     ):
         super().__init__()
         self.d_model = d_model
         self.text_embedder = TextEmbedderWrapper(vocab_size, d_model)
         self.convnext = ConvNeXtWrapper(
-            d_model, n_conv_layers, expansion_factor, kernel_size=kernel_size, dilation_lst=dilation_lst
+            d_model, n_conv_layers, expansion_factor, kernel_size=kernel_size, dilation_lst=dilation_lst,
+            layer_scale_init=layer_scale_init,
         )
         self.attn_encoder = AttnEncoder(
             d_model,
