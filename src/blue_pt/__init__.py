@@ -206,8 +206,7 @@ class TextToSpeech:
         return wav, dur_np
 
     def _decode(self, x: torch.Tensor) -> np.ndarray:
-        """One row [1, C, T] -> waveform, without the latent's near-zero tail
-        (see :func:`blue_onnx.latent_keep_frames`)."""
+        """One row [1, C, T] -> waveform, without the latent's near-zero tail (latent_keep_frames)."""
         if self.mean is None or self.std is None:
             raise ValueError("Latent stats (mean/std) not loaded.")
         ns = self.normalizer_scale
