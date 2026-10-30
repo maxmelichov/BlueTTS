@@ -66,7 +66,6 @@ def load_ttl_config(config_path="configs/tts.json"):
             "odim": ae_dec.get("head", {}).get("odim", 512),
             "ksz":  ae_dec.get("head", {}).get("ksz", 3),
         },
-        "pad_mode":             ae_dec.get("pad_mode", "zeros"),
     }
 
     # ---- AutoEncoder encoder config ----
@@ -79,7 +78,6 @@ def load_ttl_config(config_path="configs/tts.json"):
         "dilation_lst":     ae_enc.get("dilation_lst", [1] * 10),
         "odim":             ae_enc.get("odim", 24),
         "idim":             ae_enc.get("idim", 1253),
-        "pad_mode":         ae_enc.get("pad_mode", "zeros"),
     }
 
     # ---- Duration Predictor style config ----
