@@ -72,8 +72,7 @@ _TEXT_TO_INDICES_PROCESSOR: Optional["UnicodeProcessor"] = None
 
 _INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)</\1>", re.DOTALL)
 _LANG_TAG_RE = re.compile(r"</?\w+>")
-# Decomposed affricates and ASCII digraphs -> single ligatures (word-final 'ts' only).
-# Only for models trained on folded text: tts.json "affricate_ligatures".
+# Affricates -> ligatures (word-final 'ts' only), for models trained with tts.json "affricate_ligatures".
 _AFFRICATE_LIGATURES = (
     (re.compile(r"t͡s|ts(?=[^\w]|$)", re.I), "ʦ"),
     (re.compile(r"t͡ʃ|tʃ", re.I), "ʧ"),
@@ -226,9 +225,8 @@ class UnicodeProcessor:
       - a path to a ``vocab.json`` with ``{pad_id, char_to_id, ...}`` (this repo), or
       - a path to a legacy unicode codepoint ``indexer.json`` (``{codepoint: id}``).
 
-    Unknown characters map to ``pad_id``. Inline ``<lang>`` tags are dropped;
-    with ``lang_tags=True`` each text is instead encoded as ``<lang>`` + text +
-    ``</lang>``, every tag character a token, for checkpoints trained that way.
+    Unknown characters map to ``pad_id``. Inline ``<lang>`` tags are dropped unless
+    ``lang_tags=True``, which encodes ``<lang>`` + text + ``</lang>`` as tokens.
     """
 
     def __init__(self, indexer_path: str):
@@ -246,15 +244,10 @@ class UnicodeProcessor:
                 else {int(k): int(v) for k, v in raw.items()}
 
     def _preprocess_text(self, text: str, lang: str, affricate_ligatures: bool = False) -> str:
-        # The same steps, in the same order, as ``normalize_text`` in
-        # training/data/text_vocab.py (minus its Hebrew r/g fallback, which is a
-        # G2P concern): the model has to see the ids it was trained on. Drop
-        # inline <lang>…</lang> spans first: they are routing metadata, never
-        # speech.
+        # Same steps and order as training's normalize_text (text_vocab.py), so the ids match.
         if _LANG_TAG_RE.search(text):
             text = strip_lang_tags_from_phoneme_string(text)
-        # NFD, not NFKD: NFKD folds modifier letters into plain ones (ʰ -> h,
-        # ʲ -> j, ʷ -> w) and '…' into '...'; training does neither.
+        # NFD, not NFKD: NFKD folds modifier letters (ʰ -> h); training does not.
         text = normalize("NFD", text.strip())
 
         # Last-resort net: G2P already strips these, but ``text_is_phonemes=True``
@@ -276,10 +269,8 @@ class UnicodeProcessor:
             "[": " ",
             "]": " ",
             "|": " ",
-            # BOS/EOS slots (ids 1 and 2): never valid mid-sequence.
-            "^": " ",
+            "^": " ",  # BOS/EOS slots
             "$": " ",
-            # Never in a training row (their embedding rows stay at init).
             "/": " ",
             "\\": " ",
             "#": " ",
@@ -329,7 +320,6 @@ class UnicodeProcessor:
         return text_mask
 
     def _encode(self, text: str, keep_tags: bool = False) -> np.ndarray:
-        # Strip the language tags before encoding unless the model reads them.
         if not keep_tags:
             text = _LANG_TAG_RE.sub("", text)
         if self._char_to_id is not None:
@@ -342,11 +332,7 @@ class UnicodeProcessor:
         return np.array(ids, dtype=np.int64)
 
     def __call__(
-        self,
-        text_list: list[str],
-        lang_list: list[str],
-        affricate_ligatures: bool = False,
-        lang_tags: bool = False,
+        self, text_list: list[str], lang_list: list[str], affricate_ligatures: bool = False, lang_tags: bool = False
     ) -> tuple[np.ndarray, np.ndarray]:
         text_list = [
             self._preprocess_text(t, lang, affricate_ligatures)
@@ -394,9 +380,7 @@ class TextToSpeech:
         self.base_chunk_size = cfgs["ae"]["base_chunk_size"]
         self.chunk_compress_factor = cfgs["ttl"]["chunk_compress_factor"]
         self.ldim = cfgs["ttl"]["latent_dim"]
-        # Text normalization the checkpoint was trained with (tts.json).
         self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
-        # Checkpoint trained on '<lang>' + text + '</lang>' ids (export records it in tts.json).
         self.lang_tags = bool(cfgs.get("lang_tags", False))
         self._u_text = u_text
         self._u_ref = u_ref
@@ -417,10 +401,7 @@ class TextToSpeech:
         expects the already de-normalized and decompressed ``latent_dim`` tensor and
         ships ``mean``/``std`` alongside in ``stats.npz``. Detect which from the
         graph's own input channel count rather than from the directory name.
-
-        For the bare decoder the latent's near-zero tail is dropped here, before
-        decoding (see :func:`latent_keep_frames`); the ``VocoderWithStats`` graph
-        does its own de-normalization, so its input is passed through whole.
+        The bare decoder's input also loses its near-zero tail (:func:`latent_keep_frames`).
         """
         if self._vocoder_in_channels != self.ldim:
             return xt
@@ -473,9 +454,7 @@ class TextToSpeech:
             len(text_list) == style.ttl.shape[0]
         ), "Number of texts must match number of style vectors"
         bsz = len(text_list)
-        text_ids, text_mask = self.text_processor(
-            text_list, lang_list, self.affricate_ligatures, self.lang_tags
-        )
+        text_ids, text_mask = self.text_processor(text_list, lang_list, self.affricate_ligatures, self.lang_tags)
         dur_onnx, *_ = self.dp_ort.run(
             None, {"text_ids": text_ids, "style_dp": style.dp, "text_mask": text_mask}
         )
@@ -855,9 +834,7 @@ def load_text_processor(onnx_dir: str = "") -> UnicodeProcessor:
     return UnicodeProcessor(os.path.join(os.path.dirname(__file__), "vocab.json"))
 
 
-def text_to_indices(
-    text: str, lang: str = "he", affricate_ligatures: bool = False, lang_tags: bool = False
-) -> list[int]:
+def text_to_indices(text: str, lang: str = "he", affricate_ligatures: bool = False, lang_tags: bool = False) -> list[int]:
     """Compatibility helper used by TRT: encode phoneme text with the bundled vocab."""
     global _TEXT_TO_INDICES_PROCESSOR
     if _TEXT_TO_INDICES_PROCESSOR is None:
@@ -967,13 +944,8 @@ def load_voice_style(voice_style_paths: list[str], verbose: bool = False) -> Sty
 
 
 def latent_keep_frames(z: np.ndarray) -> int:
-    """How many frames of one de-normalized, decompressed latent ``z`` [C, T] to decode.
-
-    Drops the trailing run of frames whose norm is under 0.3x the body's median.
-    Training targets were zero-padded to whole compressed frames, so the flow
-    model learned to end on near-zero codes, and the decoder, never trained past
-    a clip's edge, renders those as a loud burst.
-    """
+    """Frames of one decoder-space latent ``z`` [C, T] to decode: drops the trailing frames
+    under 0.3x the body's median norm, which the decoder renders as a loud burst."""
     norms = np.linalg.norm(np.asarray(z, dtype=np.float32), axis=0)
     body = np.sort(norms[: max(1, norms.size - 12)])
     median = body[(body.size - 1) // 2]  # lower median, like torch.median
@@ -984,16 +956,9 @@ def latent_keep_frames(z: np.ndarray) -> int:
 
 
 def clean_chunk_audio(wav: np.ndarray, sample_rate: int, duration: float) -> np.ndarray:
-    """Post-decode cleanup of one chunk: cut, edge fades, declick.
-
-    1. Cut to the duration predictor's length: the latent is whole frames, so up
-       to one frame (70 ms) of decode runs past the predicted end.
-    2. Cut a hot tail: if any 5 ms frame in the last 60 ms is 6 dB over the
-       chunk's own p90 level and no speech follows it, cut from there. This is
-       the decoder's end-of-latent burst; a final plosive with speech after it,
-       or a fricative (under the p90), is left alone.
-    3. 20 ms fades at both ends, then repair isolated impulses (<= 3 ms).
-    """
+    """Post-decode cleanup of one chunk: cut to the predicted duration, cut a hot tail
+    (a 5 ms frame in the last 60 ms 6 dB over the chunk's p90 with no speech after it),
+    20 ms edge fades, then repair isolated impulses."""
     wav = np.asarray(wav, dtype=np.float32).reshape(-1)
     n = int(float(duration) * sample_rate)
     if 0 < n < wav.shape[-1]:
@@ -1022,11 +987,8 @@ def clean_chunk_audio(wav: np.ndarray, sample_rate: int, duration: float) -> np.
 
 
 def _declick(w: np.ndarray, sr: int, factor: float = 8.0, max_width_ms: float = 3.0) -> np.ndarray:
-    """Repair isolated impulses (vocoder edge artifacts) by linear interpolation.
-
-    Flagged against the LOCAL 50 ms envelope, so a loud plosive, which sits in a
-    loud neighbourhood, is not touched; only bursts up to ``max_width_ms`` wide.
-    """
+    """Interpolate over impulses up to ``max_width_ms`` wide that stand out from the local
+    50 ms envelope (so a loud plosive is left alone)."""
     if w.size < sr // 10:
         return w
     a = np.abs(w)
@@ -1050,36 +1012,24 @@ def _declick(w: np.ndarray, sr: int, factor: float = 8.0, max_width_ms: float = 
     return w
 
 
-def limit_peak(
-    audio: np.ndarray, peak_limit: Optional[float] = 0.95, *, sample_rate: int = 44100
-) -> np.ndarray:
+def limit_peak(audio: np.ndarray, peak_limit: Optional[float] = 0.95, *, sample_rate: int = 44100) -> np.ndarray:
     """Keep ``max(|audio|) <= peak_limit``; ``None``/``0`` returns ``audio`` untouched.
 
-    The vocoder is not level-constrained and two causes push it over the
-    ceiling, which need opposite treatments:
-
-    - a burst (a click at a chunk join, an end-of-chunk explosion): at most
-      60 ms over ``0.99 * peak_limit`` in total, or under 0.1% of the samples.
-      Scaling the whole file for it would bury the speech, so everything above
-      ``0.9 * peak_limit`` is soft-limited into ``[0.9, 1.0] * peak_limit`` with
-      tanh, the level left alone.
-    - a hot render: anything wider. Here the whole render is scaled so its
-      peak is ``0.99 * peak_limit``.
-
-    Output whose peak is at most ``0.99 * peak_limit`` is returned untouched.
-    ``peak_limit=1.0`` guards full scale for a PCM WAV.
+    A burst (at most 60 ms, or under 0.1% of the samples, over ``0.99 * peak_limit``) is
+    tanh soft-limited above ``0.9 * peak_limit`` so the speech level is kept; a hot render
+    (anything wider) is scaled to a ``0.99 * peak_limit`` peak.
     """
     audio = np.asarray(audio, dtype=np.float32)
     if not peak_limit or audio.size == 0 or not np.isfinite(audio).all():
         return audio
     ceiling = float(peak_limit)
-    peak = float(np.max(np.abs(audio)))
+    a = np.abs(audio)
+    peak = float(a.max())
     if peak <= 0.99 * ceiling:
         return audio
-    over = np.abs(audio) > 0.99 * ceiling
-    if float(over.mean()) < 1e-3 or float(over.sum()) / sample_rate * 1000.0 <= 60.0:
+    over = a > 0.99 * ceiling
+    if over.mean() < 1e-3 or over.sum() / sample_rate * 1000.0 <= 60.0:
         knee = 0.90 * ceiling
-        a = np.abs(audio)
         hot = a > knee
         audio = audio.copy()
         audio[hot] = np.sign(audio[hot]) * (knee + (ceiling - knee) * np.tanh((a[hot] - knee) / (ceiling - knee)))
@@ -1144,9 +1094,8 @@ class BlueTTS:
         end takes arbitrary text, not curated strings. Pass
         ``normalize_text=False`` to synthesize exactly what you wrote.
 
-        Output is kept under ``peak_limit`` (short bursts soft-limited, a hot
-        render scaled), so writing it straight to a PCM WAV never clips (see
-        :func:`limit_peak`). Pass ``peak_limit=None`` for the raw vocoder output.
+        Output is kept under ``peak_limit`` (see :func:`limit_peak`), so a PCM WAV never
+        clips. Pass ``peak_limit=None`` for the raw vocoder output.
         """
         audio, _ = self.tts(
             text,

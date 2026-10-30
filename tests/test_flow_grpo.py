@@ -1,4 +1,4 @@
-"""FlowTTS-GRPO math (arXiv 2606.23190): SDE step, Gaussian log-prob, KL, advantages, clipped ratio."""
+"""FlowTTS-GRPO math (arXiv 2606.23190): SDE step, Gaussian log-prob, KL, advantages, clipped ratio (needs torch)."""
 
 from __future__ import annotations
 
@@ -7,18 +7,21 @@ import random
 import unittest
 
 import numpy as np
+import torch
 
-try:
-    import torch
-except ImportError:  # the inference install has no torch
-    torch = None
+from training.rl.flow_grpo import (
+    advantages,
+    gauss_logp,
+    gaussian_kl,
+    ppo_backward,
+    rollout,
+    sample_window,
+    sde_mean_std,
+)
 
 
-@unittest.skipIf(torch is None, "torch not installed")
 class TestFlowGRPO(unittest.TestCase):
     def test_sde_at_zero_noise_is_the_euler_step(self):
-        from training.rl.flow_grpo import sde_mean_std
-
         x, v = torch.randn(2, 6, 5), torch.randn(2, 6, 5)
         for k in range(4):
             mean, sd = sde_mean_std(x, v, k, 0.25, 0.0)
@@ -28,8 +31,6 @@ class TestFlowGRPO(unittest.TestCase):
     def test_sde_keeps_the_ode_marginals(self):
         # Eq. 7 with a = 0.5 on 1-D Gaussian data x1 ~ N(m, s^2), where E[v | x_t] is exact: the SDE ends at the
         # data distribution like the ODE; with the drift correction's sign flipped it does not.
-        from training.rl.flow_grpo import sde_mean_std
-
         m, s, n = 1.5, 0.5, 100
 
         def v_star(x, t):
@@ -53,8 +54,6 @@ class TestFlowGRPO(unittest.TestCase):
         self.assertGreater(run(0.5, flip=True)[1], 1.0)
 
     def test_logp_of_a_sampled_transition(self):
-        from training.rl.flow_grpo import gauss_logp
-
         mean, sd = torch.randn(3, 6, 8, dtype=torch.float64), 0.3
         x = mean + sd * torch.randn(3, 6, 8, dtype=torch.float64)
         mask = torch.ones(3, 1, 8, dtype=torch.float64)
@@ -64,8 +63,6 @@ class TestFlowGRPO(unittest.TestCase):
             self.assertAlmostEqual(gauss_logp(x, mean, sd, mask)[b].item(), ref[b, :, :L].mean().item(), places=10)
 
     def test_kl_closed_form_vs_monte_carlo(self):
-        from training.rl.flow_grpo import gaussian_kl
-
         g = torch.Generator().manual_seed(0)
         mu, sd = torch.randn(2, 4, 3, generator=g, dtype=torch.float64), 0.2
         mu_ref = mu + 0.1 * torch.randn(2, 4, 3, generator=g, dtype=torch.float64)
@@ -78,8 +75,6 @@ class TestFlowGRPO(unittest.TestCase):
                                torch.distributions.kl_divergence(p, q).mean().item(), places=10)
 
     def test_advantages(self):
-        from training.rl.flow_grpo import advantages
-
         rng = np.random.default_rng(0)
         sim, err, mos = rng.random((4, 8)), rng.random((4, 8)), 3 + rng.random((4, 8))
         err[2] = 0.3
@@ -97,16 +92,12 @@ class TestFlowGRPO(unittest.TestCase):
         self.assertTrue(np.all(np.argsort(a_err[0]) == np.argsort(-err[0])))
 
     def test_window(self):
-        from training.rl.flow_grpo import sample_window
-
         rng = random.Random(0)
         for _ in range(200):
             n, w = sample_window(rng, 5, 8, 1, 3, 2)
             self.assertTrue(5 <= n <= 8 and 1 <= w.start <= 3 and len(w) == 2 and w.stop <= n)
 
     def test_on_policy_ratio_is_one_and_clip_is_inert(self):
-        from training.rl.flow_grpo import ppo_backward, rollout
-
         class TinyVF(torch.nn.Module):
             def __init__(self):
                 super().__init__()
