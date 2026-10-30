@@ -249,9 +249,7 @@ class BlueTRT:
         self.base_chunk_size = int(ae.get("base_chunk_size", self.hop_length))
         self.sample_rate = int(ae.get("sample_rate", 44100))
         self.compressed_channels = self.latent_dim * self.chunk_compress_factor
-        # Text normalization the checkpoint was trained with (tts.json).
         self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
-        # Checkpoint trained on '<lang>' + text + '</lang>' ids (export records it in tts.json).
         self.lang_tags = bool(cfgs.get("lang_tags", False))
 
         self._ref_enc = load_engine(trt_dir, "reference_encoder.trt", required=False)
@@ -386,8 +384,7 @@ class BlueTRT:
         if z_ref is None and style_ttl is None:
             raise ValueError("Provide style_json with z_ref or style_ttl content.")
 
-        # The language only enters the ids when tagged; untagged, encode as before ("he"),
-        # so a language outside AVAILABLE_LANGS still works with phoneme input.
+        # Untagged ids do not depend on the language; "he" keeps any language valid.
         ids = text_to_indices(phonemes, lang if self.lang_tags else "he", self.affricate_ligatures, self.lang_tags)
         text_ids = torch.tensor([ids], dtype=torch.int64, device=self.device)
         text_mask = torch.ones(1, 1, text_ids.shape[1], dtype=torch.float32, device=self.device)
