@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import string
 
 # Ensure these local modules exist in your project structure
-from data.text_vocab import text_to_indices, VOCAB_LIST, normalize_text, lang_tag_ids, wrap_lang_tags
+from data.text_vocab import text_to_indices, VOCAB_LIST, normalize_text, wrap_lang_tags
 from data.audio_utils import ensure_sr
 
 # espeak language codes for non-Hebrew languages
@@ -39,7 +39,7 @@ class Text2LatentDataset(Dataset):
         max_text_len: int | None = None,
         default_lang: str = "he",         # Fallback language if CSV has no 'lang' column
         affricate_ligatures: bool = False,  # fold t͡s/tʃ/dʒ/dz into ʦ/ʧ/ʤ/ʣ (config key)
-        lang_tags: bool = False,          # wrap every row's ids as '<lang>' + ids + '</lang>'
+        lang_tags: bool = False,          # '<lang>' + ids + '</lang>' (config key)
     ):
         self.sample_rate = sample_rate
         self.hop_length = hop_length
@@ -165,11 +165,6 @@ class Text2LatentDataset(Dataset):
         # --- 5. Indexing ---
         # Map speaker_id -> indices for same-speaker references.
         self.speaker_to_indices = {k: v for k, v in self.df.groupby('speaker_id').indices.items()}
-        if self.lang_tags:
-            langs = sorted(self.df['lang'].astype(str).unique())
-            for lang in langs:
-                lang_tag_ids(lang)  # raises on a lang that is not a 2-3 letter code
-            print(f"[Dataset] lang_tags: ids wrapped as <lang>...</lang> for {langs}")
         print(f"[Dataset] Loaded {len(self.df)} samples across {len(self.speaker_to_indices)} speakers.")
 
     def _phonemize_with_espeak(self, mask):
