@@ -104,7 +104,7 @@ def main():
         "dilation_lst":     ae_enc_cfg.get("dilation_lst", [1] * int(ae_enc_cfg.get("num_layers", 10))),
         "odim":             int(ae_enc_cfg.get("odim", 24)),
         "idim":             int(ae_enc_cfg.get("idim", 1253)),
-        "pad_mode":         ae_enc_cfg.get("pad_mode", "zeros"),
+        "pad_mode": ae_enc_cfg.get("pad_mode", "zeros"),
     }
 
     latent_dim = int(ae_cfg["odim"] * compression_factor)
