@@ -83,9 +83,7 @@ _PHRASE_ROWS: list[tuple[str, str | None, str, list[str]]] = [
 ]
 
 
-def _phonemize_eval_with_espeak(
-    espeak_lang: str, label: str, lines: list[str], affricate_ligatures: bool = False
-) -> list[str]:
+def _phonemize_eval_with_espeak(espeak_lang: str, label: str, lines: list[str], affricate_ligatures: bool) -> list[str]:
     try:
         from phonemizer.backend import EspeakBackend
         from phonemizer.separator import Separator
@@ -96,16 +94,13 @@ def _phonemize_eval_with_espeak(
             with_stress=True,
             language_switch="remove-flags",
         )
-        return [
-            normalize_text(s, affricate_ligatures=affricate_ligatures)
-            for s in backend.phonemize(lines, separator=sep)
-        ]
+        return [normalize_text(s, affricate_ligatures=affricate_ligatures) for s in backend.phonemize(lines, separator=sep)]
     except Exception as e:  # noqa: BLE001
         print(f"[Inference] {label} phonemization failed: {e}")
         return []
 
 
-def build_periodic_eval_phrases(affricate_ligatures: bool = False) -> list[tuple[str, str, list[str]]]:
+def build_periodic_eval_phrases(affricate_ligatures: bool) -> list[tuple[str, str, list[str]]]:
     out: list[tuple[str, str, list[str]]] = []
     for lang, espeak, label, raw_lines in _PHRASE_ROWS:
         if espeak is None:
