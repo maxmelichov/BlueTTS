@@ -14,10 +14,7 @@ from training.utils import seed_worker
 
 class UncondParams(nn.Module):
     """Learnable unconditional tokens for CFG. Dims from ttl.uncond_masker config.
-
-    uncond_key (config: uncond_masker.style_key_uncond) adds u_key, the Supertonic-3 unconditional style-key
-    token: the VF style-attention keys of every row whose style is dropped (CFG both-drop and SPFM-dirty rows,
-    the SPFM probe and the CFG uncond pass). Off: those rows key on the conditional `tile`."""
+    uncond_key adds u_key, the VF style-attention keys of every style-dropped row."""
     def __init__(self, text_dim=256, n_style=50, style_value_dim=256, init_std=0.1, uncond_key=False, style_key_dim=256):
         super().__init__()
         self.u_text = nn.Parameter(torch.randn(1, text_dim, 1) * init_std)
@@ -119,10 +116,7 @@ class DistributedWeightedSampler(torch.utils.data.Sampler):
 
 
 def all_reduce_grads(params) -> None:
-    """Average gradients across ranks for parameters used outside a DDP forward.
-
-    u_text / u_ref (and u_key, when configured) are used as raw tensors (the DDP wrapper's
-    forward is never called), so DDP never all-reduces their gradients and each rank's copy drifts apart."""
+    """Average gradients across ranks for parameters DDP does not sync (used outside its forward)."""
     if not dist.is_initialized():
         return
     for p in params:
@@ -132,11 +126,7 @@ def all_reduce_grads(params) -> None:
 
 def build_lr_scheduler(optimizer, base_lr, milestones, global_step, scheduler_state=None, finetune=False):
     """MultiStepLR (gamma 0.5) positioned at ``global_step``; finetune restarts from ``base_lr``.
-
-    On resume the lr is pinned to the schedule's closed form. Resuming exactly at a milestone
-    otherwise halves twice: the loaded optimizer already holds the decayed lr and
-    MultiStepLR(last_epoch=step - 1) steps onto the milestone and halves it again; a fresh
-    optimizer (state not loaded) would restart at ``base_lr`` instead."""
+    On resume the lr is pinned to the closed form: at a milestone MultiStepLR would otherwise halve twice."""
     last_epoch = -1 if finetune else global_step - 1
     if last_epoch != -1:
         for pg in optimizer.param_groups:
@@ -152,7 +142,7 @@ def build_lr_scheduler(optimizer, base_lr, milestones, global_step, scheduler_st
         lr_now = base_lr * 0.5 ** sum(global_step >= m for m in milestones)
         for pg in optimizer.param_groups:
             pg['lr'] = lr_now
-        scheduler._last_lr = [lr_now for _ in optimizer.param_groups]
+        scheduler._last_lr = [lr_now] * len(optimizer.param_groups)
     return scheduler
 
 
