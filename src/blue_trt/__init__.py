@@ -249,7 +249,6 @@ class BlueTRT:
         self.base_chunk_size = int(ae.get("base_chunk_size", self.hop_length))
         self.sample_rate = int(ae.get("sample_rate", 44100))
         self.compressed_channels = self.latent_dim * self.chunk_compress_factor
-        # Text normalization the checkpoint was trained with (tts.json).
         self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
         # Checkpoint trained on '<lang>' + text + '</lang>' ids (export records it in tts.json).
         self.lang_tags = bool(cfgs.get("lang_tags", False))
