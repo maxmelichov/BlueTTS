@@ -383,18 +383,10 @@ def train(
         print(f"Dataset loaded with {len(dataset)} samples.")
 
     # Sampler Setup
-    # An optional `sample_weight` CSV column sets each row's draw probability (with replacement),
-    # on one GPU or several; without it, speaker-balanced (one GPU) or uniform (DDP) as before.
     if "sample_weight" in dataset.df.columns:
         w = dataset.df["sample_weight"].astype(float).fillna(0.0).values
-        assert (w >= 0).all() and w.sum() > 0, "sample_weight must be non-negative with a positive sum"
-        if rank == 0:
-            print(f"Sampler: sample_weight column, {len(w)} rows, {int((w > 0).sum())} with weight > 0")
         sampler = DistributedWeightedSampler(
-            torch.from_numpy(w).double(),
-            num_replicas=dist.get_world_size() if dist.is_initialized() else 1,
-            rank=rank,
-            seed=42,
+            torch.from_numpy(w).double(), num_replicas=dist.get_world_size() if dist.is_initialized() else 1, rank=rank
         )
     elif dist.is_initialized():
         sampler = DistributedSampler(dataset, shuffle=True)
