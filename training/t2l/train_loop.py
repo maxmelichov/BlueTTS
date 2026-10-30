@@ -19,7 +19,7 @@ from tqdm import tqdm
 from training.t2l.data_module import Text2LatentDataset, collate_text2latent
 from training.data.audio_utils import ensure_sr
 from training.data.text_vocab import normalize_text, text_to_indices_multilang
-from training.utils import compress_latents
+from training.utils import check_stats_provenance, compress_latents
 from training.t2l.builders import build_models
 from training.t2l.cfg_utils import (
     _latest_ckpt_in_dir,
@@ -258,6 +258,7 @@ def train(
             )
 
     ae_encoder.eval().requires_grad_(False)
+    print(check_stats_provenance(stats, ae_encoder.state_dict()))
     ae_decoder.eval().requires_grad_(False)
     mel_spec.eval()
 

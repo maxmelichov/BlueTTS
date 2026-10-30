@@ -13,7 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from data.text2latent_dataset import Text2LatentDataset, collate_text2latent
 from bluecodec import LatentEncoder
 from bluecodec.utils import LinearMelSpectrogram
-from training.utils import compress_latents
+from training.utils import compress_latents, encoder_fingerprint
 
 
 def main():
@@ -173,8 +173,11 @@ def main():
         for batch in tqdm(dataloader):
             wavs, lengths = batch[0].to(device), batch[3]
 
-            mel = mel_spec(wavs.squeeze(1))
-            z   = compress_latents(encoder(mel), factor=compression_factor)
+            # encode like the AE was trained: zero-pad to whole hop * Kc chunks, drop the STFT's extra frame
+            chunk = hop_length * compression_factor
+            wavs = torch.nn.functional.pad(wavs.squeeze(1), (0, (-wavs.shape[-1]) % chunk))
+            z = encoder(mel_spec(wavs))[..., : wavs.shape[-1] // hop_length]
+            z = compress_latents(z, factor=compression_factor)
             B, C, T_z = z.shape
 
             # Mask out padding frames based on original audio lengths
@@ -202,12 +205,17 @@ def main():
 
     print(f"Global mean: {mean.mean().item():.4f}, Global std: {std.mean().item():.4f}")
 
+    # the trainers refuse stats whose encoder fingerprint does not match their AE
+    provenance = {"enc_sha256": encoder_fingerprint(encoder.state_dict())}
+    print(f"Encoder fingerprint: {provenance['enc_sha256'][:12]}")
+
     torch.save(
         {
             "mean":      mean.cpu(),
             "std":       std.cpu(),
             "Kc":        compression_factor,
             "latent_dim": latent_dim,
+            "provenance": provenance,
         },
         output_path,
     )

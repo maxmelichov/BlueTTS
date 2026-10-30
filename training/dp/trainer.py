@@ -9,7 +9,7 @@ from tqdm import tqdm
 from training.dp.data_module import get_dp_dataloader
 from training.dp.models.dp_network import DPNetwork
 from training.data.text_vocab import VOCAB_SIZE
-from training.utils import LinearMelSpectrogram, compress_latents
+from training.utils import LinearMelSpectrogram, check_stats_provenance, compress_latents
 from bluecodec import LatentEncoder
 
 
@@ -147,6 +147,7 @@ def train_duration_predictor(
         std = stats["std"].to(device).view(1, -1, 1)
     if mean.shape[1] != compressed_channels:
         print(f"Warning: stats channels ({mean.shape[1]}) != expected compressed_channels ({compressed_channels}).")
+    print(check_stats_provenance(stats, ae_encoder.state_dict()))
         
     global_step = 0
     mean_loss = 0.0
