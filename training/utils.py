@@ -1,3 +1,4 @@
+import hashlib
 import random
 
 import numpy as np
@@ -31,8 +32,8 @@ def compress_latents(z: torch.Tensor, factor: int = 6) -> torch.Tensor:
     B, C, T = z.shape
     if T % factor != 0:
         pad = factor - (T % factor)
-        # Repeat the last frame: a zero frame is a latent the decoder never saw in training.
-        z = torch.cat([z, z[:, :, -1:].expand(-1, -1, pad)], dim=2)
+        # repeat the last frame: a zero frame is a latent the decoder never saw in training
+        z = torch.nn.functional.pad(z, (0, pad), mode="replicate")
         T = T + pad
     return z.view(B, C, T // factor, factor).permute(0, 1, 3, 2).flatten(1, 2)
 
@@ -43,30 +44,19 @@ def decompress_latents(z: torch.Tensor, factor: int = 6, target_channels: int = 
 
 
 def encoder_fingerprint(encoder_state: dict) -> str:
-    """sha256 over an AE encoder state_dict, BatchNorm running stats included.
-
-    Latent stats depend on the encoder alone, so this is their identity; a checkpoint's md5 also
-    changes with the decoder or optimizer state. Keys in sorted order, tensors as float32 CPU bytes.
-    """
-    import hashlib
+    """sha256 over an AE encoder state_dict (BatchNorm buffers included): the identity of its latent stats."""
     h = hashlib.sha256()
     for k in sorted(encoder_state):
-        v = encoder_state[k]
+        t = encoder_state[k].detach().cpu()
+        t = t.float() if t.is_floating_point() else t.long()
         h.update(k.encode())
-        if torch.is_tensor(v):
-            t = v.detach().to("cpu")
-            t = t.float() if t.is_floating_point() else t.long()
-            h.update(str(tuple(t.shape)).encode())
-            h.update(t.contiguous().numpy().tobytes())
+        h.update(str(tuple(t.shape)).encode())
+        h.update(t.contiguous().numpy().tobytes())
     return h.hexdigest()
 
 
 def check_stats_provenance(stats: dict, encoder_state: dict) -> str:
-    """Refuse latent stats measured with a different AE encoder.
-
-    A checkpoint is only valid against the stats it was normalised with, and the stats only
-    against the encoder that produced them. Stats files without provenance can only be warned about.
-    """
+    """Refuse latent stats measured with a different AE encoder; warn when the file has no fingerprint."""
     prov = stats.get("provenance") or {}
     if "enc_sha256" not in prov:
         return "[stats] WARNING: no encoder fingerprint in the stats file; cannot check it matches this AE"

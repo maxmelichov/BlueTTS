@@ -43,8 +43,7 @@ class Mish(nn.Module):
         return x * torch.tanh(F.softplus(x))
 
 
-# Supertonic-3 vector_estimator.onnx time-encoder frequencies (float32, exact). exp(-i * ln(1e4) / 31) lands
-# 1 ulp off on some entries, and on a device-dependent set, so the 64M model uses the shipped table.
+# Supertonic-3 time-encoder frequencies (exact float32); the exp() formula is 1 ulp off on some entries.
 SUPERTONIC3_TIME_FREQS = tuple(float.fromhex(h) for h in (
     '0x1.0000000000000p+0', '0x1.7c65c40000000p-1', '0x1.1a9f260000000p-1', '0x1.a3f4960000000p-2',
     '0x1.3803000000000p-2', '0x1.cfa0800000000p-3', '0x1.5875460000000p-3', '0x1.ffd7020000000p-4',
@@ -61,8 +60,6 @@ class SinusoidalPosEmb(nn.Module):
         super().__init__()
         self.dim = dim
         self.scale = scale
-        if supertonic3_freqs and dim // 2 != len(SUPERTONIC3_TIME_FREQS):
-            raise ValueError(f"the Supertonic-3 time table has {len(SUPERTONIC3_TIME_FREQS)} frequencies; time_dim {dim} needs {dim // 2}")
         # non-persistent: state_dict keys are unchanged
         self.register_buffer("freqs", torch.tensor(SUPERTONIC3_TIME_FREQS, dtype=torch.float32)
                              if supertonic3_freqs else None, persistent=False)
@@ -430,33 +427,27 @@ class VectorFieldEstimator(nn.Module):
         c1_cfg = mb_cfg.get("convnext_1", {})
         c2_cfg = mb_cfg.get("convnext_2", {})
 
-        def expansion(c):
-            # config: <stack>.intermediate_dim (1024 = 2x hidden; the 64M VF uses 2048 = 4x).
-            inter = c.get("intermediate_dim", 2 * hidden_channels)
-            if inter % hidden_channels:
-                raise ValueError(f"ConvNeXt intermediate_dim {inter} is not a multiple of hidden {hidden_channels}")
-            return inter // hidden_channels
+        def expansion(c):  # config: intermediate_dim
+            return c.get("intermediate_dim", 2 * hidden_channels) // hidden_channels
 
         for _ in range(num_superblocks):
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c0_cfg.get("ksz", 5), dilations=c0_cfg.get("dilation_lst", [1, 2, 4, 8]),
-                              expansion=expansion(c0_cfg), layer_scale_init=layer_scale_init,
-                              edge_fill=edge_fill)
+                              expansion=expansion(c0_cfg), layer_scale_init=layer_scale_init, edge_fill=edge_fill)
             )
             self.main_blocks.append(
                 TimeCondBlock(time_dim=time_embed_dim, channels=hidden_channels)
             )
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c1_cfg.get("ksz", 5), dilations=c1_cfg.get("dilation_lst", [1]),
-                              expansion=expansion(c1_cfg), layer_scale_init=layer_scale_init,
-                              edge_fill=edge_fill)
+                              expansion=expansion(c1_cfg), layer_scale_init=layer_scale_init, edge_fill=edge_fill)
             )
             self.main_blocks.append(
                 CrossAttentionBlock(
                     d_model=hidden_channels,
                     d_context=text_dim,
                     num_heads=text_n_heads,
-                    attn_dim=text_n_units,  # 64M: 8 heads x 64 = 512; the scale stays sqrt(256)
+                    attn_dim=text_n_units,  # the scale stays sqrt(256)
                     use_rope=True,
                     rope_gamma=self.rope_gamma,
                     attn_scale=shared_attn_scale,
@@ -466,8 +457,7 @@ class VectorFieldEstimator(nn.Module):
             )
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c2_cfg.get("ksz", 5), dilations=c2_cfg.get("dilation_lst", [1]),
-                              expansion=expansion(c2_cfg), layer_scale_init=layer_scale_init,
-                              edge_fill=edge_fill)
+                              expansion=expansion(c2_cfg), layer_scale_init=layer_scale_init, edge_fill=edge_fill)
             )
             self.main_blocks.append(
                 CrossAttentionBlock(
@@ -511,8 +501,7 @@ class VectorFieldEstimator(nn.Module):
         total_step: Optional[torch.Tensor] = None,
         style_keys: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """style_keys [B, n_style, style_dim]: style-attention keys; None = the shared `tile` (the conditional
-        keys). The unconditional pass of the Supertonic-3 layout keys on the learned u_key instead."""
+        """style_keys: style-attention keys [B, n_style, style_dim]; None = `tile`."""
         B = noisy_latent.shape[0]
 
         if total_step is not None:

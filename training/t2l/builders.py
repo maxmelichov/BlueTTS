@@ -37,7 +37,6 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
     spte_style_dim = spte_cfg.get("style_dim", 256)
     spte_n_units = spte_cfg.get("n_units", 256)
     spte_n_style = se_n_style
-    # "projected" = Supertonic-3 layout: tanh(W_key(style_key)) per layer from one style_key, tied to the VF tile
     spte_key_mode = spte_cfg.get("style_key_mode", "baked")
 
     um_cfg = ttl_cfg["uncond_masker"]
@@ -70,14 +69,11 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
     se_dilation_lst = se_cfg["convnext"].get("dilation_lst", [1] * se_num_blocks)
 
     vf_main_blocks_cfg = vf_cfg.get("main_blocks", {})
-
-    # ConvNeXt layer-scale (gamma) init for TE, reference encoder and VF. 1e-6 is the ConvNeXt default; the 64M
-    # layout uses 0.1, since with Adam a 1e-6 gamma can stay near zero and leave a whole block unused.
-    layer_scale_init = ttl_cfg.get("layer_scale_init", 1e-6)
-    # Padded rows take their own last valid column inside every ConvNeXt, so each row of a padded batch
-    # computes what it computes alone (B=1 inference). A no-op on an all-ones mask.
-    edge_fill = ttl_cfg.get("edge_fill", False)
     vf_last_convnext_cfg = vf_cfg.get("last_convnext", {})
+    # ConvNeXt gamma init; with Adam a 1e-6 gamma can stay near zero and leave a block unused
+    layer_scale_init = ttl_cfg.get("layer_scale_init", 1e-6)
+    # padded rows compute what they compute alone (B=1 inference)
+    edge_fill = ttl_cfg.get("edge_fill", False)
 
     ae_enc_arch = ae_cfg_json['encoder']
     ae_spec_cfg = ae_enc_arch.get('spec_processor', {})
@@ -152,7 +148,7 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         edge_fill=edge_fill,
     ).to(device)
     if spte_key_mode == "projected":
-        # One Parameter is both the text encoder's style_key and the VF's `tile`; each state_dict keeps its own key.
+        # one Parameter; each state_dict keeps its own key
         vf_estimator.tile = text_encoder.speech_prompted_text_encoder.style_key
 
     uncond_params = UncondParams(
