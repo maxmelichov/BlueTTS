@@ -235,8 +235,6 @@ class StyleAttentionLayer(nn.Module):
                  key_mode: str = "baked"):
         super().__init__()
         assert n_units % num_heads == 0
-        if key_mode not in ("baked", "projected"):
-            raise ValueError(f"style_key_mode must be 'baked' or 'projected', got {key_mode!r}")
         self.num_heads = num_heads
         self.dim = n_units
         self.head_dim = n_units // num_heads
@@ -300,13 +298,8 @@ class StyleAttention(nn.Module):
     def __init__(self, text_dim: int, style_dim: int, n_units: int, num_heads: int = 2, num_style_tokens: int = 50,
                  key_mode: str = "baked"):
         super().__init__()
-        # key_mode "baked": attention1 / attention2 each own a baked key constant.
-        # key_mode "projected" (Supertonic-3 layout): one shared style-key bank, projected by each layer's W_key;
-        # the builder ties it to the vector field's `tile`, so both models key on the same tensor.
-        if key_mode == "projected":
-            self.style_key = nn.Parameter(torch.randn(1, num_style_tokens, style_dim) * 0.02)
-        else:
-            self.style_key = None
+        # "baked": each layer owns a key constant; "projected": one style_key (tied to the VF tile) for both layers
+        self.style_key = nn.Parameter(torch.randn(1, num_style_tokens, style_dim) * 0.02) if key_mode == "projected" else None
         self.attention1 = StyleAttentionLayer(text_dim, style_dim, n_units, num_heads, num_style_tokens, key_mode)
         self.attention2 = StyleAttentionLayer(text_dim, style_dim, n_units, num_heads, num_style_tokens, key_mode)
         self.norm = StyleNorm(text_dim)
