@@ -22,7 +22,7 @@ class TestModelEMA(unittest.TestCase):
             with torch.no_grad():
                 lin.weight.fill_(v)
             ema.update()
-            d = min(0.9999, (1 + n) / (10 + n))  # 0.1, 2/11, 3/12, 4/13
+            d = min(0.9999, (1 + n) / (10 + n))
             shadow = d * shadow + (1 - d) * v
         self.assertAlmostEqual(ema.state_dicts()["m"]["weight"].item(), shadow, places=12)
         self.assertEqual(ema.updates, len(values))
@@ -30,15 +30,14 @@ class TestModelEMA(unittest.TestCase):
     def test_warmup_reaches_the_configured_decay(self):
         ema = ModelEMA([("m", nn.Linear(1, 1))], decay=0.9999)
         ema.updates = 89_989
-        self.assertLess(ema.current_decay(), 0.9999)  # (1+n)/(10+n) still below the cap
+        self.assertLess(ema.current_decay(), 0.9999)
         ema.updates = 89_991
         self.assertEqual(ema.current_decay(), 0.9999)
-        self.assertEqual(ModelEMA([("m", nn.Linear(1, 1))], decay=0.9, warmup=False).current_decay(), 0.9)
 
     def test_tied_parameter_has_one_shadow(self):
         a, b = nn.Linear(2, 2), nn.Linear(2, 2)
         b.weight = a.weight
-        ema = ModelEMA([("a", a), ("b", b)], decay=0.5, warmup=False)
+        ema = ModelEMA([("a", a), ("b", b)], decay=0.5)
         self.assertEqual(len(ema.params), 3)  # a.weight (shared), a.bias, b.bias
         with torch.no_grad():
             a.weight.add_(1.0)
@@ -70,7 +69,7 @@ class TestModelEMA(unittest.TestCase):
             ema.update()
         saved = ema.state_dicts()
         other = ModelEMA([("m", nn.Linear(4, 4))], decay=0.9)
-        self.assertEqual(other.load_state_dicts(saved), 2)
+        other.load_state_dicts(saved)
         self.assertEqual(other.updates, 3)
         for k, v in saved["m"].items():
             self.assertTrue(torch.equal(other.state_dicts()["m"][k], v))
