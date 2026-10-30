@@ -26,6 +26,8 @@ class TestVFConfig(unittest.TestCase):
         wide = self._vf(main_blocks_cfg=cfg, last_convnext_cfg={"intermediate_dim": 128})
         for stack in (wide.main_blocks[0], wide.main_blocks[2], wide.main_blocks[4], wide.last_convnext):
             self.assertEqual(stack.convnext[0].pwconv1.out_channels, 128)
+        with self.assertRaises(ValueError):
+            self._vf(main_blocks_cfg={"convnext_0": {"intermediate_dim": 100}})
 
     def test_text_attention_units(self):
         vf = self._vf(text_n_heads=8, text_n_units=512)
