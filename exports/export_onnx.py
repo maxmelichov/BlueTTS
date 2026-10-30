@@ -8,6 +8,7 @@ Produces (in --onnx_dir):
   - duration_predictor.onnx (style-conditioned: takes style_dp from the voice JSON)
 """
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -387,6 +388,14 @@ def main():
     u_key = t2l.get("u_key")
     print(f"[INFO] baking uncond: u_text {tuple(u_text.shape)}, u_ref {tuple(u_ref.shape)}"
           + (f", u_key {tuple(u_key.shape)}" if u_key is not None else ""))
+
+    # A checkpoint trained on <lang>...</lang> ids must be fed them: record it in the bundle's tts.json.
+    lang_tags = bool(t2l.get("lang_tags") or cfg["lang_tags"])
+    if lang_tags and not cfg["lang_tags"]:
+        with open(os.path.join(args.onnx_dir, "tts.json"), "w") as f:
+            json.dump({**cfg["full_config"], "lang_tags": True}, f, indent=4)
+    if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(args.dp_ckpt)), "LANG_TAGS")) != lang_tags:
+        print(f"[WARN] lang_tags={lang_tags} but the duration predictor was trained the other way (LANG_TAGS marker).")
 
     stats = _load_state(args.stats)
     mean = stats["mean"].to(torch.float32)
