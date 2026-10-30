@@ -31,8 +31,8 @@ def compress_latents(z: torch.Tensor, factor: int = 6) -> torch.Tensor:
     B, C, T = z.shape
     if T % factor != 0:
         pad = factor - (T % factor)
-        # Repeat the last frame: a zero frame is a latent the decoder never saw in training.
-        z = torch.cat([z, z[:, :, -1:].expand(-1, -1, pad)], dim=2)
+        # repeat the last frame: a zero frame is a latent the decoder never saw in training
+        z = torch.nn.functional.pad(z, (0, pad), mode="replicate")
         T = T + pad
     return z.view(B, C, T // factor, factor).permute(0, 1, 3, 2).flatten(1, 2)
 
