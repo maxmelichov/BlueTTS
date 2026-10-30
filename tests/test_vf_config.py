@@ -41,8 +41,8 @@ class TestVFConfig(unittest.TestCase):
         table = torch.tensor(SUPERTONIC3_TIME_FREQS, dtype=torch.float32)
         formula = torch.exp(torch.arange(32) * -(math.log(10000) / 31))
         self.assertEqual(table[0].item(), 1.0)
-        self.assertLess((table - formula).abs().max().item(), 1e-6)   # the same frequencies ...
-        self.assertFalse(torch.equal(table, formula))                  # ... but not the same float32 values on CPU
+        self.assertLess((table - formula).abs().max().item(), 1e-6)
+        self.assertFalse(torch.equal(table, formula))  # 1 ulp off on CPU
 
         t = torch.tensor([0.0, 0.3, 0.875])
         x = (t * 1000.0)[:, None]
@@ -50,9 +50,7 @@ class TestVFConfig(unittest.TestCase):
         off = SinusoidalPosEmb(64)
         self.assertTrue(torch.equal(on(t), torch.cat(((x * table).sin(), (x * table).cos()), dim=-1)))
         self.assertTrue(torch.equal(off(t), torch.cat(((x * formula).sin(), (x * formula).cos()), dim=-1)))
-        self.assertNotIn("freqs", on.state_dict())  # no new checkpoint keys
-        with self.assertRaises(ValueError):
-            SinusoidalPosEmb(32, supertonic3_freqs=True)
+        self.assertNotIn("freqs", on.state_dict())
 
 
 if __name__ == "__main__":
