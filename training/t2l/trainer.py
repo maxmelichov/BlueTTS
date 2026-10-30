@@ -44,7 +44,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    set_seed(42 + int(os.environ.get("RANK", "0")))  # per rank: one seed gave every rank the same t / noise draws
+    set_seed(42 + int(os.environ.get("RANK", "0")))  # per rank: else every rank draws the same t / noise
     train(
         finetune=args.finetune,
         config_path=args.config,
