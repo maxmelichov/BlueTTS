@@ -2,9 +2,8 @@
 
 **Checkpoint compatibility.** This loads whatever checkpoint you point it at, and
 architecture drift between generations is silent unless caught: the
-``ConvNeXtStack`` width comes from the config's ``intermediate_dim``
-(``2 * hidden`` in ``config/tts.json``, ``4 * hidden`` in the 64M
-``config/tts_st3.json``). A checkpoint loaded with the wrong config fails in
+``ConvNeXtStack`` width comes from the config's ``intermediate_dim``. A
+checkpoint loaded with the wrong config fails in
 :func:`_load_into` with a shape mismatch — that is the intended outcome, not a
 bug to work around. ``pt_models/checkpoints/text2latent/ckpt_step_767000.pt`` is
 one such stale checkpoint; use a current one that matches its config.

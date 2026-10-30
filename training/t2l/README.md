@@ -36,11 +36,8 @@ The `configs/tts.json` has several settings:
 - `flow_matching.sig_min`: The minimum noise scale for Flow Matching.
 - `batch_expander.n_batch_expand`: The $K_e$ factor. 
 
-`config/tts_st3.json` is the 64M layout (the Supertonic-3 `ttl` shapes): vector-field ConvNeXt
-`intermediate_dim` 2048, text attention `n_units` 512 over 8 heads, text-encoder dilations
-`[1, 1, 2, 2, 4, 4]`, `sig_min` 1e-8, no attention dropout and the Supertonic-3 time-encoder frequency
-table (`time_encoder.supertonic3_freqs`). Pass it with `--config` to train
-or export that model; `config/tts.json` stays the 33M model.
+`config/tts_st3.json` is the 64M (Supertonic-3) layout; pass it with `--config` to train or export
+that model. `config/tts.json` stays the 33M model.
 
 ## Healthy Loss Curve
 A healthy Flow Matching training loss curve will start high and exponentially decay, flattening out over time. If using SPFM, you will see it drop further when fine-tuning kicks in.
