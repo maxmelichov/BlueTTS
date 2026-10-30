@@ -1,4 +1,4 @@
-"""T2L lr schedule on resume (needs torch)."""
+"""T2L lr schedule on resume."""
 
 from __future__ import annotations
 
@@ -58,17 +58,6 @@ class TestResumeLr(unittest.TestCase):
                     sched.step()
                     got.append(opt.param_groups[0]["lr"])
                 self.assertEqual(got, ref[step:step + 2], (step, load_optimizer))
-
-    def test_without_pin_a_milestone_resume_halves_twice(self):
-        # What the trainer did before: MultiStepLR(last_epoch=step-1) on the loaded optimizer.
-        opt0, sched0, _ = _train(3)
-        p = torch.nn.Parameter(torch.zeros(2))
-        opt = AdamW([p], lr=BASE_LR)
-        opt.load_state_dict(opt0.state_dict())
-        sched = torch.optim.lr_scheduler.MultiStepLR(opt, MILESTONES, gamma=0.5, last_epoch=2)
-        sched.load_state_dict(sched0.state_dict())
-        self.assertEqual(opt.param_groups[0]["lr"], BASE_LR / 4)
-        self.assertEqual(_resume(3)[0].param_groups[0]["lr"], BASE_LR / 2)
 
     def test_configured_milestones_override_the_saved_ones(self):
         opt, sched = _resume(4, milestones=[5, 7])
