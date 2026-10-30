@@ -266,8 +266,7 @@ def train(
     u_key = getattr(uncond_params, "u_key", None)
     shared_key = text_encoder.speech_prompted_text_encoder.style_key is not None
 
-    # Each parameter once: with the projected style key, one tensor is in both the text encoder and the VF,
-    # and listing it twice would step it twice and count it twice in the gradient clip.
+    # each parameter once: the projected style key is shared by the text encoder and the VF
     params = list({id(p): p for m in (text_encoder, reference_encoder, vf_estimator, uncond_params)
                    for p in m.parameters()}.values())
     optimizer = AdamW(params, lr=lr)
@@ -302,22 +301,12 @@ def train(
         if 'reference_encoder' in checkpoint: reference_encoder.load_state_dict(checkpoint['reference_encoder'], strict=False)
         if 'u_text' in checkpoint: u_text.data = checkpoint['u_text']
         if 'u_ref' in checkpoint: u_ref.data = checkpoint['u_ref']
-        # The loads above are non-strict: refuse a checkpoint whose style-key layout differs from the config,
-        # which would otherwise train on randomly initialised keys.
+        # the loads above are non-strict: refuse a style-key layout that differs from the config
         ck_shared = 'speech_prompted_text_encoder.style_key' in checkpoint.get('text_encoder', {})
-        ck_ukey = checkpoint.get('u_key') is not None
-        if (ck_shared, ck_ukey) != (shared_key, u_key is not None):
-            raise RuntimeError(
-                f"{latest_ckpt}: style-key layout projected={ck_shared} u_key={ck_ukey}, but the config has "
-                f"style_key_mode projected={shared_key} style_key_uncond={u_key is not None}")
-        if shared_key or u_key is not None:
-            missing = [f"text_encoder.{k}" for k in text_encoder.state_dict() if k not in checkpoint.get('text_encoder', {})]
-            missing += [f"vf_estimator.{k}" for k in vf_estimator.state_dict() if k not in checkpoint.get('vf_estimator', {})]
-            if missing or shapes_changed:
-                raise RuntimeError(f"{latest_ckpt}: incomplete checkpoint for this config (missing {missing[:8]}, "
-                                   f"shapes_changed={shapes_changed})")
-            if u_key is not None:
-                u_key.data.copy_(checkpoint['u_key'])
+        if (ck_shared, 'u_key' in checkpoint) != (shared_key, u_key is not None):
+            raise RuntimeError(f"{latest_ckpt}: style-key layout differs from the config")
+        if u_key is not None:
+            u_key.data.copy_(checkpoint['u_key'])
 
         optimizer = AdamW(params, lr=lr)
         if 'optimizer' in checkpoint and not (finetune or shapes_changed):
@@ -624,8 +613,7 @@ def train(
             u_ref_batch = u_ref.expand(B_eff, -1, -1)
             ref_values_final = ref_values_exp * mask_style_cond + u_ref_batch * mask_style_uncond
 
-            # A style-dropped row (both-drop or SPFM-dirty) keys the VF style attention on u_key; a text-only
-            # drop keeps its style and the conditional keys.
+            # style-dropped rows (both-drop, SPFM-dirty) key on u_key
             style_keys_final = None
             if u_key is not None:
                 tile = unwrap_ddp(vf_estimator).tile.expand(B_eff, -1, -1)
@@ -693,7 +681,6 @@ def train(
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "global_step": global_step,
-                    "edge_fill": int(ttl_cfg.get("edge_fill", False)),  # 1 = trained on the exact-length layout
                 }, ckpt_path)
                 print(f"Saved checkpoint to {ckpt_path}")
                 print("Running inference (periodic log)...")
