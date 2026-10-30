@@ -1,12 +1,16 @@
-"""GRPO ASR reward: word normalisation and the capped edit-distance error rate (needs torch)."""
+"""GRPO ASR reward: word normalisation and the capped edit-distance error rate."""
 
 from __future__ import annotations
 
 import unittest
 
-from training.rl.rewards import error_rate, words
+try:
+    from training.rl.rewards import error_rate, words
+except ImportError:  # the inference install has no torch
+    error_rate = None
 
 
+@unittest.skipIf(error_rate is None, "torch not installed")
 class TestRewards(unittest.TestCase):
     def test_error_rate(self):
         self.assertEqual(error_rate("a b c".split(), "a b c".split()), 0.0)
