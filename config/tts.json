@@ -44,6 +44,12 @@
         "flow_matching": {
             "sig_min": 0
         },
+        "rsf": {
+            "enabled": false,
+            "start_step": 200000,
+            "lambda_rand": 0.2,
+            "lambda_aug": 0.2
+        },
         "style_encoder": {
             "proj_in": {
                 "ldim": 24,
