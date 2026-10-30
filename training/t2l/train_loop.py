@@ -178,8 +178,7 @@ def train(
     normalizer_scale = ttl_cfg["normalizer"]["scale"]
     sigma_min = ttl_cfg["flow_matching"]["sig_min"]
 
-    # ttl.train (optional): AdamW weight decay (torch default 0.01; RobustSpeechFlow Sec. 4.3 uses 0)
-    # and the steps at which the lr is halved.
+    # ttl.train (optional): AdamW weight decay and the steps at which the lr is halved
     train_cfg = ttl_cfg.get("train", {})
     weight_decay = float(train_cfg.get("weight_decay", 0.01))
     lr_milestones = [int(m) for m in train_cfg.get("lr_milestones", [300_000, 600_000])]
@@ -278,11 +277,10 @@ def train(
     u_text, u_ref = uncond_params.u_text, uncond_params.u_ref
     u_key = getattr(uncond_params, "u_key", None)
     shared_key = text_encoder.speech_prompted_text_encoder.style_key is not None
-    # Used as raw tensors outside any DDP forward: their gradients are averaged across ranks by hand.
+    # used outside any DDP forward: gradients averaged across ranks by hand
     uncond_tokens = [p for p in (u_text, u_ref, u_key) if p is not None]
 
-    # Each parameter once: with the projected style key, one tensor is in both the text encoder and the VF,
-    # and listing it twice would step it twice and count it twice in the gradient clip.
+    # each parameter once: the projected style key is shared by the text encoder and the VF
     params = list({id(p): p for m in (text_encoder, reference_encoder, vf_estimator, uncond_params)
                    for p in m.parameters()}.values())
     optimizer = AdamW(params, lr=lr, weight_decay=weight_decay)
@@ -317,22 +315,17 @@ def train(
         if 'reference_encoder' in checkpoint: reference_encoder.load_state_dict(checkpoint['reference_encoder'], strict=False)
         if 'u_text' in checkpoint: u_text.data = checkpoint['u_text']
         if 'u_ref' in checkpoint: u_ref.data = checkpoint['u_ref']
-        # The loads above are non-strict: refuse a checkpoint whose style-key layout differs from the config,
-        # which would otherwise train on randomly initialised keys.
+        # the loads above are non-strict: refuse a style-key layout that differs from the config
         ck_shared = 'speech_prompted_text_encoder.style_key' in checkpoint.get('text_encoder', {})
-        ck_ukey = checkpoint.get('u_key') is not None
-        if (ck_shared, ck_ukey) != (shared_key, u_key is not None):
-            raise RuntimeError(
-                f"{latest_ckpt}: style-key layout projected={ck_shared} u_key={ck_ukey}, but the config has "
-                f"style_key_mode projected={shared_key} style_key_uncond={u_key is not None}")
-        if shared_key or u_key is not None:
-            missing = [f"text_encoder.{k}" for k in text_encoder.state_dict() if k not in checkpoint.get('text_encoder', {})]
-            missing += [f"vf_estimator.{k}" for k in vf_estimator.state_dict() if k not in checkpoint.get('vf_estimator', {})]
-            if missing or shapes_changed:
-                raise RuntimeError(f"{latest_ckpt}: incomplete checkpoint for this config (missing {missing[:8]}, "
-                                   f"shapes_changed={shapes_changed})")
-            if u_key is not None:
-                u_key.data.copy_(checkpoint['u_key'])
+        if (ck_shared, 'u_key' in checkpoint) != (shared_key, u_key is not None):
+            raise RuntimeError(f"{latest_ckpt}: style-key layout differs from the config")
+        missing = [k for m, n in ((text_encoder, 'text_encoder'), (vf_estimator, 'vf_estimator'))
+                   for k in m.state_dict() if k not in checkpoint.get(n, {})]
+        if (shared_key or u_key is not None) and (missing or shapes_changed):
+            raise RuntimeError(f"{latest_ckpt}: incomplete checkpoint for this config (missing {missing[:8]}, "
+                               f"shapes_changed={shapes_changed})")
+        if u_key is not None:
+            u_key.data.copy_(checkpoint['u_key'])
 
         optimizer = AdamW(params, lr=lr, weight_decay=weight_decay)
         if 'optimizer' in checkpoint and not (finetune or shapes_changed):
@@ -533,8 +526,7 @@ def train(
             B = wavs.shape[0]
 
             with torch.no_grad():
-                # Zero-pad to a multiple of hop * chunk_compress_factor (3072 samples), the layout the AE
-                # and inference use: a row's valid frames, ceil(len / 3072), are its audio plus zeros.
+                # zero-pad to whole hop * chunk_compress_factor chunks, the layout the AE and inference use
                 chunk = hop_length * chunk_compress_factor
                 wavs = F.pad(wavs, (0, (-wavs.shape[-1]) % chunk))
                 ref_wavs = F.pad(ref_wavs, (0, (-ref_wavs.shape[-1]) % chunk))
@@ -551,9 +543,7 @@ def train(
             _, C, T = z_1.shape
             valid_mel_len = lengths.to(device).float() / hop_length
             valid_z_len = (valid_mel_len / chunk_compress_factor).ceil().long().clamp(min=1, max=T)
-            # End the batch at the longest row's last valid frame. The centred STFT adds a frame past the
-            # padded audio, so T is one longer and every row would end in a masked frame; inference has
-            # none, its latent length is exactly ceil(len / 3072).
+            # drop the centred STFT's extra frame: inference has no masked frame after the longest row
             T = int(valid_z_len.max())
             z_1 = z_1[:, :, :T]
 
@@ -660,8 +650,7 @@ def train(
             u_ref_batch = u_ref.expand(B_eff, -1, -1)
             ref_values_final = ref_values_exp * mask_style_cond + u_ref_batch * mask_style_uncond
 
-            # A style-dropped row (both-drop or SPFM-dirty) keys the VF style attention on u_key; a text-only
-            # drop keeps its style and the conditional keys.
+            # style-dropped rows (both-drop, SPFM-dirty) key on u_key
             style_keys_final = None
             if u_key is not None:
                 tile = unwrap_ddp(vf_estimator).tile.expand(B_eff, -1, -1)
@@ -720,8 +709,7 @@ def train(
                 postfix["mode"] = "FT"
             progress_bar.set_postfix(**postfix)
 
-            # Under accumulation global_step sits on a multiple of 1000 for several micro-batches:
-            # save once (also when the epoch-tail flush reached it, on the next micro-batch).
+            # under accumulation global_step stays on a multiple of 1000 for several micro-batches: save once
             if global_step % 1000 == 0 and global_step != last_saved_step and rank == 0:
                 last_saved_step = global_step
                 ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{global_step}.pt")
@@ -735,8 +723,6 @@ def train(
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "global_step": global_step,
-                    "edge_fill": int(ttl_cfg.get("edge_fill", False)),  # 1 = trained on the exact-length layout
-                    "latent_flush": 1,  # trained on exact-length latents: no masked frame after the longest row
                 }
                 if ema is not None:
                     ckpt["ema"] = ema.state_dicts()
@@ -935,8 +921,7 @@ def train(
 
         # Flush remaining gradients if dataloader length is not divisible by accumulation_steps
         if num_batches % accumulation_steps != 0:
-            # Each micro-batch loss was divided by accumulation_steps; rescale so this step
-            # uses the mean over the k micro-batches actually accumulated.
+            # rescale to the mean over the k micro-batches actually accumulated
             k = num_batches % accumulation_steps
             for p in params:
                 if p.grad is not None:
