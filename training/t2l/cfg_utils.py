@@ -97,6 +97,8 @@ class DistributedWeightedSampler(torch.utils.data.Sampler):
     """Weighted draw with replacement; every rank draws the same sequence and takes its own stride."""
 
     def __init__(self, weights, num_replicas=1, rank=0, seed=42):
+        if len(weights) < num_replicas:  # else every epoch is empty and training never ends
+            raise ValueError(f"sample_weight: {len(weights)} rows cannot be split across {num_replicas} ranks")
         self.weights = weights
         self.num_replicas = num_replicas
         self.rank = rank
