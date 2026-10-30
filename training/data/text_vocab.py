@@ -4,18 +4,14 @@ Universal IPA vocabulary for TTS, built on the piper phoneme set.
 Layout:
   0..156   = Piper core symbols
   157..243 = Extended symbols (uppercase, additional IPA, punctuation)
-  244      = ʣ (voiced alveolar affricate, the d͡z / dz ligature)
+  244      = ʣ
   245..254 = Unused padding to hit 256
-  255      = '<' (language-tag open)
-  48       = '>' (language-tag close; was the palatal click 'ǂ', which no
-             G2P here emits and is now out of the vocab)
+  255, 48  = '<', '>' (language tags; 48 was the unused click 'ǂ')
 
 VOCAB_SIZE = 256 (fixed, highly optimized power of 2)
 
-Language tags are not part of the text: text_to_indices drops any inline
-<lang> markers, so by default the model learns one universal acoustic space
-from narrow IPA. With the "lang_tags" config key on, wrap_lang_tags puts
-'<lang>' + ids + '</lang>' around each whole input, every character a token.
+text_to_indices drops inline <lang> markers; with the "lang_tags" config key,
+wrap_lang_tags puts '<lang>' + ids + '</lang>' around each whole input.
 """
 
 import re
@@ -62,9 +58,7 @@ _EXTENDED_MAP: dict[str, int] = {
     "ʣ": 244,
 }
 
-# '<' and '>' spell language tags as ordinary tokens ('/' already has id 200).
-# '>' reuses 48 rather than growing the table, so every 256-row embedding keeps
-# its shape and existing checkpoints still load.
+# '>' reuses 48 so the 256-row embeddings, and existing checkpoints, keep their shape.
 _LANG_TAG_MAP: dict[str, int] = {"<": 255, ">": 48}
 
 # ============================================================
@@ -100,23 +94,11 @@ def text_to_indices_multilang(text: str, base_lang: str = "he") -> list[int]:
     """
     return text_to_indices(text, lang=base_lang)
 
-def lang_tag_ids(lang: str) -> tuple[list[int], list[int]]:
-    """Ids of '<lang>' and '</lang>' (e.g. 'he' -> [255, 20, 18, 48], [255, 200, 20, 18, 48])."""
-    code = str(lang).strip().lower()
-    if not re.fullmatch(r"[a-z]{2,3}", code):
-        raise ValueError(f"language tag needs a 2-3 letter language code, got {lang!r}")
-    letters = [CHAR_TO_ID[c] for c in code]
-    open_ids = [CHAR_TO_ID["<"], *letters, CHAR_TO_ID[">"]]
-    close_ids = [CHAR_TO_ID["<"], CHAR_TO_ID["/"], *letters, CHAR_TO_ID[">"]]
-    return open_ids, close_ids
-
-
 def wrap_lang_tags(ids: list[int], lang: str) -> list[int]:
-    """'<lang>' + ids + '</lang>', as Supertonic 3 feeds its text. ``ids`` is one
-    already-normalized text (terminal mark included); wrap once per model input.
-    The same ids go to the duration predictor, text encoder and vector field."""
-    open_ids, close_ids = lang_tag_ids(lang)
-    return open_ids + list(ids) + close_ids
+    """'<lang>' + ids + '</lang>', as Supertonic 3 feeds its text (e.g. 'he' -> 255 20 18 48 ... 255 200 20 18 48)."""
+    letters = [CHAR_TO_ID[c] for c in str(lang).strip().lower()]
+    lt, gt = CHAR_TO_ID["<"], CHAR_TO_ID[">"]
+    return [lt, *letters, gt] + list(ids) + [lt, CHAR_TO_ID["/"], *letters, gt]
 
 
 def indices_to_text(indices: list[int]) -> str:
@@ -130,17 +112,11 @@ _EMOJI_PATTERN = re.compile(r"[\U0001f600-\U0001f64f\U0001f300-\U0001f5ff\U0001f
 _UNIVERSAL_REPLACEMENTS = {
     "\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'", "´": "'", "`": "'",
     "–": "-", "‑": "-", "—": "-", "_": " ", "[": " ", "]": " ", "|": " ",
-    # '^' and '$' are the BOS/EOS slots (ids 1 and 2): a literal one left by G2P
-    # would put a control token mid-sequence.
-    "^": " ", "$": " ",
-    # No training row contains these (their embedding rows stay at init), so
-    # they are read as a word break / plain dots instead.
+    "^": " ", "$": " ",  # BOS/EOS slots
     "/": " ", "\\": " ", "#": " ", "…": "...",
 }
 
-# Decomposed affricates and ASCII digraphs -> single ligatures (word-final 'ts' only).
-# Only for models trained on folded text (config key "affricate_ligatures"): in
-# older checkpoints the ligature rows are untrained.
+# Affricates -> ligatures (word-final 'ts' only); config key "affricate_ligatures".
 _AFFRICATE_LIGATURES = (
     (re.compile(r"t͡s|ts(?=[^\w]|$)", re.I), "ʦ"),
     (re.compile(r"t͡ʃ|tʃ", re.I), "ʧ"),
@@ -148,13 +124,9 @@ _AFFRICATE_LIGATURES = (
     (re.compile(r"d͡z|dz", re.I), "ʣ"),
 )
 
-# normalize_text appends '.' to a string that does not end in one of these.
-TERMINAL_PUNCT_RE = re.compile(r"[.!?;:,'\"')\]}…。」』】〉》›»]$")
-
 def normalize_text(text: str, apply_hebrew_fixes: bool = False, affricate_ligatures: bool = False) -> str:
     """
     Applies Unicode normalization and common phoneme substitutions.
-    ``affricate_ligatures`` folds t͡s/tʃ/dʒ/dz into ʦ/ʧ/ʤ/ʣ (config key of the same name).
     """
     text = text.strip()
     text = uni_normalize("NFD", text)
@@ -184,7 +156,7 @@ def normalize_text(text: str, apply_hebrew_fixes: bool = False, affricate_ligatu
 
     text = re.sub(r"\s+", " ", text).strip()
 
-    if not TERMINAL_PUNCT_RE.search(text):
+    if not re.search(r"[.!?;:,'\"')\]}…。」』】〉》›»]$", text):
         text += "."
 
     return text
