@@ -267,7 +267,7 @@ def train(
     u_text, u_ref = uncond_params.u_text, uncond_params.u_ref
     u_key = getattr(uncond_params, "u_key", None)
     shared_key = text_encoder.speech_prompted_text_encoder.style_key is not None
-    # Used as raw tensors outside any DDP forward: their gradients are averaged across ranks by hand.
+    # used outside any DDP forward: gradients averaged across ranks by hand
     uncond_tokens = [p for p in (u_text, u_ref, u_key) if p is not None]
 
     # each parameter once: the projected style key is shared by the text encoder and the VF
@@ -683,8 +683,7 @@ def train(
                 postfix["mode"] = "FT"
             progress_bar.set_postfix(**postfix)
 
-            # Under accumulation global_step sits on a multiple of 1000 for several micro-batches:
-            # save once (also when the epoch-tail flush reached it, on the next micro-batch).
+            # under accumulation global_step stays on a multiple of 1000 for several micro-batches: save once
             if global_step % 1000 == 0 and global_step != last_saved_step and rank == 0:
                 last_saved_step = global_step
                 ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{global_step}.pt")
@@ -882,8 +881,7 @@ def train(
 
         # Flush remaining gradients if dataloader length is not divisible by accumulation_steps
         if num_batches % accumulation_steps != 0:
-            # Each micro-batch loss was divided by accumulation_steps; rescale so this step
-            # uses the mean over the k micro-batches actually accumulated.
+            # rescale to the mean over the k micro-batches actually accumulated
             k = num_batches % accumulation_steps
             for p in params:
                 if p.grad is not None:
