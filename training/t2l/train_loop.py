@@ -309,6 +309,11 @@ def train(
         ck_shared = 'speech_prompted_text_encoder.style_key' in checkpoint.get('text_encoder', {})
         if (ck_shared, 'u_key' in checkpoint) != (shared_key, u_key is not None):
             raise RuntimeError(f"{latest_ckpt}: style-key layout differs from the config")
+        missing = [k for m, n in ((text_encoder, 'text_encoder'), (vf_estimator, 'vf_estimator'))
+                   for k in m.state_dict() if k not in checkpoint.get(n, {})]
+        if (shared_key or u_key is not None) and (missing or shapes_changed):
+            raise RuntimeError(f"{latest_ckpt}: incomplete checkpoint for this config (missing {missing[:8]}, "
+                               f"shapes_changed={shapes_changed})")
         if u_key is not None:
             u_key.data.copy_(checkpoint['u_key'])
 

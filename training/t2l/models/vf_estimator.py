@@ -428,7 +428,10 @@ class VectorFieldEstimator(nn.Module):
         c2_cfg = mb_cfg.get("convnext_2", {})
 
         def expansion(c):  # config: intermediate_dim
-            return c.get("intermediate_dim", 2 * hidden_channels) // hidden_channels
+            inter = c.get("intermediate_dim", 2 * hidden_channels)
+            if inter % hidden_channels:  # would silently build a narrower ConvNeXt
+                raise ValueError(f"ConvNeXt intermediate_dim {inter} is not a multiple of hidden {hidden_channels}")
+            return inter // hidden_channels
 
         for _ in range(num_superblocks):
             self.main_blocks.append(
