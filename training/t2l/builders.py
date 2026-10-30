@@ -67,14 +67,11 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
     se_dilation_lst = se_cfg["convnext"].get("dilation_lst", [1] * se_num_blocks)
 
     vf_main_blocks_cfg = vf_cfg.get("main_blocks", {})
-
-    # ConvNeXt layer-scale (gamma) init for TE, reference encoder and VF. 1e-6 is the ConvNeXt default; the 64M
-    # layout uses 0.1, since with Adam a 1e-6 gamma can stay near zero and leave a whole block unused.
-    layer_scale_init = ttl_cfg.get("layer_scale_init", 1e-6)
-    # Padded rows take their own last valid column inside every ConvNeXt, so each row of a padded batch
-    # computes what it computes alone (B=1 inference). A no-op on an all-ones mask.
-    edge_fill = ttl_cfg.get("edge_fill", False)
     vf_last_convnext_cfg = vf_cfg.get("last_convnext", {})
+    # ConvNeXt gamma init; with Adam a 1e-6 gamma can stay near zero and leave a block unused
+    layer_scale_init = ttl_cfg.get("layer_scale_init", 1e-6)
+    # padded rows compute what they compute alone (B=1 inference)
+    edge_fill = ttl_cfg.get("edge_fill", False)
 
     ae_enc_arch = ae_cfg_json['encoder']
     ae_spec_cfg = ae_enc_arch.get('spec_processor', {})
