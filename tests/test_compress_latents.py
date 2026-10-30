@@ -1,4 +1,4 @@
-"""compress_latents tail padding (needs torch; skipped in the ONNX-only environment)."""
+"""compress_latents tail padding."""
 
 from __future__ import annotations
 
