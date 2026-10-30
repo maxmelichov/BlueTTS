@@ -35,6 +35,10 @@ class TestDistributedWeightedSampler(unittest.TestCase):
         self.assertEqual(counts[0].item(), 0)
         torch.testing.assert_close(freq, (w / w.sum()).float(), atol=0.015, rtol=0)
 
+    def test_fewer_rows_than_ranks_is_an_error(self):
+        with self.assertRaises(ValueError):
+            DistributedWeightedSampler(torch.ones(1, dtype=torch.float64), num_replicas=2)
+
     def test_epoch_reshuffles_and_is_reproducible(self):
         w = torch.ones(64, dtype=torch.float64)
         self.assertEqual(_draw(w, 2, epoch=3), _draw(w, 2, epoch=3))
