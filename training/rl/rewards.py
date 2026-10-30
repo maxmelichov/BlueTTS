@@ -1,13 +1,7 @@
 """Rewards for FlowTTS-GRPO (arXiv 2606.23190, Sec 2.3): speaker similarity, ASR error rate and DNSMOS.
 
-Each reward model is optional and imported only when built:
-  SpeakerSim  speechbrain   (speechbrain/spkrec-ecapa-voxceleb)
-  DNSMOS      speechmos + onnxruntime   (DNSMOS P.835)
-  WhisperASR  transformers  (openai/whisper-large-v3)
-Install them with `pip install speechbrain speechmos onnxruntime transformers`.
-
-The ASR reward is any callable `asr(wav, sr, text, lang) -> error rate in [0, 1]`, so a recognizer that emits
-phonemes can score IPA targets with `error_rate` the same way.
+Reward models are imported when built: `pip install speechbrain speechmos onnxruntime transformers`.
+The ASR reward is any callable `asr(wav, sr, text, lang) -> error rate in [0, 1]`.
 """
 
 import os
@@ -42,8 +36,7 @@ def words(text):
 
 
 class SpeakerSim:
-    """Cosine of ECAPA speaker embeddings at 16 kHz. The paper uses ERes2Net; ECAPA is a public speaker-verification
-    model of the same kind."""
+    """Cosine of ECAPA speaker embeddings at 16 kHz (the paper uses ERes2Net, a model of the same kind)."""
 
     def __init__(self, device="cpu"):
         tf32 = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
@@ -68,8 +61,8 @@ class SpeakerSim:
 
 
 class DNSMOS:
-    """DNSMOS P.835 overall quality (OVRL, 1-5) at 16 kHz. One onnxruntime thread so no pool runs next to the
-    trainer; device "cuda:N" uses the CUDA provider when onnxruntime has it."""
+    """DNSMOS P.835 overall quality (OVRL, 1-5) at 16 kHz, on one onnxruntime thread so no pool runs next to the
+    trainer."""
 
     def __init__(self, device="cpu"):
         import onnxruntime as ort
@@ -96,17 +89,14 @@ class DNSMOS:
 
 
 class WhisperASR:
-    """Word error rate of a Whisper transcript against the target text, as the paper's 1 - WER reward."""
+    """Word error rate of a Whisper transcript against the target text (the paper's 1 - WER reward)."""
 
     def __init__(self, model="openai/whisper-large-v3", device="cpu"):
         from transformers import pipeline
 
         self.pipe = pipeline("automatic-speech-recognition", model=model, device=torch.device(device))
 
-    def transcribe(self, wav, sr, lang=None):
+    def __call__(self, wav, sr, text, lang=None):
         out = self.pipe({"raw": _to_16k(wav, sr)[0].numpy(), "sampling_rate": 16000},
                         generate_kwargs={"task": "transcribe", **({"language": lang} if lang else {})})
-        return out["text"]
-
-    def __call__(self, wav, sr, text, lang=None):
-        return error_rate(words(text), words(self.transcribe(wav, sr, lang)))
+        return error_rate(words(text), words(out["text"]))
