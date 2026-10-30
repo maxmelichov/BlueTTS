@@ -10,7 +10,10 @@ import numpy as np
 
 try:
     import torch
+except ImportError:  # the inference install has no torch
+    torch = None
 
+if torch is not None:
     from training.rl.flow_grpo import (
         advantages,
         gauss_logp,
@@ -20,8 +23,6 @@ try:
         sample_window,
         sde_mean_std,
     )
-except ImportError:  # the inference install has no torch
-    torch = None
 
 
 @unittest.skipIf(torch is None, "torch not installed")
