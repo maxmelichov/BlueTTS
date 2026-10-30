@@ -12,7 +12,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from data.text2latent_dataset import Text2LatentDataset, collate_text2latent
 from bluecodec import LatentEncoder
-from bluecodec.utils import LinearMelSpectrogram, compress_latents
+from bluecodec.utils import LinearMelSpectrogram
+from training.utils import compress_latents
 
 
 def main():
