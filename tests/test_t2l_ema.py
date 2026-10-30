@@ -69,7 +69,7 @@ class TestModelEMA(unittest.TestCase):
             ema.update()
         saved = ema.state_dicts()
         other = ModelEMA([("m", nn.Linear(4, 4))], decay=0.9)
-        other.load_state_dicts(saved)
+        self.assertEqual(other.load_state_dicts(saved), 2)
         self.assertEqual(other.updates, 3)
         for k, v in saved["m"].items():
             self.assertTrue(torch.equal(other.state_dicts()["m"][k], v))
