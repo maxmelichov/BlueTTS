@@ -1,4 +1,4 @@
-"""T2L trainer DDP / accumulation fixes (CPU, gloo; needs torch)."""
+"""T2L trainer DDP / accumulation fixes (CPU, gloo)."""
 
 from __future__ import annotations
 
