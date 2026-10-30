@@ -10,10 +10,8 @@ Layout:
 
 VOCAB_SIZE = 256 (fixed, highly optimized power of 2)
 
-Language tags are not part of the text: text_to_indices drops any inline
-<lang> markers, so by default the model learns one universal acoustic space
-from narrow IPA. With the "lang_tags" config key on, wrap_lang_tags puts
-'<lang>' + ids + '</lang>' around each whole input, every character a token.
+text_to_indices drops inline <lang> markers; with the "lang_tags" config key,
+wrap_lang_tags puts '<lang>' + ids + '</lang>' around each whole input.
 """
 
 import re
@@ -96,23 +94,11 @@ def text_to_indices_multilang(text: str, base_lang: str = "he") -> list[int]:
     """
     return text_to_indices(text, lang=base_lang)
 
-def lang_tag_ids(lang: str) -> tuple[list[int], list[int]]:
-    """Ids of '<lang>' and '</lang>' (e.g. 'he' -> [255, 20, 18, 48], [255, 200, 20, 18, 48])."""
-    code = str(lang).strip().lower()
-    if not re.fullmatch(r"[a-z]{2,3}", code):
-        raise ValueError(f"language tag needs a 2-3 letter language code, got {lang!r}")
-    letters = [CHAR_TO_ID[c] for c in code]
-    open_ids = [CHAR_TO_ID["<"], *letters, CHAR_TO_ID[">"]]
-    close_ids = [CHAR_TO_ID["<"], CHAR_TO_ID["/"], *letters, CHAR_TO_ID[">"]]
-    return open_ids, close_ids
-
-
 def wrap_lang_tags(ids: list[int], lang: str) -> list[int]:
-    """'<lang>' + ids + '</lang>', as Supertonic 3 feeds its text. ``ids`` is one
-    already-normalized text (terminal mark included); wrap once per model input.
-    The same ids go to the duration predictor, text encoder and vector field."""
-    open_ids, close_ids = lang_tag_ids(lang)
-    return open_ids + list(ids) + close_ids
+    """'<lang>' + ids + '</lang>', as Supertonic 3 feeds its text (e.g. 'he' -> 255 20 18 48 ... 255 200 20 18 48)."""
+    letters = [CHAR_TO_ID[c] for c in str(lang).strip().lower()]
+    lt, gt = CHAR_TO_ID["<"], CHAR_TO_ID[">"]
+    return [lt, *letters, gt] + list(ids) + [lt, CHAR_TO_ID["/"], *letters, gt]
 
 
 def indices_to_text(indices: list[int]) -> str:
