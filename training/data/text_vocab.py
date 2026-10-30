@@ -96,7 +96,10 @@ def text_to_indices_multilang(text: str, base_lang: str = "he") -> list[int]:
 
 def wrap_lang_tags(ids: list[int], lang: str) -> list[int]:
     """'<lang>' + ids + '</lang>', as Supertonic 3 feeds its text (e.g. 'he' -> 255 20 18 48 ... 255 200 20 18 48)."""
-    letters = [CHAR_TO_ID[c] for c in str(lang).strip().lower()]
+    code = str(lang).strip().lower()
+    if not re.fullmatch(r"[a-z]{2,3}", code):  # e.g. 'en-us' would train on tags inference never sends
+        raise ValueError(f"language tag needs a 2-3 letter language code, got {lang!r}")
+    letters = [CHAR_TO_ID[c] for c in code]
     lt, gt = CHAR_TO_ID["<"], CHAR_TO_ID[">"]
     return [lt, *letters, gt] + list(ids) + [lt, CHAR_TO_ID["/"], *letters, gt]
 
