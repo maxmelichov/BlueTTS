@@ -4,10 +4,12 @@
 
 L_pos: true velocity (Eq. 2); L_rand: another utterance of the batch (Eq. 3); L_aug: a repeat/skip
 corruption of the same utterance (Eq. 6). The negatives reuse the row's eps, t and x_t (Alg. 1
-lines 3-9), v(x, eps) = x - (1 - sigma_min) eps, so the vector field runs once.
+lines 3-9), v(x, eps) = x - (1 - sigma_min) eps, so the vector field runs once. They apply to every
+row, CFG-dropped and SPFM-dirty ones included.
 
 All terms are L1 (SupertonicTTS Eq. 1): in the paper's squared L2 the sum collapses to plain flow
-matching toward a stretched target (tests/test_rsf.py).
+matching toward a stretched target (tests/test_rsf.py). lambda_rand + lambda_aug < 1 keeps the L1
+loss bounded below.
 """
 from __future__ import annotations
 
