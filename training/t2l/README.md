@@ -36,16 +36,12 @@ The `configs/tts.json` has several settings:
 - `flow_matching.sig_min`: The minimum noise scale for Flow Matching.
 - `batch_expander.n_batch_expand`: The $K_e$ factor. 
 
-`config/tts_st3.json` is the 64M layout (the Supertonic-3 `ttl` shapes): vector-field ConvNeXt
-`intermediate_dim` 2048, text attention `n_units` 512 over 8 heads, text-encoder dilations
-`[1, 1, 2, 2, 4, 4]`, `sig_min` 1e-8, no attention dropout, the Supertonic-3 time-encoder frequency
-table (`time_encoder.supertonic3_freqs`) and `layer_scale_init` 0.1 (the initial ConvNeXt gamma of the
-text encoder, reference encoder and vector field; default 1e-6; the DP sets it on its sentence encoder
-only, under `dp.sentence_encoder.layer_scale_init`).
-It also sets `edge_fill` (in `ttl` and `dp`): inside every ConvNeXt the padded positions of a row take
-that row's last valid column, so each row of a padded training batch computes exactly what it computes
-alone at inference (B=1). It is a no-op on an unpadded batch. Pass it with `--config` to train
-or export that model; `config/tts.json` stays the 33M model.
+`config/tts_st3.json` is the 64M (Supertonic-3) layout; pass it with `--config` to train or export
+that model. `config/tts.json` stays the 33M model.
+`layer_scale_init` sets the initial ConvNeXt gamma of the TE, reference encoder and VF (default 1e-6;
+`tts_st3.json` uses 0.1, and on the DP sentence encoder only via `dp.sentence_encoder.layer_scale_init`).
+`edge_fill` (in `ttl` and `dp`) fills each row's padding with its last valid column inside every ConvNeXt,
+so a padded training row computes what it computes alone at inference.
 
 ## Healthy Loss Curve
 A healthy Flow Matching training loss curve will start high and exponentially decay, flattening out over time. If using SPFM, you will see it drop further when fine-tuning kicks in.
