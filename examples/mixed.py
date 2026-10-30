@@ -23,7 +23,7 @@ audio, _ = tts(
     text,
     lang="he",
     style=style,
-    total_step=5,
+    total_step=8,
     cfg_scale=4.0,
     text_is_phonemes=text_is_phonemes,
     speed=1.0,

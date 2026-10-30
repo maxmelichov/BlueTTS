@@ -16,7 +16,7 @@ audio, _ = tts(
     "Hello, this is a short test.",
     lang="en",
     style=style,
-    total_step=5,
+    total_step=8,
     cfg_scale=4.0,
 )
 if audio.ndim == 2:

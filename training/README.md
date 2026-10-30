@@ -78,3 +78,23 @@ uv run python -m training.t2l.cli \
   --out runs/libritts/t2l \
   --device cuda:0
 ```
+
+## 5. GRPO (optional)
+
+FlowTTS-GRPO post-training of the T2L vector field (arXiv 2606.23190), rewarding speaker similarity, Whisper WER and
+DNSMOS. Only the vector field trains, so exported voices stay valid. Extra dependencies:
+`uv pip install speechbrain speechmos onnxruntime transformers`. The WER reward (`--w_asr`) needs a `transcript`
+column with each row's words; without one, pass `--w_asr 0` as below.
+
+```bash
+uv run python -m training.rl.cli \
+  --ckpt runs/libritts/t2l/ckpt_step_1000000.pt \
+  --config ../config/tts.json \
+  --data generated_audio/libritts_cleaned.csv \
+  --ae_checkpoint ../pt_models/blue_codec.safetensors \
+  --stats_path runs/libritts/stats_multilingual.pt \
+  --dp_ckpt runs/libritts/dp/duration_predictor_final.pt \
+  --out runs/libritts/grpo \
+  --w_asr 0 \
+  --device cuda:0
+```

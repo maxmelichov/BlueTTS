@@ -19,7 +19,7 @@ Defaults suited to arbitrary user text: `normalize_text=True` and peak limiting 
 | argument | default | notes |
 |---|---|---|
 | `lang` | `"he"` | one of `he`, `en`, `es`, `de`, `it` |
-| `total_step` | `5` | Euler steps; more is slower and slightly cleaner |
+| `total_step` | `8` | Euler steps; more is slower and slightly cleaner |
 | `cfg_scale` | `4.0` | classifier-free guidance |
 | `speed` | `1.0` | duration is divided by this |
 | `normalize_text` | `True` | see [Text normalization](#text-normalization) |
@@ -32,7 +32,7 @@ from blue_onnx import load_text_to_speech, load_voice_style, limit_peak
 
 tts = load_text_to_speech("onnx_models")
 style = load_voice_style(["voices/noa.json"])
-wav, dur = tts("Hello world.", lang="en", style=style, total_step=5,
+wav, dur = tts("Hello world.", lang="en", style=style, total_step=8,
                normalize_text=True, silence_duration=0.15)
 wav = limit_peak(wav)            # always, before writing a PCM WAV
 ```
@@ -47,7 +47,7 @@ exclusive with `normalize_text` — the normalizer rewrites words, not phonemes.
 ## `TextToSpeech.batch` — batched rows
 
 ```python
-wav, durs = tts.batch(["First row.", "Second row."], ["en", "en"], style, total_step=5)
+wav, durs = tts.batch(["First row.", "Second row."], ["en", "en"], style, total_step=8)
 ```
 
 No sentence chunking, and no slow spans — each row is one pass. Every row of the
