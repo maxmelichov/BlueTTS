@@ -360,18 +360,14 @@ def train(
 
     scheduler = build_lr_scheduler(optimizer, lr, lr_milestones, global_step, scheduler_state, finetune)
 
-    # EMA of TE / VF / reference encoder, on rank 0 only (DDP keeps every rank's weights identical).
-    # Restored from the resumed checkpoint's 'ema', else initialised from the current weights.
+    # EMA on rank 0 only: DDP keeps every rank's weights identical.
     ema = None
     if ema_decay > 0 and rank == 0:
         ema = ModelEMA([("vf_estimator", vf_estimator), ("text_encoder", text_encoder),
                         ("reference_encoder", reference_encoder)], decay=ema_decay)
-        ema_state = checkpoint.get("ema") if latest_ckpt is not None else None
-        if ema_state is not None:
-            n_loaded = ema.load_state_dicts(ema_state)
-            print(f"[EMA] decay {ema_decay}: restored {n_loaded} tensors (updates={ema.updates})")
-        else:
-            print(f"[EMA] decay {ema_decay}: initialised {len(ema.params)} tensors from the current weights")
+        if latest_ckpt is not None and "ema" in checkpoint:
+            ema.load_state_dicts(checkpoint["ema"])
+        print(f"[EMA] decay {ema_decay}, updates={ema.updates}")
 
     if dist.is_initialized():
         text_encoder = DDP(text_encoder, device_ids=[local_rank], find_unused_parameters=True)
@@ -729,8 +725,7 @@ def train(
             if global_step % 1000 == 0 and global_step != last_saved_step and rank == 0:
                 last_saved_step = global_step
                 ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{global_step}.pt")
-                ema_sd = ema.state_dicts() if ema is not None else None
-                torch.save({
+                ckpt = {
                     "vf_estimator": ddp_state_dict(vf_estimator),
                     "text_encoder": ddp_state_dict(text_encoder),
                     "reference_encoder": ddp_state_dict(reference_encoder),
@@ -742,28 +737,22 @@ def train(
                     "global_step": global_step,
                     "edge_fill": int(ttl_cfg.get("edge_fill", False)),  # 1 = trained on the exact-length layout
                     "latent_flush": 1,  # trained on exact-length latents: no masked frame after the longest row
-                    **({"ema": ema_sd} if ema is not None else {}),
-                }, ckpt_path)
+                }
+                if ema is not None:
+                    ckpt["ema"] = ema.state_dicts()
+                torch.save(ckpt, ckpt_path)
                 print(f"Saved checkpoint to {ckpt_path}")
                 if ema is not None:
-                    # The EMA weights as an ordinary checkpoint (no optimizer), loadable by inference / export as is.
+                    # The EMA weights as an ordinary checkpoint, loadable by inference / export as is.
+                    ema_sd = ckpt["ema"]
+                    ema_ckpt = {k: v for k, v in ckpt.items() if k not in ("optimizer", "scheduler", "ema")}
+                    ema_ckpt.update({k: ema_sd[k] for k in ("vf_estimator", "text_encoder", "reference_encoder")},
+                                    ema_decay=ema_sd["decay"], ema_updates=ema_sd["updates"])
                     ema_path = os.path.join(checkpoint_dir, "ema", f"ckpt_step_{global_step}.pt")
                     os.makedirs(os.path.dirname(ema_path), exist_ok=True)
-                    torch.save({
-                        "vf_estimator": ema_sd["vf_estimator"],
-                        "text_encoder": ema_sd["text_encoder"],
-                        "reference_encoder": ema_sd["reference_encoder"],
-                        "u_text": u_text.data,
-                        "u_ref": u_ref.data,
-                        **({"u_key": u_key.data} if u_key is not None else {}),
-                        "global_step": global_step,
-                        "edge_fill": int(ttl_cfg.get("edge_fill", False)),
-                        "latent_flush": 1,
-                        "ema_decay": ema_sd["decay"],
-                        "ema_updates": ema_sd["updates"],
-                    }, ema_path)
+                    torch.save(ema_ckpt, ema_path)
                     print(f"Saved EMA checkpoint to {ema_path}")
-                    del ema_sd
+                del ckpt
                 print("Running inference (periodic log)...")
 
                 # Unwrap for inference to avoid DDP sync issues on single rank
