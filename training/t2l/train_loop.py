@@ -324,15 +324,19 @@ def train(
         if 'u_ref' in checkpoint: u_ref.data = checkpoint['u_ref']
         # the loads above are non-strict: refuse a style-key layout that differs from the config
         ck_shared = 'speech_prompted_text_encoder.style_key' in checkpoint.get('text_encoder', {})
-        if (ck_shared, 'u_key' in checkpoint) != (shared_key, u_key is not None):
-            raise RuntimeError(f"{latest_ckpt}: style-key layout differs from the config")
-        missing = [k for m, n in ((text_encoder, 'text_encoder'), (vf_estimator, 'vf_estimator'))
-                   for k in m.state_dict() if k not in checkpoint.get(n, {})]
-        if (shared_key or u_key is not None) and (missing or shapes_changed):
-            raise RuntimeError(f"{latest_ckpt}: incomplete checkpoint for this config (missing {missing[:8]}, "
-                               f"shapes_changed={shapes_changed})")
-        if u_key is not None:
-            u_key.data.copy_(checkpoint['u_key'])
+        ck_ukey = checkpoint.get('u_key') is not None
+        if (ck_shared, ck_ukey) != (shared_key, u_key is not None):
+            raise RuntimeError(
+                f"{latest_ckpt}: style-key layout projected={ck_shared} u_key={ck_ukey}, but the config has "
+                f"style_key_mode projected={shared_key} style_key_uncond={u_key is not None}")
+        if shared_key or u_key is not None:
+            missing = [k for m, n in ((text_encoder, 'text_encoder'), (vf_estimator, 'vf_estimator'))
+                       for k in m.state_dict() if k not in checkpoint.get(n, {})]
+            if missing or shapes_changed:
+                raise RuntimeError(f"{latest_ckpt}: incomplete checkpoint for this config (missing {missing[:8]}, "
+                                   f"shapes_changed={shapes_changed})")
+            if u_key is not None:
+                u_key.data.copy_(checkpoint['u_key'])
 
         optimizer = AdamW(params, lr=lr, weight_decay=weight_decay)
         if 'optimizer' in checkpoint and not (finetune or shapes_changed):
