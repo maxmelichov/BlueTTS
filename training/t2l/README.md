@@ -38,20 +38,15 @@ The `configs/tts.json` has several settings:
 - `train.weight_decay` (optional, default `0.01`): AdamW weight decay. RobustSpeechFlow (arXiv 2605.22083, Sec. 4.3) trains with `0.0`.
 - `train.lr_milestones` (optional, default `[300000, 600000]`): steps at which the learning rate is halved. A resume uses these, not the milestones stored in the checkpoint; our current recipe uses `[350000, 700000]` with `weight_decay` `0.0`.
 
-`config/tts_st3.json` is the 64M layout (the Supertonic-3 `ttl` shapes): vector-field ConvNeXt
-`intermediate_dim` 2048, text attention `n_units` 512 over 8 heads, text-encoder dilations
-`[1, 1, 2, 2, 4, 4]`, `sig_min` 1e-8, no attention dropout, the Supertonic-3 time-encoder frequency
-table (`time_encoder.supertonic3_freqs`) and `layer_scale_init` 0.1 (the initial ConvNeXt gamma of the
-text encoder, reference encoder and vector field; default 1e-6; the DP sets it on its sentence encoder
-only, under `dp.sentence_encoder.layer_scale_init`).
-It also sets `edge_fill` (in `ttl` and `dp`): inside every ConvNeXt the padded positions of a row take
-that row's last valid column, so each row of a padded training batch computes exactly what it computes
-alone at inference (B=1). It is a no-op on an unpadded batch.
-The style keys follow Supertonic-3 as well: `speech_prompted_text_encoder.style_key_mode` `"projected"`
-computes the text-encoder style keys as `tanh(W_key(style_key))` from one `style_key` tensor that is also the
-vector field's `tile`, and `uncond_masker.style_key_uncond` adds `u_key`, the style-attention keys of every
-row whose style is dropped (CFG both-drop, SPFM-dirty, and the CFG unconditional pass). Pass it with `--config` to train
-or export that model; `config/tts.json` stays the 33M model.
+`config/tts_st3.json` is the 64M (Supertonic-3) layout; pass it with `--config` to train or export
+that model. `config/tts.json` stays the 33M model.
+`layer_scale_init` sets the initial ConvNeXt gamma of the TE, reference encoder and VF (default 1e-6;
+`tts_st3.json` uses 0.1, and on the DP sentence encoder only via `dp.sentence_encoder.layer_scale_init`).
+`edge_fill` (in `ttl` and `dp`) fills each row's padding with its last valid column inside every ConvNeXt,
+so a padded training row computes what it computes alone at inference.
+`speech_prompted_text_encoder.style_key_mode: "projected"` computes the TE style keys as
+`tanh(W_key(style_key))`, where `style_key` is shared with the VF `tile`; `uncond_masker.style_key_uncond`
+adds `u_key`, the style keys of every style-dropped row.
 
 ## Healthy Loss Curve
 A healthy Flow Matching training loss curve will start high and exponentially decay, flattening out over time. If using SPFM, you will see it drop further when fine-tuning kicks in.

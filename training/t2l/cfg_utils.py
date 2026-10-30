@@ -14,10 +14,7 @@ from training.utils import seed_worker
 
 class UncondParams(nn.Module):
     """Learnable unconditional tokens for CFG. Dims from ttl.uncond_masker config.
-
-    uncond_key (config: uncond_masker.style_key_uncond) adds u_key, the Supertonic-3 unconditional style-key
-    token: the VF style-attention keys of every row whose style is dropped (CFG both-drop and SPFM-dirty rows,
-    the SPFM probe and the CFG uncond pass). Off: those rows key on the conditional `tile`."""
+    uncond_key adds u_key, the VF style-attention keys of every style-dropped row."""
     def __init__(self, text_dim=256, n_style=50, style_value_dim=256, init_std=0.1, uncond_key=False, style_key_dim=256):
         super().__init__()
         self.u_text = nn.Parameter(torch.randn(1, text_dim, 1) * init_std)
@@ -94,10 +91,7 @@ def _validate_ttl_config(ttl_cfg: dict) -> None:
 
 
 def all_reduce_grads(params) -> None:
-    """Average gradients across ranks for parameters used outside a DDP forward.
-
-    u_text / u_ref (and u_key, when configured) are used as raw tensors (the DDP wrapper's
-    forward is never called), so DDP never all-reduces their gradients and each rank's copy drifts apart."""
+    """Average gradients across ranks for parameters DDP does not sync (used outside its forward)."""
     if not dist.is_initialized():
         return
     for p in params:
