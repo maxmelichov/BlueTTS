@@ -64,7 +64,6 @@ class TextToSpeech:
         mean: Optional[torch.Tensor] = None,
         std: Optional[torch.Tensor] = None,
         seed: int = 42,
-        u_key: Optional[torch.Tensor] = None,
     ):
         self.cfgs = cfgs
         self.text_processor = text_processor
@@ -87,8 +86,7 @@ class TextToSpeech:
 
         self._u_text = u_text
         self._u_ref = u_ref
-        # unconditional style keys (Supertonic-3 layout; load_pt_models attaches them to the VF); None = the VF's tile
-        self._u_key = u_key if u_key is not None else getattr(vector_estimator, "u_key", None)
+        self._u_key = getattr(vector_estimator, "u_key", None)  # set by load_pt_models; None = the VF's tile
         self.mean = mean
         self.std = std
 
@@ -462,8 +460,7 @@ def load_pt_models(
     Optional[torch.Tensor],
     Optional[torch.Tensor],
 ]:
-    """When the checkpoint has the Supertonic-3 unconditional style-key token u_key, it is attached to the
-    returned vf_estimator as a non-persistent buffer ``u_key`` (no state-dict key), which TextToSpeech uses."""
+    """A checkpoint's u_key is attached to the returned vf_estimator as a non-persistent buffer."""
     vocab_size = cfg.get("vocab_size", 256)
     se_n_style = cfg.get("se_n_style", 50)
     latent_dim = int(cfg.get("latent_dim", 24))
