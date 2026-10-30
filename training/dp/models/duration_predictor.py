@@ -154,8 +154,7 @@ class TTSDurationModel(nn.Module):
         pr_text_dim = pr_cfg.get("sentence_dim", 64)
         pr_style_dim = pr_cfg.get("n_style", st_num_queries) * pr_cfg.get("style_dim", st_query_dim)
 
-        # config: sentence_encoder.layer_scale_init (default 1e-6). The 64M recipe uses 0.1 here only: from 1e-6 the
-        # sentence-encoder ConvNeXt blocks stay near zero and the attention stack carries the text alone.
+        # config: sentence_encoder.layer_scale_init; from 1e-6 these ConvNeXt blocks can stay near zero
         self.sentence_encoder = DPTextEncoder(vocab_size=vocab_size, d_model=se_d_model,
                                               layer_scale_init=se_cfg.get("layer_scale_init", 1e-6), edge_fill=edge_fill)
         self.ref_encoder = DPReferenceEncoder(
