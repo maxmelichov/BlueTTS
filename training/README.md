@@ -15,6 +15,9 @@ combine dataset -> compute stats -> train DP -> train T2L
 
 Stats are required. Use the stats file made from the same CSV you train on.
 
+The autoencoder comes from [bluecodec](https://github.com/maxmelichov/blue-codec). If it uses edge padding,
+set `"pad_mode": "replicate"` in `ae.encoder` / `ae.decoder` (default `"zeros"`).
+
 ## 1. Combine Dataset
 
 LibriTTS:
