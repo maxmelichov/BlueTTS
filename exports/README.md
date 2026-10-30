@@ -71,9 +71,8 @@ uv run python exports/export_onnx.py \
 
 `export_onnx.py` loads stats with `torch.load` (mean/std tensors). Use the `.pt` stats file from the same Hub repo, not the `.safetensors` copy.
 
-For the 64M model pass `--config config/tts_st3.json`. Its projected style keys fold into `text_encoder.onnx`, and
-the checkpoint's `u_key` is baked into the unconditional pass of `vector_estimator.onnx`. The graph inputs are the same
-as for the 33M model.
+For the 64M model pass `--config config/tts_st3.json`; its `u_key` is baked into `vector_estimator.onnx` and the
+graph inputs stay the same.
 
 This writes:
 
