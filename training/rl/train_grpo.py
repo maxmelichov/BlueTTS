@@ -103,7 +103,7 @@ def train_grpo(cfg, asr=None):
     params = list(vf.parameters())
     print(f"[grpo] VF full fine-tune: {sum(p.numel() for p in params) / 1e6:.2f} M params, tied style key {tied}")
     opt = torch.optim.AdamW(params, lr=cfg.lr, betas=(0.9, 0.999), weight_decay=1e-4)
-    ups = min(cfg.updates_per_iter, cfg.prompts_per_iter)
+    ups = max(1, min(cfg.updates_per_iter, cfg.prompts_per_iter))
     total = cfg.iters * ups
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: max(0.0, 1.0 - s / total))   # linear decay to 0
     ema = {k: v.detach().clone() for k, v in vf.state_dict().items()} if cfg.ema > 0 else None
