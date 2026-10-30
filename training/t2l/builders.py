@@ -37,7 +37,6 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
     spte_style_dim = spte_cfg.get("style_dim", 256)
     spte_n_units = spte_cfg.get("n_units", 256)
     spte_n_style = se_n_style
-    # "projected" = Supertonic-3 layout: tanh(W_key(style_key)) per layer from one style_key, tied to the VF tile
     spte_key_mode = spte_cfg.get("style_key_mode", "baked")
 
     um_cfg = ttl_cfg["uncond_masker"]
@@ -149,7 +148,7 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         edge_fill=edge_fill,
     ).to(device)
     if spte_key_mode == "projected":
-        # One Parameter is both the text encoder's style_key and the VF's `tile`; each state_dict keeps its own key.
+        # one Parameter; each state_dict keeps its own key
         vf_estimator.tile = text_encoder.speech_prompted_text_encoder.style_key
 
     uncond_params = UncondParams(

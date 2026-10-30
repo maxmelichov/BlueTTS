@@ -501,8 +501,7 @@ class VectorFieldEstimator(nn.Module):
         total_step: Optional[torch.Tensor] = None,
         style_keys: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """style_keys [B, n_style, style_dim]: style-attention keys; None = the shared `tile` (the conditional
-        keys). The unconditional pass of the Supertonic-3 layout keys on the learned u_key instead."""
+        """style_keys: style-attention keys [B, n_style, style_dim]; None = `tile`."""
         B = noisy_latent.shape[0]
 
         if total_step is not None:
