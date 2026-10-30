@@ -40,6 +40,7 @@ def _build_dp_models(
     predictor_cfg,
     ae_checkpoint,
     device,
+    edge_fill=False,
 ):
     ae_enc_arch = full_cfg["ae"]["encoder"]
     ae_spec_cfg = ae_enc_arch.get("spec_processor", {})
@@ -85,6 +86,7 @@ def _build_dp_models(
         sentence_encoder_cfg=sentence_encoder_cfg,
         style_encoder_cfg=style_encoder_cfg,
         predictor_cfg=predictor_cfg,
+        edge_fill=edge_fill,
     ).to(device)
 
     return mel_spec, ae_encoder, model
@@ -126,7 +128,8 @@ def train_duration_predictor(
     print(f"{'='*60}\n")
     
     mel_spec, ae_encoder, model = _build_dp_models(
-        full_cfg, style_dp, style_dim, sentence_encoder_cfg, style_encoder_cfg, predictor_cfg, ae_checkpoint, device
+        full_cfg, style_dp, style_dim, sentence_encoder_cfg, style_encoder_cfg, predictor_cfg, ae_checkpoint, device,
+        edge_fill=dp_cfg.get("edge_fill", False),
     )
     
     optimizer = AdamW(model.parameters(), lr=lr)

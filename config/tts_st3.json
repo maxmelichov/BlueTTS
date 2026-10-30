@@ -4,6 +4,7 @@
         "latent_dim": 24,
         "chunk_compress_factor": 6,
         "layer_scale_init": 0.1,
+        "edge_fill": true,
         "batch_expander": {
             "n_batch_expand": 6
         },
@@ -254,6 +255,7 @@
     "dp": {
         "latent_dim": 24,
         "chunk_compress_factor": 6,
+        "edge_fill": true,
         "normalizer": {
             "scale": 1.0
         },

@@ -40,6 +40,8 @@ The `configs/tts.json` has several settings:
 that model. `config/tts.json` stays the 33M model.
 `layer_scale_init` sets the initial ConvNeXt gamma of the TE, reference encoder and VF (default 1e-6;
 `tts_st3.json` uses 0.1, and on the DP sentence encoder only via `dp.sentence_encoder.layer_scale_init`).
+`edge_fill` (in `ttl` and `dp`) fills each row's padding with its last valid column inside every ConvNeXt,
+so a padded training row computes what it computes alone at inference.
 
 ## Healthy Loss Curve
 A healthy Flow Matching training loss curve will start high and exponentially decay, flattening out over time. If using SPFM, you will see it drop further when fine-tuning kicks in.
