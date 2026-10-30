@@ -18,10 +18,8 @@ def seed_all(seed: int = 42, deterministic: bool = True) -> None:
 
 
 def seed_worker(worker_id: int, base_seed: int | None = None, rank: int = 0, start_step: int = 0) -> None:
-    """DataLoader worker seed: ``base_seed + worker_id`` when ``base_seed`` is given (DP trainer),
-    else derived from (worker, rank, resume step). Seeding by worker_id alone gives every DDP rank
-    the same crop / reference draws and replays the same stream after every resume (workers are
-    persistent)."""
+    """DataLoader worker seed: ``base_seed + worker_id``, else from (worker, rank, resume step) so DDP ranks
+    and resumes do not replay the same draws."""
     if base_seed is not None:
         seed = base_seed + worker_id
     else:
