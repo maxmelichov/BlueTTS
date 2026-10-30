@@ -5,12 +5,16 @@ from __future__ import annotations
 import unittest
 
 try:
-    from training.rl.rewards import error_rate, words
+    import torch  # noqa: F401
+    import torchaudio  # noqa: F401
 except ImportError:  # the inference install has no torch
-    error_rate = None
+    torch = None
+
+if torch is not None:
+    from training.rl.rewards import error_rate, words
 
 
-@unittest.skipIf(error_rate is None, "torch not installed")
+@unittest.skipIf(torch is None, "torch not installed")
 class TestRewards(unittest.TestCase):
     def test_error_rate(self):
         self.assertEqual(error_rate("a b c".split(), "a b c".split()), 0.0)
