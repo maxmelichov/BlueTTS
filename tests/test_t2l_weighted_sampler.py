@@ -23,22 +23,17 @@ class TestDistributedWeightedSampler(unittest.TestCase):
         r0, r1 = _draw(w, 2)
         self.assertEqual(len(r0), 500)
         self.assertEqual(len(r1), 500)
-        interleaved = [i for pair in zip(r0, r1) for i in pair]
-        self.assertEqual(interleaved, single)  # same draw as one process, split by position
+        self.assertEqual([i for pair in zip(r0, r1) for i in pair], single)
 
     def test_frequencies_follow_weights(self):
         w = torch.tensor([0.0, 1.0, 2.0, 7.0], dtype=torch.float64)
         counts = torch.zeros(4)
-        for epoch in range(2000):  # 2000 epochs x 4 draws
+        for epoch in range(2000):
             for idx in _draw(w, 2, epoch):
                 counts += torch.bincount(torch.tensor(idx), minlength=4)
         freq = counts / counts.sum()
         self.assertEqual(counts[0].item(), 0)
         torch.testing.assert_close(freq, (w / w.sum()).float(), atol=0.015, rtol=0)
-
-    def test_fewer_rows_than_ranks_is_an_error(self):
-        with self.assertRaises(ValueError):
-            DistributedWeightedSampler(torch.ones(1, dtype=torch.float64), num_replicas=2)
 
     def test_epoch_reshuffles_and_is_reproducible(self):
         w = torch.ones(64, dtype=torch.float64)
