@@ -4,11 +4,9 @@ Universal IPA vocabulary for TTS, built on the piper phoneme set.
 Layout:
   0..156   = Piper core symbols
   157..243 = Extended symbols (uppercase, additional IPA, punctuation)
-  244      = ʣ (voiced alveolar affricate, the d͡z / dz ligature)
+  244      = ʣ
   245..254 = Unused padding to hit 256
-  255      = '<' (language-tag open)
-  48       = '>' (language-tag close; was the palatal click 'ǂ', which no
-             G2P here emits and is now out of the vocab)
+  255, 48  = '<', '>' (language tags; 48 was the unused click 'ǂ')
 
 VOCAB_SIZE = 256 (fixed, highly optimized power of 2)
 
@@ -60,9 +58,7 @@ _EXTENDED_MAP: dict[str, int] = {
     "ʣ": 244,
 }
 
-# '<' and '>' spell language tags as ordinary tokens ('/' already has id 200).
-# '>' reuses 48 rather than growing the table, so every 256-row embedding keeps
-# its shape and existing checkpoints still load.
+# '>' reuses 48 so the 256-row embeddings, and existing checkpoints, keep their shape.
 _LANG_TAG_MAP: dict[str, int] = {"<": 255, ">": 48}
 
 # ============================================================
@@ -109,17 +105,11 @@ _EMOJI_PATTERN = re.compile(r"[\U0001f600-\U0001f64f\U0001f300-\U0001f5ff\U0001f
 _UNIVERSAL_REPLACEMENTS = {
     "\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'", "´": "'", "`": "'",
     "–": "-", "‑": "-", "—": "-", "_": " ", "[": " ", "]": " ", "|": " ",
-    # '^' and '$' are the BOS/EOS slots (ids 1 and 2): a literal one left by G2P
-    # would put a control token mid-sequence.
-    "^": " ", "$": " ",
-    # No training row contains these (their embedding rows stay at init), so
-    # they are read as a word break / plain dots instead.
+    "^": " ", "$": " ",  # BOS/EOS slots
     "/": " ", "\\": " ", "#": " ", "…": "...",
 }
 
-# Decomposed affricates and ASCII digraphs -> single ligatures (word-final 'ts' only).
-# Only for models trained on folded text (config key "affricate_ligatures"): in
-# older checkpoints the ligature rows are untrained.
+# Affricates -> ligatures (word-final 'ts' only); config key "affricate_ligatures".
 _AFFRICATE_LIGATURES = (
     (re.compile(r"t͡s|ts(?=[^\w]|$)", re.I), "ʦ"),
     (re.compile(r"t͡ʃ|tʃ", re.I), "ʧ"),
@@ -127,13 +117,9 @@ _AFFRICATE_LIGATURES = (
     (re.compile(r"d͡z|dz", re.I), "ʣ"),
 )
 
-# normalize_text appends '.' to a string that does not end in one of these.
-TERMINAL_PUNCT_RE = re.compile(r"[.!?;:,'\"')\]}…。」』】〉》›»]$")
-
 def normalize_text(text: str, apply_hebrew_fixes: bool = False, affricate_ligatures: bool = False) -> str:
     """
     Applies Unicode normalization and common phoneme substitutions.
-    ``affricate_ligatures`` folds t͡s/tʃ/dʒ/dz into ʦ/ʧ/ʤ/ʣ (config key of the same name).
     """
     text = text.strip()
     text = uni_normalize("NFD", text)
@@ -163,7 +149,7 @@ def normalize_text(text: str, apply_hebrew_fixes: bool = False, affricate_ligatu
 
     text = re.sub(r"\s+", " ", text).strip()
 
-    if not TERMINAL_PUNCT_RE.search(text):
+    if not re.search(r"[.!?;:,'\"')\]}…。」』】〉》›»]$", text):
         text += "."
 
     return text

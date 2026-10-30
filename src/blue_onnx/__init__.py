@@ -72,8 +72,7 @@ _TEXT_TO_INDICES_PROCESSOR: Optional["UnicodeProcessor"] = None
 
 _INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)</\1>", re.DOTALL)
 _LANG_TAG_RE = re.compile(r"</?\w+>")
-# Decomposed affricates and ASCII digraphs -> single ligatures (word-final 'ts' only).
-# Only for models trained on folded text: tts.json "affricate_ligatures".
+# Affricates -> ligatures (word-final 'ts' only), for models trained with tts.json "affricate_ligatures".
 _AFFRICATE_LIGATURES = (
     (re.compile(r"t͡s|ts(?=[^\w]|$)", re.I), "ʦ"),
     (re.compile(r"t͡ʃ|tʃ", re.I), "ʧ"),
@@ -244,15 +243,10 @@ class UnicodeProcessor:
                 else {int(k): int(v) for k, v in raw.items()}
 
     def _preprocess_text(self, text: str, lang: str, affricate_ligatures: bool = False) -> str:
-        # The same steps, in the same order, as ``normalize_text`` in
-        # training/data/text_vocab.py (minus its Hebrew r/g fallback, which is a
-        # G2P concern): the model has to see the ids it was trained on. Drop
-        # inline <lang>…</lang> spans first: they are routing metadata, never
-        # speech.
+        # Same steps and order as training's normalize_text (text_vocab.py), so the ids match.
         if _LANG_TAG_RE.search(text):
             text = strip_lang_tags_from_phoneme_string(text)
-        # NFD, not NFKD: NFKD folds modifier letters into plain ones (ʰ -> h,
-        # ʲ -> j, ʷ -> w) and '…' into '...'; training does neither.
+        # NFD, not NFKD: NFKD folds modifier letters (ʰ -> h); training does not.
         text = normalize("NFD", text.strip())
 
         # Last-resort net: G2P already strips these, but ``text_is_phonemes=True``
@@ -274,10 +268,8 @@ class UnicodeProcessor:
             "[": " ",
             "]": " ",
             "|": " ",
-            # BOS/EOS slots (ids 1 and 2): never valid mid-sequence.
-            "^": " ",
+            "^": " ",  # BOS/EOS slots
             "$": " ",
-            # Never in a training row (their embedding rows stay at init).
             "/": " ",
             "\\": " ",
             "#": " ",
@@ -387,7 +379,6 @@ class TextToSpeech:
         self.base_chunk_size = cfgs["ae"]["base_chunk_size"]
         self.chunk_compress_factor = cfgs["ttl"]["chunk_compress_factor"]
         self.ldim = cfgs["ttl"]["latent_dim"]
-        # Text normalization the checkpoint was trained with (tts.json).
         self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
         self._u_text = u_text
         self._u_ref = u_ref
