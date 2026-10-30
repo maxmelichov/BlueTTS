@@ -22,6 +22,7 @@ from training.data.audio_utils import ensure_sr
 from training.data.text_vocab import normalize_text, text_to_indices_multilang
 from training.utils import check_stats_provenance, compress_latents
 from training.t2l.builders import build_models
+from training.t2l.ema import ModelEMA
 from training.t2l.cfg_utils import (
     DistributedWeightedSampler,
     _latest_ckpt_in_dir,
@@ -181,6 +182,7 @@ def train(
     train_cfg = ttl_cfg.get("train", {})
     weight_decay = float(train_cfg.get("weight_decay", 0.01))
     lr_milestones = [int(m) for m in train_cfg.get("lr_milestones", [300_000, 600_000])]
+    ema_decay = float(train_cfg.get("ema_decay", 0.0))  # 0 = no EMA
 
     um_cfg = ttl_cfg["uncond_masker"]
     prob_both_uncond = um_cfg["prob_both_uncond"]
@@ -354,6 +356,17 @@ def train(
         if 'scheduler' in checkpoint and not shapes_changed: scheduler_state = checkpoint['scheduler']
 
     scheduler = build_lr_scheduler(optimizer, lr, lr_milestones, global_step, scheduler_state, finetune)
+
+    # EMA on rank 0 only: DDP keeps every rank's weights identical.
+    ema = None
+    if ema_decay > 0 and rank == 0:
+        ema = ModelEMA([("vf_estimator", vf_estimator), ("text_encoder", text_encoder),
+                        ("reference_encoder", reference_encoder)], decay=ema_decay)
+        if latest_ckpt is not None and "ema" in checkpoint:
+            n_loaded = ema.load_state_dicts(checkpoint["ema"])
+            print(f"[EMA] decay {ema_decay}: restored {n_loaded} tensors (updates={ema.updates})")
+        else:
+            print(f"[EMA] decay {ema_decay}: initialised {len(ema.params)} tensors from the current weights")
 
     if dist.is_initialized():
         text_encoder = DDP(text_encoder, device_ids=[local_rank], find_unused_parameters=True)
@@ -687,6 +700,8 @@ def train(
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+                if ema is not None:
+                    ema.update()
                 global_step += 1
 
             epoch_loss += loss.item() * accumulation_steps
@@ -704,7 +719,7 @@ def train(
             if global_step % 1000 == 0 and global_step != last_saved_step and rank == 0:
                 last_saved_step = global_step
                 ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{global_step}.pt")
-                torch.save({
+                ckpt = {
                     "vf_estimator": ddp_state_dict(vf_estimator),
                     "text_encoder": ddp_state_dict(text_encoder),
                     "reference_encoder": ddp_state_dict(reference_encoder),
@@ -714,8 +729,22 @@ def train(
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "global_step": global_step,
-                }, ckpt_path)
+                }
+                if ema is not None:
+                    ckpt["ema"] = ema.state_dicts()
+                torch.save(ckpt, ckpt_path)
                 print(f"Saved checkpoint to {ckpt_path}")
+                if ema is not None:
+                    # The EMA weights as an ordinary checkpoint, loadable by inference / export as is.
+                    ema_sd = ckpt["ema"]
+                    ema_ckpt = {k: v for k, v in ckpt.items() if k not in ("optimizer", "scheduler", "ema")}
+                    ema_ckpt.update({k: ema_sd[k] for k in ("vf_estimator", "text_encoder", "reference_encoder")},
+                                    ema_decay=ema_sd["decay"], ema_updates=ema_sd["updates"])
+                    ema_path = os.path.join(checkpoint_dir, "ema", f"ckpt_step_{global_step}.pt")
+                    os.makedirs(os.path.dirname(ema_path), exist_ok=True)
+                    torch.save(ema_ckpt, ema_path)
+                    print(f"Saved EMA checkpoint to {ema_path}")
+                del ckpt
                 print("Running inference (periodic log)...")
 
                 # Unwrap for inference to avoid DDP sync issues on single rank
@@ -908,6 +937,8 @@ def train(
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update()
             global_step += 1
 
         if spfm_call_batches > 0:
