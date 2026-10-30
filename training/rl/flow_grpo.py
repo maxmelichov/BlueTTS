@@ -102,12 +102,13 @@ def ppo_backward(vf, vf_ref, h, style_ttl, latent_mask, text_mask, traj, adv, cl
     h_ref = h if h_ref is None else h_ref
     A_all = torch.as_tensor(adv, device=latent_mask.device, dtype=torch.float32)
     G = A_all.shape[0]
+    mb = max(1, min(micro_batch, G))
     n = len(traj)
     tot, kl_tot, cf, ratio_sum = 0.0, 0.0, 0.0, 0.0
     for st in traj:
         k, dt = st["k"], st["dt"]
-        for i0 in range(0, G, micro_batch):
-            sl = slice(i0, i0 + micro_batch)
+        for i0 in range(0, G, mb):
+            sl = slice(i0, i0 + mb)
             A, x = A_all[sl], st["x"][sl]
             frac = A.shape[0] / G
             v = vf_cond(vf, x, h, style_ttl, latent_mask, text_mask, k * dt)
