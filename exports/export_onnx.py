@@ -149,10 +149,7 @@ def _replace_mha(module: nn.Module) -> None:
 # ── graph wrappers that bake runtime conditioning into the ONNX graph ─────────
 
 class VectorFieldEstimatorCFG(nn.Module):
-    """Wraps VF and bakes u_text / u_ref so CFG is one ONNX call per diffusion step.
-
-    u_key (Supertonic-3 layout): the unconditional pass keys the style attention on u_key instead of the
-    VF's `tile`. None keeps `tile`. The graph inputs are the same either way."""
+    """Wraps VF and bakes u_text / u_ref (and u_key, if given) so CFG is one ONNX call per diffusion step."""
 
     def __init__(self, model: VectorFieldEstimator, u_text: torch.Tensor, u_ref: torch.Tensor,
                  u_key: torch.Tensor | None = None):
@@ -522,9 +519,7 @@ def main():
         "denoised_latent": {0: "B", 2: "T_lat"},
     }, do_slim=args.slim, do_int8=args.int8)
     if do_verify:
-        # Check on the conditioning the graph is run with (TE/RE outputs) at a mid step: random N(0,1) text_emb /
-        # style_ttl at step 0 of 1 are ill-conditioned for the 64M field (PyTorch fp32 alone is ~1e-3 off fp64
-        # there), and t = 0 never exercises the time encoder.
+        # Verify on real TE/RE outputs at a mid step: N(0,1) inputs at t=0 are ill-conditioned for the 64M field.
         g = torch.Generator().manual_seed(0)
         with torch.no_grad():
             v_style = ref_enc(z_pred, mask=ref_mask)
