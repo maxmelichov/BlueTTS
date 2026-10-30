@@ -23,6 +23,7 @@ from training.data.text_vocab import normalize_text, text_to_indices_multilang
 from training.utils import check_stats_provenance, compress_latents
 from training.t2l.builders import build_models
 from training.t2l.cfg_utils import (
+    DistributedWeightedSampler,
     _latest_ckpt_in_dir,
     _validate_ttl_config,
     all_reduce_grads,
@@ -379,7 +380,12 @@ def train(
         print(f"Dataset loaded with {len(dataset)} samples.")
 
     # Sampler Setup
-    if dist.is_initialized():
+    if "sample_weight" in dataset.df.columns:
+        w = dataset.df["sample_weight"].astype(float).fillna(0.0).values
+        sampler = DistributedWeightedSampler(
+            torch.from_numpy(w).double(), num_replicas=dist.get_world_size() if dist.is_initialized() else 1, rank=rank
+        )
+    elif dist.is_initialized():
         sampler = DistributedSampler(dataset, shuffle=True)
     else:
         # Calculate inverse-frequency weights for balanced speaker sampling
@@ -460,7 +466,7 @@ def train(
     last_saved_step = global_step  # the checkpoint we resumed from (or step 0) is not written again
 
     while global_step < max_steps:
-        if dist.is_initialized() and hasattr(sampler, 'set_epoch'): sampler.set_epoch(epoch_base + epoch)
+        if hasattr(sampler, 'set_epoch'): sampler.set_epoch(epoch_base + epoch)
         epoch += 1
 
         text_encoder.train()
