@@ -1,5 +1,6 @@
 {
     "tts_version": "v3.0.0",
+    "affricate_ligatures": true,
     "ttl": {
         "latent_dim": 24,
         "chunk_compress_factor": 6,
