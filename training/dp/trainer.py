@@ -133,8 +133,12 @@ def train_duration_predictor(
     )
     
     optimizer = AdamW(model.parameters(), lr=lr)
+    lang_tags = bool(full_cfg.get("lang_tags", False))
     dataloader = get_dp_dataloader(metadata_path, batch_size, affricate_ligatures=bool(full_cfg.get("affricate_ligatures", False)),
-                                   lang_tags=bool(full_cfg.get("lang_tags", False)))
+                                   lang_tags=lang_tags)
+    if lang_tags:  # read by export_onnx.py, which warns when the T2L and the DP disagree
+        with open(os.path.join(checkpoint_dir, "LANG_TAGS"), "w") as f:
+            f.write("1\n")
     
     if not os.path.exists(stats_path):
         print(f"Error: Stats file {stats_path} not found.")
