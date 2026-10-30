@@ -73,6 +73,7 @@ def load_ttl_config(config_path="configs/tts.json"):
     se = ttl["style_encoder"]
     vf = ttl["vector_field"]
     um = ttl["uncond_masker"]
+    spte = ttl.get("speech_prompted_text_encoder", {})
 
     # ---- Vocab sizes ----
     char_dict_path = te.get("char_dict_path", te.get("text_embedder", {}).get("char_dict_path"))
@@ -145,6 +146,7 @@ def load_ttl_config(config_path="configs/tts.json"):
         "te_expansion_factor":  te["convnext"]["intermediate_dim"] // te["text_embedder"]["char_emb_dim"],
         "te_attn_n_layers":     te["attn_encoder"]["n_layers"],
         "te_attn_p_dropout":    te["attn_encoder"]["p_dropout"],
+        "te_style_key_mode":    spte.get("style_key_mode", "baked"),
 
         # Style / Reference Encoder
         "se_d_model":    se["proj_in"]["odim"],
