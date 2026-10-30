@@ -16,8 +16,7 @@ class LayerNorm(nn.Module):
 
 
 def fill_tail(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """x [B, C, T] (already masked), mask [B, 1, T] with the valid columns first: padded positions take the
-    row's last valid column, so under a replicate pad the row sees what its exact-length (B=1) tensor sees."""
+    """Padded columns of each (masked) row take the row's last valid column."""
     n = mask.sum(-1, keepdim=True).long().clamp(min=1)
     last = x.gather(2, (n - 1).expand(-1, x.shape[1], 1))
     return x * mask + last * (1 - mask)
@@ -44,8 +43,7 @@ class ConvNeXtBlock(nn.Module):
             x = x * mask
         residual = x
 
-        # edge_fill: a row shorter than its batch is followed by masked zeros, so without the fill its last
-        # columns see zeros where the same row alone (B=1 inference) sees its replicated last column.
+        # edge_fill: under the replicate pad a padded row then sees what it sees alone (B=1 inference)
         if mask is not None and self.edge_fill:
             x = fill_tail(x, mask)
         x = F.pad(x, (self.pad, self.pad), mode="replicate")

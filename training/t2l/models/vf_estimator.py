@@ -433,16 +433,14 @@ class VectorFieldEstimator(nn.Module):
         for _ in range(num_superblocks):
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c0_cfg.get("ksz", 5), dilations=c0_cfg.get("dilation_lst", [1, 2, 4, 8]),
-                              expansion=expansion(c0_cfg), layer_scale_init=layer_scale_init,
-                              edge_fill=edge_fill)
+                              expansion=expansion(c0_cfg), layer_scale_init=layer_scale_init, edge_fill=edge_fill)
             )
             self.main_blocks.append(
                 TimeCondBlock(time_dim=time_embed_dim, channels=hidden_channels)
             )
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c1_cfg.get("ksz", 5), dilations=c1_cfg.get("dilation_lst", [1]),
-                              expansion=expansion(c1_cfg), layer_scale_init=layer_scale_init,
-                              edge_fill=edge_fill)
+                              expansion=expansion(c1_cfg), layer_scale_init=layer_scale_init, edge_fill=edge_fill)
             )
             self.main_blocks.append(
                 CrossAttentionBlock(
@@ -459,8 +457,7 @@ class VectorFieldEstimator(nn.Module):
             )
             self.main_blocks.append(
                 ConvNeXtStack(hidden_channels, kernel_size=c2_cfg.get("ksz", 5), dilations=c2_cfg.get("dilation_lst", [1]),
-                              expansion=expansion(c2_cfg), layer_scale_init=layer_scale_init,
-                              edge_fill=edge_fill)
+                              expansion=expansion(c2_cfg), layer_scale_init=layer_scale_init, edge_fill=edge_fill)
             )
             self.main_blocks.append(
                 CrossAttentionBlock(
