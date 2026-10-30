@@ -7,9 +7,7 @@ from training.rl.train_grpo import train_grpo
 
 def main():
     p = argparse.ArgumentParser(description="FlowTTS-GRPO post-training of the T2L vector field (arXiv 2606.23190)")
-    p.add_argument("--ckpt", required=True,
-                   help="T2L checkpoint to start from (ckpt_step_*.pt). Pass the same one on --resume: it is the KL "
-                        "reference and the base of every saved checkpoint")
+    p.add_argument("--ckpt", required=True, help="T2L checkpoint to start from; also the KL reference (same on --resume)")
     p.add_argument("--config", required=True, help="tts.json the checkpoint was trained with")
     p.add_argument("--data", required=True, help="training metadata CSV: prompt texts and reference clips")
     p.add_argument("--ae_checkpoint", required=True)
