@@ -359,8 +359,10 @@ def train(
         ema = ModelEMA([("vf_estimator", vf_estimator), ("text_encoder", text_encoder),
                         ("reference_encoder", reference_encoder)], decay=ema_decay)
         if latest_ckpt is not None and "ema" in checkpoint:
-            ema.load_state_dicts(checkpoint["ema"])
-        print(f"[EMA] decay {ema_decay}, updates={ema.updates}")
+            n_loaded = ema.load_state_dicts(checkpoint["ema"])
+            print(f"[EMA] decay {ema_decay}: restored {n_loaded} tensors (updates={ema.updates})")
+        else:
+            print(f"[EMA] decay {ema_decay}: initialised {len(ema.params)} tensors from the current weights")
 
     if dist.is_initialized():
         text_encoder = DDP(text_encoder, device_ids=[local_rank], find_unused_parameters=True)
