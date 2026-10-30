@@ -8,7 +8,7 @@ The dataset should be a CSV file with the following expected columns (or similar
 - `text`: Transcription text
 - `speaker_id`: Speaker identifier
 - `lang`: Language code
-- `sample_weight` (optional): per-row draw probability, up to normalisation. When present, every epoch draws rows with replacement by these weights, `floor(len(dataset) / world_size)` per rank (one weighted draw split across DDP ranks, or all of it on one GPU); rows with weight 0 are never drawn. Without it, one GPU samples speaker-balanced and DDP samples uniformly.
+- `sample_weight` (optional): per-row draw weight; rows are drawn with replacement by it, split across DDP ranks.
 
 Expected sample rate for training is typically 44.1kHz.
 
@@ -38,7 +38,7 @@ The `configs/tts.json` has several settings:
 - `batch_expander.n_batch_expand`: The $K_e$ factor. 
 - `train.weight_decay` (optional, default `0.01`): AdamW weight decay. RobustSpeechFlow (arXiv 2605.22083, Sec. 4.3) trains with `0.0`.
 - `train.lr_milestones` (optional, default `[300000, 600000]`): steps at which the learning rate is halved. A resume uses these, not the milestones stored in the checkpoint; our current recipe uses `[350000, 700000]` with `weight_decay` `0.0`.
-- `train.ema_decay` (optional, default `0` = off): keep an exponential moving average of the text encoder, vector field and reference encoder, with warm-up `min(ema_decay, (1 + n) / (10 + n))` after n updates (our recipe: `0.9999`). Every checkpoint then also stores it under `ema`, and `<out>/ema/ckpt_step_N.pt` holds the EMA weights in the ordinary checkpoint layout, so inference and export load it like any other checkpoint.
+- `train.ema_decay` (optional, default `0` = off): EMA of the text encoder, vector field and reference encoder, warm-up `min(ema_decay, (1 + n) / (10 + n))`. Checkpoints store it under `ema`; `<out>/ema/ckpt_step_N.pt` holds the EMA weights as an ordinary checkpoint.
 - `rsf`: RobustSpeechFlow contrastive loss (arXiv 2605.22083), off by default. With `enabled`, training is plain flow matching until `start_step`, then subtracts L1 distances to a length-matched in-batch negative (`lambda_rand`) and to a repeat/skip corruption of the target (`lambda_aug`); see `training/t2l/rsf.py`.
 
 `config/tts_st3.json` is the 64M layout (the Supertonic-3 `ttl` shapes): vector-field ConvNeXt
