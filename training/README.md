@@ -15,6 +15,14 @@ combine dataset -> compute stats -> train DP -> train T2L
 
 Stats are required. Use the stats file made from the same CSV you train on.
 
+The autoencoder is not trained here. It comes from the [bluecodec](https://github.com/maxmelichov/blue-codec)
+package, whose trainer also has the two-stage recipe on the official Supertonic-3 decoder
+([SupertonicTTS, arXiv:2503.23108](https://arxiv.org/abs/2503.23108); see its `docs/training.md`).
+Those decoder weights are OpenRAIL-M and are not bundled with either repo. An autoencoder trained
+with that recipe uses edge padding: copy its `"pad_mode": "replicate"` into `ae.encoder` and
+`ae.decoder` of the config you train and export with, then recompute the stats with its encoder.
+Without the key both default to `"zeros"`, as in the published `blue_codec.safetensors`.
+
 ## 1. Combine Dataset
 
 LibriTTS:
