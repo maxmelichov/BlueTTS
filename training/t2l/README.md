@@ -8,6 +8,7 @@ The dataset should be a CSV file with the following expected columns (or similar
 - `text`: Transcription text
 - `speaker_id`: Speaker identifier
 - `lang`: Language code
+- `sample_weight` (optional): per-row draw weight; rows are drawn with replacement by it, split across DDP ranks.
 
 Expected sample rate for training is typically 44.1kHz.
 
