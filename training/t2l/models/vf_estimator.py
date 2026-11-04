@@ -41,27 +41,45 @@ class Mish(nn.Module):
         return x * torch.tanh(F.softplus(x))
 
 
+# Supertonic-3 time-encoder frequencies (exact float32); the exp() formula is 1 ulp off on some entries.
+SUPERTONIC3_TIME_FREQS = tuple(float.fromhex(h) for h in (
+    '0x1.0000000000000p+0', '0x1.7c65c40000000p-1', '0x1.1a9f260000000p-1', '0x1.a3f4960000000p-2',
+    '0x1.3803000000000p-2', '0x1.cfa0800000000p-3', '0x1.5875460000000p-3', '0x1.ffd7020000000p-4',
+    '0x1.7c47520000000p-4', '0x1.1a88860000000p-4', '0x1.a3d2fa0000000p-5', '0x1.37ea060000000p-5',
+    '0x1.cf7b620000000p-6', '0x1.5859b40000000p-6', '0x1.ffae060000000p-7', '0x1.7c28e00000000p-7',
+    '0x1.1a71e80000000p-7', '0x1.a3b15e0000000p-8', '0x1.37d1100000000p-8', '0x1.cf564c0000000p-9',
+    '0x1.583e280000000p-9', '0x1.ff850e0000000p-10', '0x1.7c0a700000000p-10', '0x1.1a5b4a0000000p-10',
+    '0x1.a38fc40000000p-11', '0x1.37b81a0000000p-11', '0x1.cf31340000000p-12', '0x1.58228c0000000p-12',
+    '0x1.ff5c1a0000000p-13', '0x1.7bec000000000p-13', '0x1.1a44ae0000000p-13', '0x1.a36e2c0000000p-14'))
+
+
 class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim: int, scale: float = 1000.0):
+    def __init__(self, dim: int, scale: float = 1000.0, supertonic3_freqs: bool = False):
         super().__init__()
         self.dim = dim
         self.scale = scale
+        # non-persistent: state_dict keys are unchanged
+        self.register_buffer("freqs", torch.tensor(SUPERTONIC3_TIME_FREQS, dtype=torch.float32)
+                             if supertonic3_freqs else None, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x * self.scale
         device = x.device
         half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        if self.freqs is not None:
+            emb = self.freqs
+        else:
+            emb = math.log(10000) / (half_dim - 1)
+            emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
         emb = x[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
 
 class TimeEncoder(nn.Module):
-    def __init__(self, embed_dim: int, hdim: int = 256):
+    def __init__(self, embed_dim: int, hdim: int = 256, supertonic3_freqs: bool = False):
         super().__init__()
-        self.sinusoidal = SinusoidalPosEmb(embed_dim, scale=1000.0)
+        self.sinusoidal = SinusoidalPosEmb(embed_dim, scale=1000.0, supertonic3_freqs=supertonic3_freqs)
         self.mlp = nn.Sequential(
             LinearWrapper(embed_dim, hdim),
             Mish(),
@@ -124,10 +142,10 @@ class ConvNeXtBlock1D(nn.Module):
 
 
 class ConvNeXtStack(nn.Module):
-    def __init__(self, channels, kernel_size, dilations):
+    def __init__(self, channels, kernel_size, dilations, expansion=2):
         super().__init__()
         self.convnext = nn.ModuleList([
-            ConvNeXtBlock1D(channels, kernel_size=kernel_size, dilation=d, expansion=2)
+            ConvNeXtBlock1D(channels, kernel_size=kernel_size, dilation=d, expansion=expansion)
             for d in dilations
         ])
 
@@ -372,6 +390,8 @@ class VectorFieldEstimator(nn.Module):
         time_hdim: int = 256,
         use_residual: bool = True,
         rotary_base: float = 10000.0,
+        text_n_units: int = 256,
+        supertonic3_time_freqs: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -385,7 +405,7 @@ class VectorFieldEstimator(nn.Module):
         self.tile = nn.Parameter(torch.randn(1, num_style_tokens, style_dim) * 0.02)
 
         self.proj_in = ProjectionWrapper(in_channels, hidden_channels)
-        self.time_encoder = TimeEncoder(time_embed_dim, hdim=time_hdim)
+        self.time_encoder = TimeEncoder(time_embed_dim, hdim=time_hdim, supertonic3_freqs=supertonic3_time_freqs)
 
         self.main_blocks = nn.ModuleList()
 
@@ -398,22 +418,30 @@ class VectorFieldEstimator(nn.Module):
         c1_cfg = mb_cfg.get("convnext_1", {})
         c2_cfg = mb_cfg.get("convnext_2", {})
 
+        def expansion(c):  # config: intermediate_dim
+            inter = c.get("intermediate_dim", 2 * hidden_channels)
+            if inter % hidden_channels:  # would silently build a narrower ConvNeXt
+                raise ValueError(f"ConvNeXt intermediate_dim {inter} is not a multiple of hidden {hidden_channels}")
+            return inter // hidden_channels
+
         for _ in range(num_superblocks):
             self.main_blocks.append(
-                ConvNeXtStack(hidden_channels, kernel_size=c0_cfg.get("ksz", 5), dilations=c0_cfg.get("dilation_lst", [1, 2, 4, 8]))
+                ConvNeXtStack(hidden_channels, kernel_size=c0_cfg.get("ksz", 5), dilations=c0_cfg.get("dilation_lst", [1, 2, 4, 8]),
+                              expansion=expansion(c0_cfg))
             )
             self.main_blocks.append(
                 TimeCondBlock(time_dim=time_embed_dim, channels=hidden_channels)
             )
             self.main_blocks.append(
-                ConvNeXtStack(hidden_channels, kernel_size=c1_cfg.get("ksz", 5), dilations=c1_cfg.get("dilation_lst", [1]))
+                ConvNeXtStack(hidden_channels, kernel_size=c1_cfg.get("ksz", 5), dilations=c1_cfg.get("dilation_lst", [1]),
+                              expansion=expansion(c1_cfg))
             )
             self.main_blocks.append(
                 CrossAttentionBlock(
                     d_model=hidden_channels,
                     d_context=text_dim,
                     num_heads=text_n_heads,
-                    attn_dim=256,
+                    attn_dim=text_n_units,  # the scale stays sqrt(256)
                     use_rope=True,
                     rope_gamma=self.rope_gamma,
                     attn_scale=shared_attn_scale,
@@ -422,7 +450,8 @@ class VectorFieldEstimator(nn.Module):
                 )
             )
             self.main_blocks.append(
-                ConvNeXtStack(hidden_channels, kernel_size=c2_cfg.get("ksz", 5), dilations=c2_cfg.get("dilation_lst", [1]))
+                ConvNeXtStack(hidden_channels, kernel_size=c2_cfg.get("ksz", 5), dilations=c2_cfg.get("dilation_lst", [1]),
+                              expansion=expansion(c2_cfg))
             )
             self.main_blocks.append(
                 CrossAttentionBlock(
@@ -438,7 +467,8 @@ class VectorFieldEstimator(nn.Module):
             )
 
         self.last_convnext = ConvNeXtStack(
-            hidden_channels, kernel_size=lc_cfg.get("ksz", 5), dilations=lc_cfg.get("dilation_lst", [1, 1, 1, 1])
+            hidden_channels, kernel_size=lc_cfg.get("ksz", 5), dilations=lc_cfg.get("dilation_lst", [1, 1, 1, 1]),
+            expansion=expansion(lc_cfg),
         )
         self.proj_out = ProjectionWrapper(hidden_channels, out_channels)
 
