@@ -70,6 +70,8 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
     vf_last_convnext_cfg = vf_cfg.get("last_convnext", {})
     # ConvNeXt gamma init; with Adam a 1e-6 gamma can stay near zero and leave a block unused
     layer_scale_init = ttl_cfg.get("layer_scale_init", 1e-6)
+    # padded rows compute what they compute alone (B=1 inference)
+    edge_fill = ttl_cfg.get("edge_fill", False)
 
     ae_enc_arch = ae_cfg_json['encoder']
     ae_spec_cfg = ae_enc_arch.get('spec_processor', {})
@@ -102,6 +104,7 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         spte_n_units=spte_n_units,
         spte_n_style=spte_n_style,
         layer_scale_init=layer_scale_init,
+        edge_fill=edge_fill,
     ).to(device)
 
     reference_encoder = ReferenceEncoder(
@@ -117,6 +120,7 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         n_units=se_n_units,
         style_value_dim=se_style_value_dim,
         layer_scale_init=layer_scale_init,
+        edge_fill=edge_fill,
     ).to(device)
 
     vf_estimator = VectorFieldEstimator(
@@ -138,6 +142,7 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         text_n_units=vf_text_n_units,
         supertonic3_time_freqs=vf_st3_time_freqs,
         layer_scale_init=layer_scale_init,
+        edge_fill=edge_fill,
     ).to(device)
 
     uncond_params = UncondParams(
