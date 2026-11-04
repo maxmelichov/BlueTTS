@@ -250,6 +250,7 @@ class BlueTRT:
         self.sample_rate = int(ae.get("sample_rate", 44100))
         self.compressed_channels = self.latent_dim * self.chunk_compress_factor
         self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
+        self.lang_tags = bool(cfgs.get("lang_tags", False))
 
         self._ref_enc = load_engine(trt_dir, "reference_encoder.trt", required=False)
         self._text_enc = load_engine(trt_dir, "text_encoder.trt")
@@ -383,10 +384,11 @@ class BlueTRT:
         if z_ref is None and style_ttl is None:
             raise ValueError("Provide style_json with z_ref or style_ttl content.")
 
-        # With affricate_ligatures on, ids depend on the language (Hebrew keeps
-        # /ts/ as two tokens), so pass it. Otherwise they do not, and "he" keeps
-        # phoneme input in any language valid.
-        ids = text_to_indices(phonemes, lang if self.affricate_ligatures else "he", self.affricate_ligatures)
+        # Tags and affricate_ligatures make the ids depend on the language (Hebrew
+        # keeps /ts/ as two tokens), so pass it when either is on. Otherwise they
+        # do not, and "he" keeps phoneme input in any language valid.
+        lang_ids = lang if (self.lang_tags or self.affricate_ligatures) else "he"
+        ids = text_to_indices(phonemes, lang_ids, self.affricate_ligatures, self.lang_tags)
         text_ids = torch.tensor([ids], dtype=torch.int64, device=self.device)
         text_mask = torch.ones(1, 1, text_ids.shape[1], dtype=torch.float32, device=self.device)
 

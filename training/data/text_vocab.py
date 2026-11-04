@@ -10,8 +10,8 @@ Layout:
 
 VOCAB_SIZE = 256 (fixed, highly optimized power of 2)
 
-Language tags have been intentionally removed to force the model 
-to learn a universal acoustic space via narrow IPA.
+text_to_indices drops inline <lang> markers; with the "lang_tags" config key,
+wrap_lang_tags puts '<lang>' + ids + '</lang>' around each whole input.
 """
 
 import re
@@ -93,6 +93,16 @@ def text_to_indices_multilang(text: str, base_lang: str = "he") -> list[int]:
     Alias for text_to_indices. Language tags are silently dropped.
     """
     return text_to_indices(text, lang=base_lang)
+
+def wrap_lang_tags(ids: list[int], lang: str) -> list[int]:
+    """'<lang>' + ids + '</lang>', as Supertonic 3 feeds its text (e.g. 'he' -> 255 20 18 48 ... 255 200 20 18 48)."""
+    code = str(lang).strip().lower()
+    if not re.fullmatch(r"[a-z]{2,3}", code):  # e.g. 'en-us' would train on tags inference never sends
+        raise ValueError(f"language tag needs a 2-3 letter language code, got {lang!r}")
+    letters = [CHAR_TO_ID[c] for c in code]
+    lt, gt = CHAR_TO_ID["<"], CHAR_TO_ID[">"]
+    return [lt, *letters, gt] + list(ids) + [lt, CHAR_TO_ID["/"], *letters, gt]
+
 
 def indices_to_text(indices: list[int]) -> str:
     return "".join(ID_TO_CHAR.get(i, "?") for i in indices)
