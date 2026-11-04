@@ -12,9 +12,11 @@ from src.blue_onnx import (
     UnicodeProcessor,
     blend_duration_pace,
     chunk_text,
+    clean_chunk_audio,
     get_latent_mask,
     latent_frames_for_duration,
     length_to_mask,
+    limit_peak,
     strip_lang_tags_from_phoneme_string,
 )
 
@@ -149,6 +151,37 @@ class TestLatentFrameMath(unittest.TestCase):
             wav_lengths = np.array([int(seconds * SR)], dtype=np.int64)
             mask = get_latent_mask(wav_lengths, BASE_CHUNK, CCF)
             self.assertEqual(mask.shape[2], self.frames(seconds), seconds)
+
+
+class TestPostDecode(unittest.TestCase):
+    def test_clean_chunk_keeps_length_and_fades(self):
+        rng = np.random.default_rng(1)
+        wav = (0.1 * rng.standard_normal(SR)).astype(np.float32)
+        out = clean_chunk_audio(wav, SR)
+        self.assertEqual(len(out), SR)
+        self.assertEqual(out[0], 0.0)
+        self.assertEqual(out[-1], 0.0)
+
+    def test_limit_peak_burst_vs_hot_render(self):
+        rng = np.random.default_rng(3)
+        quiet = (0.1 * rng.standard_normal(SR)).astype(np.float32)
+        np.testing.assert_array_equal(limit_peak(quiet, 1.0, sample_rate=SR), quiet)
+        burst = quiet.copy()
+        burst[1000:1500] *= 30.0  # 11 ms: soft-limited, level left alone
+        out = limit_peak(burst, 1.0, sample_rate=SR)
+        self.assertLessEqual(float(np.abs(out).max()), 1.0)
+        np.testing.assert_array_equal(out[5000:], burst[5000:])
+        hot = quiet * 15.0  # wide: whole render scaled to 0.99 x the ceiling
+        self.assertAlmostEqual(float(np.abs(limit_peak(hot, 1.0, sample_rate=SR)).max()), 0.99, places=5)
+
+    def test_limit_peak_ceiling_is_backward_compatible(self):
+        rng = np.random.default_rng(4)
+        hot = (1.5 * rng.standard_normal(SR)).astype(np.float32)
+        for ceiling in (0.95, 0.8):
+            self.assertLessEqual(float(np.abs(limit_peak(hot, ceiling)).max()), ceiling)
+        self.assertLessEqual(float(np.abs(limit_peak(hot)).max()), 0.95)  # default ceiling as before
+        for off in (None, False, 0):
+            np.testing.assert_array_equal(limit_peak(hot, off), hot)
 
 
 if __name__ == "__main__":

@@ -513,12 +513,16 @@ class TextToSpeech:
                 xt = v_uncond + cfg_scale * (v_cond - v_uncond)
             else:
                 xt, *_ = self.vector_est_ort.run(None, cond)
-        wav, *_ = self.vocoder_ort.run(None, {"latent": self._prepare_vocoder_latent(xt)})
-        frame_len = self.base_chunk_size * self.chunk_compress_factor
-        if wav.shape[-1] > 2 * frame_len:
-            wav = wav[..., frame_len:-frame_len]
-        if wav.ndim == 3 and wav.shape[1] == 1:
-            wav = wav[:, 0, :]
+        # Decode each row on its own valid frames, then clean it up as one chunk.
+        wavs = []
+        for i in range(bsz):
+            n = int(latent_mask[i].sum())
+            latent = self._prepare_vocoder_latent(xt[i : i + 1, :, :n])
+            wav, *_ = self.vocoder_ort.run(None, {"latent": latent})
+            wavs.append(clean_chunk_audio(wav.reshape(-1), self.sample_rate))
+        wav = np.zeros((bsz, max(len(w) for w in wavs)), dtype=np.float32)
+        for i, w in enumerate(wavs):
+            wav[i, : len(w)] = w
         return wav, dur_onnx
 
     def __call__(
@@ -681,7 +685,10 @@ class TextToSpeech:
         rows are one pass each, so slow spans are not marked.
 
         Every row of the returned waveform is as long as the longest item in the
-        batch; use the returned per-item durations to trim. Requires graphs
+        batch: each row is its full decoded length, and rows shorter than the
+        longest are zero-padded after their decoded end. The returned per-item
+        durations are the duration predictor's estimates, not cut points; do not
+        trim to them. Requires graphs
         exported with a dynamic batch axis (``exports/export_onnx.py``); older
         batch-1 bundles raise an ONNX Runtime shape error.
         """
@@ -939,22 +946,67 @@ def load_voice_style(voice_style_paths: list[str], verbose: bool = False) -> Sty
     return Style(ttl_style, dp_style)
 
 
-def limit_peak(audio: np.ndarray, peak_limit: float = 0.95) -> np.ndarray:
-    """Scale ``audio`` down so ``max(|audio|) <= peak_limit``; quieter audio is
-    returned untouched.
+def clean_chunk_audio(wav: np.ndarray, sample_rate: int) -> np.ndarray:
+    """Post-decode cleanup of one chunk, full length kept: 20 ms edge fades, then repair isolated impulses."""
+    wav = np.asarray(wav, dtype=np.float32).reshape(-1)
+    fade = min(int(0.020 * sample_rate), wav.shape[-1] // 4)
+    if fade > 0:
+        ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+        wav = wav.copy()
+        wav[:fade] *= ramp
+        wav[-fade:] *= ramp[::-1]
+    return _declick(wav, sample_rate)
 
-    The vocoder occasionally overshoots ±1.0 (peaks of ~1.1-1.25 have been
-    observed), and both ``soundfile.write`` to a PCM WAV and most players clip
-    there, so scale once instead of distorting. This only ever attenuates — it
-    never boosts quiet output, which would change perceived loudness.
+
+def _declick(w: np.ndarray, sr: int, factor: float = 8.0, max_width_ms: float = 3.0) -> np.ndarray:
+    """Interpolate over impulses up to ``max_width_ms`` wide that stand out from the local
+    50 ms envelope (so a loud plosive is left alone)."""
+    if w.size < sr // 10:
+        return w
+    a = np.abs(w)
+    win = max(1, int(0.050 * sr))
+    k = np.ones(win, dtype=np.float32) / win
+    local = np.sqrt(np.convolve(w.astype(np.float32) ** 2, k, mode="same")) + 1e-8
+    hot = np.where(a > factor * local)[0]
+    if hot.size == 0:
+        return w
+    max_width = int(max_width_ms * 1e-3 * sr)
+    w = w.copy()
+    start = prev = hot[0]
+    for i in list(hot[1:]) + [hot[-1] + max_width + 2]:
+        if i - prev <= max_width:
+            prev = i
+            continue
+        lo, hi = max(start - 1, 0), min(prev + 1, len(w) - 1)
+        if hi - lo <= max_width + 2:
+            w[lo : hi + 1] = np.linspace(w[lo], w[hi], hi - lo + 1)
+        start = prev = i
+    return w
+
+
+def limit_peak(audio: np.ndarray, peak_limit: Optional[float] = 0.95, *, sample_rate: int = 44100) -> np.ndarray:
+    """Keep ``max(|audio|) <= peak_limit``; ``None``/``0`` returns ``audio`` untouched.
+
+    A burst (at most 60 ms, or under 0.1% of the samples, over ``0.99 * peak_limit``) is
+    tanh soft-limited above ``0.9 * peak_limit`` so the speech level is kept; a hot render
+    (anything wider) is scaled to a ``0.99 * peak_limit`` peak.
     """
     audio = np.asarray(audio, dtype=np.float32)
-    if audio.size == 0 or not np.isfinite(audio).all():
+    if not peak_limit or audio.size == 0 or not np.isfinite(audio).all():
         return audio
-    peak = float(np.max(np.abs(audio)))
-    if peak <= peak_limit or peak < 1e-9:
+    ceiling = float(peak_limit)
+    a = np.abs(audio)
+    peak = float(a.max())
+    if peak <= 0.99 * ceiling:
         return audio
-    return (audio * (peak_limit / peak)).astype(np.float32)
+    over = a > 0.99 * ceiling
+    if over.mean() < 1e-3 or over.sum() / sample_rate * 1000.0 <= 60.0:
+        knee = 0.90 * ceiling
+        hot = a > knee
+        audio = audio.copy()
+        audio[hot] = np.sign(audio[hot]) * (knee + (ceiling - knee) * np.tanh((a[hot] - knee) / (ceiling - knee)))
+        return audio
+    return (audio * (0.99 * ceiling / peak)).astype(np.float32)
 
 
 class BlueTTS:
@@ -1014,9 +1066,8 @@ class BlueTTS:
         end takes arbitrary text, not curated strings. Pass
         ``normalize_text=False`` to synthesize exactly what you wrote.
 
-        Output is scaled down to ``peak_limit`` when it overshoots, so writing it
-        straight to a PCM WAV never clips (see :func:`limit_peak`). Pass
-        ``peak_limit=None`` for the raw vocoder output.
+        Output is kept under ``peak_limit`` (see :func:`limit_peak`), so a PCM WAV never
+        clips. Pass ``peak_limit=None`` for the raw vocoder output.
         """
         audio, _ = self.tts(
             text,
@@ -1034,8 +1085,8 @@ class BlueTTS:
         audio = np.asarray(audio, dtype=np.float32)
         if audio.ndim == 2:
             audio = audio[0]
-        if peak_limit is not None:
-            audio = limit_peak(audio, peak_limit)
+        if peak_limit:
+            audio = limit_peak(audio, peak_limit, sample_rate=self.sample_rate)
         return audio, self.sample_rate
 
 

@@ -610,10 +610,6 @@ class BlueTRT:
         if wav is None:
             wav = next(iter(voc_out.values()))
 
-        frame_len = self.base_chunk_size * self.chunk_compress_factor
-        if wav.shape[-1] > 2 * frame_len:
-            wav = wav[..., frame_len:-frame_len]
-
         wav_np = wav.squeeze().cpu().numpy().astype(np.float32)
 
         fs = int(self.fade_duration * self.sample_rate)
