@@ -1,3 +1,4 @@
+import hashlib
 import random
 
 import numpy as np
@@ -40,6 +41,32 @@ def compress_latents(z: torch.Tensor, factor: int = 6) -> torch.Tensor:
 def decompress_latents(z: torch.Tensor, factor: int = 6, target_channels: int = 24) -> torch.Tensor:
     B, _, T_low = z.shape
     return z.view(B, target_channels, factor, T_low).permute(0, 1, 3, 2).flatten(2, 3)
+
+
+def encoder_fingerprint(encoder_state: dict) -> str:
+    """sha256 over an AE encoder state_dict (BatchNorm buffers included): the identity of its latent stats."""
+    h = hashlib.sha256()
+    for k in sorted(encoder_state):
+        t = encoder_state[k].detach().cpu()
+        t = t.float() if t.is_floating_point() else t.long()
+        h.update(k.encode())
+        h.update(str(tuple(t.shape)).encode())
+        h.update(t.contiguous().numpy().tobytes())
+    return h.hexdigest()
+
+
+def check_stats_provenance(stats: dict, encoder_state: dict) -> str:
+    """Refuse latent stats measured with a different AE encoder; warn when the file has no fingerprint."""
+    prov = stats.get("provenance") or {}
+    if "enc_sha256" not in prov:
+        return "[stats] WARNING: no encoder fingerprint in the stats file; cannot check it matches this AE"
+    fp = encoder_fingerprint(encoder_state)
+    if fp != prov["enc_sha256"]:
+        raise ValueError(
+            f"latent stats were measured with a different AE encoder (stats {prov['enc_sha256'][:12]}, "
+            f"this encoder {fp[:12]}); recompute them with compute_latent_stats.py"
+        )
+    return f"[stats] encoder fingerprint {fp[:12]} matches"
 
 
 def _resolve_vocab_size(char_dict_path, default=256):
