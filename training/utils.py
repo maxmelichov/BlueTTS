@@ -17,8 +17,13 @@ def seed_all(seed: int = 42, deterministic: bool = True) -> None:
     torch.backends.cudnn.benchmark = not deterministic
 
 
-def seed_worker(worker_id: int, base_seed: int | None = None) -> None:
-    seed = worker_id if base_seed is None else base_seed + worker_id
+def seed_worker(worker_id: int, base_seed: int | None = None, rank: int = 0, start_step: int = 0) -> None:
+    """DataLoader worker seed: ``base_seed + worker_id``, else from (worker, rank, resume step) so DDP ranks
+    and resumes do not replay the same draws."""
+    if base_seed is not None:
+        seed = base_seed + worker_id
+    else:
+        seed = int(np.random.SeedSequence([worker_id, rank, start_step]).generate_state(1)[0])
     np.random.seed(seed)
     random.seed(seed)
     torch.manual_seed(seed)
