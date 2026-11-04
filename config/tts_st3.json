@@ -80,7 +80,8 @@
             "text_dim": 256,
             "style_dim": 256,
             "n_units": 256,
-            "n_heads": 2
+            "n_heads": 2,
+            "style_key_mode": "projected"
         },
         "uncond_masker": {
             "prob_both_uncond": 0.04,
@@ -89,7 +90,8 @@
             "text_dim": 256,
             "n_style": 50,
             "style_key_dim": 256,
-            "style_value_dim": 256
+            "style_value_dim": 256,
+            "style_key_uncond": true
         },
         "vector_field": {
             "proj_in": {

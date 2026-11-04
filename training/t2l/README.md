@@ -42,6 +42,9 @@ that model. `config/tts.json` stays the 33M model.
 `tts_st3.json` uses 0.1, and on the DP sentence encoder only via `dp.sentence_encoder.layer_scale_init`).
 `edge_fill` (in `ttl` and `dp`) fills each row's padding with its last valid column inside every ConvNeXt,
 so a padded training row computes what it computes alone at inference.
+`speech_prompted_text_encoder.style_key_mode: "projected"` computes the TE style keys as
+`tanh(W_key(style_key))`, where `style_key` is shared with the VF `tile`; `uncond_masker.style_key_uncond`
+adds `u_key`, the style keys of every style-dropped row.
 
 ## Healthy Loss Curve
 A healthy Flow Matching training loss curve will start high and exponentially decay, flattening out over time. If using SPFM, you will see it drop further when fine-tuning kicks in.
