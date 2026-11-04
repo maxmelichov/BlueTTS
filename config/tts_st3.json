@@ -46,6 +46,17 @@
         "flow_matching": {
             "sig_min": 1e-08
         },
+        "train": {
+            "weight_decay": 0.0,
+            "lr_milestones": [400000, 600000, 800000],
+            "ema_decay": 0.9999
+        },
+        "rsf": {
+            "enabled": true,
+            "start_step": 200000,
+            "lambda_rand": 0.2,
+            "lambda_aug": 0.2
+        },
         "style_encoder": {
             "proj_in": {
                 "ldim": 24,
