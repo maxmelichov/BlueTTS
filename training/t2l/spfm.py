@@ -43,6 +43,7 @@ def spfm_forward_mask(
     device: torch.device,
     B: int,
     rank: int = 0,
+    u_key: Optional[torch.Tensor] = None,
 ) -> SpfmStepResult:
     """
     If outside the SPFM step window, returns an all-ones mask and ``ran_spfm=False``.
@@ -93,6 +94,7 @@ def spfm_forward_mask(
             latent_mask=latent_mask,
             text_mask=u_text_mask_spfm,
             current_step=t_spfm,
+            style_keys=u_key.expand(B, -1, -1) if u_key is not None else None,
         )
 
         final_mask_spfm = latent_mask * target_loss_mask
