@@ -26,6 +26,7 @@ from ..blue_onnx import (
     TextProcessor,
     UnicodeProcessor,
     blend_duration_pace,
+    canonical_lang,
     chunk_text,
     latent_frames_for_duration,
     load_text_processor as _load_text_processor_onnx,
@@ -225,10 +226,15 @@ class TextToSpeech:
         ``pace_dpt_ref`` (more consistent ``speed`` across languages).
         """
         phonemize = not text_is_phonemes
-        if isinstance(text, list):
-            has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text)
-        else:
-            has_inline_lang = _INLINE_LANG_PAIR.search(text) is not None
+        # Only a span in another language makes the text mixed: <en> inside
+        # English text goes to the same G2P (see blue_onnx.has_foreign_lang_span).
+        langs = lang if isinstance(lang, list) else [lang] * (len(text) if isinstance(text, list) else 1)
+        texts = text if isinstance(text, list) else [text]
+        has_inline_lang = any(
+            canonical_lang(m.group(1)) != canonical_lang(lg)
+            for t, lg in zip(texts, langs)
+            for m in _INLINE_LANG_PAIR.finditer(t)
+        )
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None

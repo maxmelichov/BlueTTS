@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 import unittest
+from unittest import mock
 
+from src.blue_onnx import text_norm
 from src.blue_onnx.text_norm import (
     SLOW_MARK_CLOSE,
     SLOW_MARK_OPEN,
@@ -35,16 +37,24 @@ from src.blue_onnx.text_norm import (
 )
 
 
+def without_hebrew_num2words():
+    """Run the built-in Hebrew fallback even when hebrew-num2words is installed."""
+    return mock.patch.object(text_norm, "_hebrew_num2words", lambda: None)
+
+
+HAS_HEBREW_NUM2WORDS = text_norm._hebrew_num2words() is not None
+
+
 class TestNumbers(unittest.TestCase):
     def test_thousands_separator_is_not_a_decimal(self):
         # Regression: float("1,500".replace(",", ".")) == 1.5 read prices as decimals.
-        self.assertEqual(expand_numbers("1,500", lang="en"), "one thousand, five hundred")
+        self.assertEqual(expand_numbers("1,500", lang="en"), "one thousand five hundred")
         self.assertNotIn("point", expand_numbers("1,500", lang="en"))
 
     def test_multiple_thousands_groups(self):
         self.assertEqual(
             expand_numbers("12,345,678", lang="en"),
-            "twelve million, three hundred and forty-five thousand, six hundred and seventy-eight",
+            "twelve million three hundred forty five thousand six hundred seventy eight",
         )
 
     def test_decimal_point_still_decimal(self):
@@ -54,7 +64,8 @@ class TestNumbers(unittest.TestCase):
         self.assertEqual(expand_numbers("3,5", lang="en"), "three point five")
 
     def test_hebrew_integer(self):
-        self.assertEqual(expand_numbers("1,500", lang="he"), "אלף וחמש מאות")
+        with without_hebrew_num2words():
+            self.assertEqual(expand_numbers("1,500", lang="he"), "אלף וחמש מאות")
 
     def test_comma_decimal_locale_groups_with_dots(self):
         # German writes 1.500 for a thousand and 3,5 for three and a half.
@@ -62,13 +73,14 @@ class TestNumbers(unittest.TestCase):
         self.assertEqual(expand_numbers("3,5", lang="de"), "drei Komma fünf")
 
     def test_dot_grouping_not_applied_to_english(self):
-        self.assertEqual(expand_numbers("1.500", lang="en"), "one point five")
+        self.assertEqual(expand_numbers("1.500", lang="en"), "one point five zero zero")
 
     def test_digits_in_en_span_are_left_alone(self):
-        self.assertEqual(
-            expand_numbers("<en>GPT 4</en> ו 5", lang="he"),
-            "<en>GPT 4</en> ו חמש",
-        )
+        with without_hebrew_num2words():
+            self.assertEqual(
+                expand_numbers("<en>GPT 4</en> ו 5", lang="he"),
+                "<en>GPT 4</en> ו חמש",
+            )
 
     def test_digits_in_slow_span_are_left_alone(self):
         marked = f"{SLOW_MARK_OPEN}4 8{SLOW_MARK_CLOSE} 9"
@@ -77,9 +89,10 @@ class TestNumbers(unittest.TestCase):
 
 class TestTimesAndRatios(unittest.TestCase):
     def test_hebrew_clock_time(self):
-        out = expand_times("בשעה 08:15", lang="he")
+        with without_hebrew_num2words():
+            out = prepare_text_for_synthesis("בשעה 08:15", lang="he")
         self.assertIn("שמונה וחמש עשרה", out)
-        self.assertIn(SLOW_MARK_OPEN, out)
+        self.assertNotIn(SLOW_MARK_OPEN, out)
 
     def test_non_hebrew_clock_time_is_a_time_not_a_ratio(self):
         # Regression: expand_times used to be Hebrew-only, so expand_ratios turned
@@ -89,8 +102,8 @@ class TestTimesAndRatios(unittest.TestCase):
         self.assertNotIn(" to ", out)
 
     def test_whole_hour_drops_minutes(self):
-        self.assertIn("eight", expand_times("at 08:00", lang="en"))
-        self.assertNotIn("zero", expand_times("at 08:00", lang="en"))
+        self.assertEqual(expand_times("at 08:00", lang="en"), "at eight o'clock")
+        self.assertEqual(expand_times("at 08:00 pm", lang="en"), "at eight pm")
 
     def test_out_of_range_time_untouched(self):
         self.assertEqual(expand_times("25:99", lang="he"), "25:99")
@@ -102,9 +115,10 @@ class TestTimesAndRatios(unittest.TestCase):
 
 class TestDates(unittest.TestCase):
     def test_hebrew_date(self):
-        out = expand_dates("12/05/2024", lang="he")
+        with without_hebrew_num2words():
+            out = expand_dates("12/05/2024", lang="he")
         self.assertIn("לחמישי", out)
-        self.assertIn(SLOW_MARK_OPEN, out)
+        self.assertNotIn(SLOW_MARK_OPEN, out)
 
     def test_latin_date_becomes_words_not_digits(self):
         out = expand_dates("12/05/2024", lang="en")
@@ -113,7 +127,7 @@ class TestDates(unittest.TestCase):
         self.assertNotIn("12", out)
 
     def test_two_digit_year(self):
-        self.assertIn("two thousand and twenty-four", expand_dates("12.5.24", lang="en"))
+        self.assertIn("twenty twenty four", expand_dates("12.5.24", lang="en"))
 
     def test_invalid_date_untouched(self):
         self.assertEqual(expand_dates("45/99/2024", lang="he"), "45/99/2024")
@@ -189,14 +203,23 @@ class TestHebrewSpelling(unittest.TestCase):
 class TestPhoneNumbers(unittest.TestCase):
     def test_landline_digit_by_digit(self):
         out = expand_phone_numbers("התקשר ל 03-5551234", lang="he")
-        self.assertIn("אפס שלוש חמש חמש חמש אחת שתיים שלוש ארבע", out)
+        self.assertIn("אפס שלוש, חמש חמש חמש אחת שתיים שלוש ארבע", out)
 
     def test_star_number(self):
         self.assertIn("כוכבית שש שבע אפס אפס", expand_phone_numbers("*6700", lang="he"))
 
-    def test_non_hebrew_untouched(self):
-        self.assertEqual(expand_phone_numbers("call 03-5551234", lang="en"),
-                         "call 03-5551234")
+    def test_other_languages_read_digit_groups(self):
+        self.assertEqual(
+            expand_phone_numbers("call 555-123-4567", lang="en"),
+            f"call {SLOW_MARK_OPEN}five five five, one two three, four five six seven{SLOW_MARK_CLOSE}",
+        )
+        self.assertIn("null drei null, eins", expand_phone_numbers("unter 030 1234567", lang="de"))
+        self.assertIn("seis uno dos, tres", expand_phone_numbers("al 612 345 678", lang="es"))
+        self.assertIn("più tre nove", expand_phone_numbers("+39 06 1234 5678", lang="it"))
+
+    def test_numbers_that_are_not_phone_numbers(self):
+        for text in ("1 500 000", "1990-1995", "12-05-2024", "10-20", "2024-05-12"):
+            self.assertEqual(expand_phone_numbers(text, lang="en"), text)
 
 
 class TestPunctuationAndMarkup(unittest.TestCase):
@@ -250,10 +273,19 @@ class TestSlowSegments(unittest.TestCase):
         self.assertEqual(split_slow_segments("plain text"), [("plain text", False)])
 
     def test_split_marks_inner_span(self):
+        # Every segment but the last ends in a comma: on its own a segment would
+        # get the tokenizer's sentence-final full stop in mid-sentence.
         text = f"before {SLOW_MARK_OPEN}code{SLOW_MARK_CLOSE} after"
         self.assertEqual(
             split_slow_segments(text),
-            [("before", False), ("code", True), ("after", False)],
+            [("before,", False), ("code,", True), ("after", False)],
+        )
+
+    def test_split_keeps_existing_punctuation(self):
+        text = f"call me: {SLOW_MARK_OPEN}code{SLOW_MARK_CLOSE}. Bye"
+        self.assertEqual(
+            split_slow_segments(text),
+            [("call me:", False), ("code.", True), ("Bye", False)],
         )
 
     def test_trailing_punctuation_merges_into_previous(self):
@@ -265,7 +297,7 @@ class TestSlowSegments(unittest.TestCase):
         self.assertEqual(strip_slow_markers(text), "a b c")
 
     def test_prepare_can_omit_markers(self):
-        out = prepare_text_for_synthesis("ההזמנה 12/05/2024", lang="he", mark_slow=False)
+        out = prepare_text_for_synthesis("ההזמנה IL-4829", lang="he", mark_slow=False)
         self.assertNotIn(SLOW_MARK_OPEN, out)
         self.assertNotIn(SLOW_MARK_CLOSE, out)
 
@@ -352,6 +384,212 @@ class TestEnSpanProtection(unittest.TestCase):
     def test_unmatched_open_tag_does_not_swallow_text(self):
         out = prepare_text_for_synthesis("שלום <en>hello", lang="he")
         self.assertIn("hello", out)
+
+
+class TestReportedReadings(unittest.TestCase):
+    """The five readings reported on BlueV3 with ``synthesize()`` defaults."""
+
+    def test_price_reads_amount_then_unit(self):
+        # Was "dollars one point two five. fifty".
+        self.assertEqual(
+            prepare_text_for_synthesis("The total is $1,250.50 today.", lang="en"),
+            "The total is one thousand two hundred fifty dollars and fifty cents today.",
+        )
+
+    def test_english_ordinal_is_a_word_not_a_code(self):
+        # Was spelled as a code: "R D three".
+        self.assertEqual(
+            prepare_text_for_synthesis("She finished 3rd in the race.", lang="en"),
+            "She finished third in the race.",
+        )
+
+    def test_german_ordinal_date(self):
+        # Was read as a list counter: "drei. Mai".
+        self.assertEqual(
+            prepare_text_for_synthesis("Wir treffen uns am 3. Mai.", lang="de"),
+            "Wir treffen uns am dritten Mai.",
+        )
+
+    def test_times_dates_prices_are_one_inline_segment(self):
+        # Were split into slow passes with a full stop after each piece.
+        cases = [
+            ("en", "The meeting is at 14:30 on 25/12/2024 and costs $40."),
+            ("es", "La reunión es a las 14:30 del 12/05/2024 y cuesta 40 €."),
+            ("it", "La riunione è alle 14:30 del 12/05/2024 e costa 40 €."),
+            ("de", "Der Zug fährt am 12.05.2024 um 14:30 und kostet 40 €."),
+            ("he", "הפגישה בשעה 14:30 ב-12/05/2024 ועולה 40 ₪."),
+        ]
+        for lang, text in cases:
+            out = prepare_text_for_synthesis(text, lang=lang)
+            self.assertEqual(split_slow_segments(out), [(out, False)], (lang, out))
+            self.assertFalse(any(ch.isdigit() for ch in out), (lang, out))
+            self.assertEqual(out.count("."), 1, (lang, out))
+
+    def test_english_text_gets_no_language_spans(self):
+        for text in (
+            "She finished 3rd in the race.",
+            "Your booking code is BA2490.",
+            "Write to john.doe@example.com today.",
+            "Call me at 555-123-4567.",
+        ):
+            out = prepare_text_for_synthesis(text, lang="en")
+            self.assertNotIn("<en>", out, out)
+
+
+class TestSlowSpansOnlyForDigitStrings(unittest.TestCase):
+    def test_phone_and_code_are_slow_without_a_full_stop(self):
+        out = prepare_text_for_synthesis("Call 555-123-4567 or use code BA2490 today.", lang="en")
+        segments = split_slow_segments(out)
+        self.assertEqual(
+            segments,
+            [
+                ("Call,", False),
+                ("five five five, one two three, four five six seven,", True),
+                ("or use code,", False),
+                ("B A two four nine zero,", True),
+                ("today.", False),
+            ],
+        )
+
+    def test_code_letters_keep_their_order(self):
+        self.assertIn("X seven K nine Q two", prepare_text_for_synthesis("X7K9Q2", lang="en"))
+
+    def test_code_letters_are_spelled_in_the_text_language(self):
+        # Only Hebrew needs English letter names: its G2P has none for Latin letters.
+        self.assertIn("A B eins zwei", prepare_text_for_synthesis("AB12", lang="de"))
+        self.assertIn("<en>A B</en>", prepare_text_for_synthesis("AB12", lang="he"))
+
+
+class TestLocales(unittest.TestCase):
+    def check(self, lang, cases):
+        for text, expected in cases:
+            self.assertEqual(prepare_text_for_synthesis(text, lang=lang), expected, text)
+
+    def test_english(self):
+        self.check("en", [
+            ("It costs €20 or £15.50.", "It costs twenty euros or fifteen pounds and fifty pence."),
+            ("The fine is $1.", "The fine is one dollar."),
+            ("He was born on the 21st of June.", "He was born on the twenty first of June."),
+            ("We met on March 3, 2021.", "We met on March third, twenty twenty one."),
+            ("The deadline is 25/12/2024.", "The deadline is December twenty fifth twenty twenty four."),
+            ("The train leaves at 9:05.", "The train leaves at nine oh five."),
+            ("Born in 1999.", "Born in nineteen ninety nine."),
+            ("The 1990s were different.", "The nineteen nineties were different."),
+            ("Sales grew by 12.5%.", "Sales grew by twelve point five percent."),
+            ("Add 0.5 liters.", "Add zero point five liters."),
+        ])
+
+    def test_german(self):
+        self.check("de", [
+            ("Der Preis beträgt 1.250,50 €.", "Der Preis beträgt eintausendzweihundertfünfzig Euro fünfzig."),
+            ("Das Ticket kostet $30.", "Das Ticket kostet dreißig Dollar."),
+            ("Heute ist der 1. Januar.", "Heute ist der erste Januar."),
+            ("Das ist der 2. Versuch.", "Das ist der zweite Versuch."),
+            ("Geboren am 3.10.1990.", "Geboren am dritten Oktober neunzehnhundertneunzig."),
+            ("Wir treffen uns um 8:00 Uhr.", "Wir treffen uns um acht Uhr."),
+            ("Der Zug fährt um 14:30 ab.", "Der Zug fährt um vierzehn Uhr dreißig ab."),
+            ("Der Wert liegt bei 0,75.", "Der Wert liegt bei null Komma fünfundsiebzig."),
+        ])
+
+    def test_ranges_signs_and_dashed_dates(self):
+        self.check("en", [
+            ("Pages 10-20.", "Pages ten to twenty."),
+            ("A 50-60% rise.", "A fifty to sixty percent rise."),
+            ("It was -5 degrees.", "It was minus five degrees."),
+            ("Due 12-05-2024.", "Due May twelfth twenty twenty four."),
+            ("Call 911.", "Call nine one one."),
+        ])
+        self.assertEqual(prepare_text_for_synthesis("Seiten 10–20", lang="de"), "Seiten zehn bis zwanzig")
+
+    def test_german_sentence_final_number_is_not_an_ordinal(self):
+        self.assertEqual(
+            prepare_text_for_synthesis("Ich habe 3. Dann gehe ich.", lang="de"),
+            "Ich habe drei. Dann gehe ich.",
+        )
+
+    def test_spanish(self):
+        self.check("es", [
+            ("El total es de 1.250,50 €.", "El total es de mil doscientos cincuenta euros con cincuenta céntimos."),
+            ("Pagó $21.", "Pagó veintiún dólares."),
+            ("Quedó 3º en la carrera.", "Quedó tercero en la carrera."),
+            ("Es la 1ª vez.", "Es la primera vez."),
+            ("Nació el 1/3/1990.", "Nació el primero de marzo de mil novecientos noventa."),
+            ("Es a las 14:30.", "Es a las catorce y treinta."),
+            ("Tengo 21 libros.", "Tengo veintiún libros."),
+            ("Mide 2,5 metros.", "Mide dos coma cinco metros."),
+        ])
+
+    def test_italian(self):
+        self.check("it", [
+            ("Il totale è di 1.250,50 €.", "Il totale è di milleduecentocinquanta euro e cinquanta centesimi."),
+            ("Costa 1 €.", "Costa un euro."),
+            ("È arrivato 3º.", "È arrivato terzo."),
+            ("È la 1ª volta.", "È la prima volta."),
+            ("È nato il 1/3/1990.", "È nato il primo marzo millenovecentonovanta."),
+            ("Parte alle 9:15.", "Parte alle nove e quindici."),
+            ("Il valore è 0,75.", "Il valore è zero virgola settantacinque."),
+        ])
+
+    def test_ordinary_text_is_unchanged(self):
+        for lang, text in [
+            ("en", "Please read the instructions before you begin."),
+            ("de", "Bitte schließen Sie die Tür hinter sich."),
+            ("es", "Buenos días, ¿cómo estás hoy?"),
+            ("it", "Per favore, chiudi la porta quando esci."),
+            ("he", "השמיים בהירים ומזג האוויר נעים."),
+        ]:
+            self.assertEqual(prepare_text_for_synthesis(text, lang=lang), text)
+
+
+class TestHebrewFallback(unittest.TestCase):
+    """Without hebrew-num2words: bare cardinals, but nothing split or stranded."""
+
+    def test_prefix_stays_on_the_number(self):
+        with without_hebrew_num2words():
+            out = prepare_text_for_synthesis("הפגישה ב-14:30.", lang="he")
+        self.assertEqual(out, "הפגישה בארבע עשרה ושלושים.")
+
+    def test_currency_sign_becomes_a_word(self):
+        with without_hebrew_num2words():
+            self.assertEqual(prepare_text_for_synthesis("זה עולה 20 ₪.", lang="he"), "זה עולה עשרים שקלים.")
+
+    def test_definite_ordinal(self):
+        with without_hebrew_num2words():
+            out = prepare_text_for_synthesis("הוא סיים במקום ה-3.", lang="he")
+        self.assertEqual(out, "הוא סיים במקום השלישי.")
+
+
+@unittest.skipUnless(HAS_HEBREW_NUM2WORDS, "hebrew-num2words not installed")
+class TestHebrewNum2Words(unittest.TestCase):
+    def check(self, cases):
+        for text, expected in cases:
+            self.assertEqual(prepare_text_for_synthesis(text, lang="he"), expected, text)
+
+    def test_gender_agreement(self):
+        self.check([
+            ("יש לי 3 ילדים ו-2 בנות.", "יש לי שלושה ילדים ושתי בנות."),
+            ("קניתי 5 ספרים.", "קניתי חמישה ספרים."),
+        ])
+
+    def test_prices(self):
+        self.check([
+            ('המחיר הוא 1,250 ש"ח.', "המחיר הוא אלף מאתיים וחמישים שקלים."),
+            ("הכרטיס עולה 9.90 ₪.", "הכרטיס עולה תשעה שקלים ותשעים אגורות."),
+            ("שילמתי $15 על הספר.", "שילמתי חמישה עשר דולר על הספר."),
+        ])
+
+    def test_dates_times_ordinals(self):
+        self.check([
+            ("הפגישה תתקיים ב-12/05/2024.", "הפגישה תתקיים בשנים עשר במאי אלפיים עשרים וארבע."),
+            ("הרכבת יוצאת ב-9:15.", "הרכבת יוצאת בתשע ורבע."),
+            ("זו הפעם ה-2 שאני כאן.", "זו הפעם השנייה שאני כאן."),
+            ("המחירים עלו ב-3.5%.", "המחירים עלו בשלושה וחצי אחוז."),
+        ])
+
+    def test_codes_and_phones_are_still_spelled_first(self):
+        out = prepare_text_for_synthesis("קוד IL4829, טלפון 054-1234567", lang="he")
+        self.assertIn("<en>I L</en> ארבע שמונה שתיים תשע", out)
+        self.assertIn("אפס חמש ארבע, אחת שתיים", out)
 
 
 class TestEmoji(unittest.TestCase):

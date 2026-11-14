@@ -71,11 +71,19 @@ emails, ticket/model codes, bracketed asides, markdown headers, repeated punctua
 emoji, and Hebrew spelling quirks (gershayim, phonetic geresh, hyphenated compounds).
 
 It is **locale-aware**: `1,500` is a thousand in English/Hebrew, while `1.500` is a
-thousand in German/Spanish/Italian.
+thousand in German/Spanish/Italian. Each language gets its own patterns:
 
-Spelled codes, phone numbers, dates and times are wrapped in `【…】` *slow markers* and
-synthesized as separate, slower passes so digit groups stay intelligible. Inspect
-exactly what will be spoken without synthesizing:
+| input | `en` | `de` | `es` / `it` |
+|---|---|---|---|
+| `$1,250.50` / `1.250,50 €` | one thousand two hundred fifty dollars and fifty cents | eintausendzweihundertfünfzig Euro fünfzig | mil doscientos cincuenta euros con cincuenta céntimos |
+| `3rd` / `am 3. Mai` / `3º` | third | am dritten Mai | tercero / terzo |
+| `14:30` | fourteen thirty | vierzehn Uhr dreißig | catorce y treinta / quattordici e trenta |
+| `25/12/2024` | December twenty fifth twenty twenty four | fünfundzwanzigste Dezember zweitausendvierundzwanzig | veinticinco de diciembre de dos mil veinticuatro |
+
+Prices, dates and times are read inline at the sentence's own pace. Phone numbers and
+spelled codes are wrapped in `【…】` *slow markers* and synthesized as separate, slightly
+slower passes, joined by commas (never a full stop) so digit groups stay intelligible.
+Inspect exactly what will be spoken without synthesizing:
 
 ```python
 from blue_onnx import prepare_text_for_synthesis, split_slow_segments
@@ -87,6 +95,17 @@ for segment, is_slow in split_slow_segments(prepared):
 
 `uv run python examples/normalize.py` prints both and writes the audio.
 
+**Hebrew numbers** agree with the noun they count (`3 ילדים` → שלושה ילדים, `3 בנות` →
+שלוש בנות) when the optional [hebrew-num2words](https://pypi.org/project/hebrew-num2words/)
+package is installed; it also reads times on the 12-hour clock (`14:30` → שתיים וחצי)
+and dates with month names (`12/05/2024` → שנים עשר במאי אלפיים עשרים וארבע):
+
+```bash
+uv sync --extra hebrew        # or: pip install "blue-onnx[hebrew]"
+```
+
+Without it, Hebrew numbers fall back to plain cardinals.
+
 ## Inline language spans
 
 `<en>…</en>` inside any text routes that span to a different G2P:
@@ -96,15 +115,16 @@ mixed = "שלום לכולם, <en>welcome to the presentation</en>, <es>espero q
 samples, sr = tts.synthesize(mixed, lang="he")
 ```
 
-The normalizer also emits these itself, for emails and Latin loanwords. Their presence
-switches `pace_blend` on automatically (see below).
+The normalizer also emits these itself in non-English text, for emails, Latin letters
+in codes and loanwords. A span in another language than `lang` switches `pace_blend` on
+automatically (see below); a span in the same language (`<en>` in English text) does not.
 
 ## Pace blending
 
 The duration head uses a different seconds-per-token per language, so one `speed` value
 is inconsistent across mixed text. `pace_blend` in `(0, 1]` pulls predicted duration
 toward a fixed seconds-per-text-token before dividing by `speed`. Left at `None` it
-defaults to `0.25` for text containing inline spans and `0` otherwise.
+defaults to `0.25` for text containing inline spans in another language and `0` otherwise.
 
 ## Accelerators
 

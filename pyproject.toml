@@ -20,6 +20,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Hebrew numbers that agree with the counted noun (3 ילדים → שלושה, 3 בנות → שלוש), plus
+# 12-hour clock readings and month-name dates. Pure Python; without it the normalizer
+# falls back to plain cardinals.
+hebrew = [
+    "hebrew-num2words>=0.1.0",
+]
 # Intel OpenVINO EP (optional). After `uv sync --extra openvino` / `pip install "blue-onnx[openvino]"`, uninstall the
 # stock CPU wheel so only one package provides `onnxruntime`: `uv pip uninstall onnxruntime` / `pip uninstall onnxruntime`.
 # Linux wheels bundle OpenVINO; on Windows also install the `openvino` PyPI package per Intel docs.
