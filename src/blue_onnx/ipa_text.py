@@ -59,3 +59,9 @@ def encode_tagged(ipa: str, lang: str, char_to_id: dict, pad_id: int = 0, tag=("
     head = [char_to_id[o]] + [char_to_id[ch] for ch in code] + [char_to_id[c]]
     tail = [char_to_id[o], char_to_id[s]] + [char_to_id[ch] for ch in code] + [char_to_id[c]]
     return head + ids + tail
+
+
+def tagged_len(ipa: str, lang: str) -> int:
+    """``len(encode_tagged(ipa, lang, ...))`` without a vocabulary: the ids a chunk costs, its tags included."""
+    code = re.sub(r"[^a-z]", "", lang.lower().split("-")[0])
+    return len(normalize_ipa(_TAG.sub("", ipa), lang=lang)) + 2 * len(code) + 5
