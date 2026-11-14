@@ -13,6 +13,7 @@ from unicodedata import normalize
 import numpy as np
 import onnxruntime as ort
 
+from .ipa_text import tag_latin_runs
 from .text_norm import (  # noqa: F401  (re-exported as the package's public API)
     EMOJI_RE,
     SLOW_MARK_OPEN,
@@ -120,10 +121,10 @@ class TextProcessor:
     ):
         """``renikud_path`` is optional: RenikudPlus fetches its own weights.
 
-        ``release`` (the ``blue_release`` section of a bundle's ``tts.json``) switches to the G2Ps that model was
-        trained with: polyg2p for en/de/es/it (data files from ``POLYG2P_DATA`` or ``<bundle>/frontend/polyg2p_data``)
-        and RenikudPlus for Hebrew with the bundle's weights (``<bundle>/frontend/renikud/model.onnx``) when no
-        ``renikud_path`` is given.
+        ``release`` (the ``blue_release`` section of a bundle's ``tts.json``) switches to the bundle's G2Ps: polyg2p
+        for en/de/es/it/ru (data files from ``POLYG2P_DATA`` or ``<bundle>/frontend/polyg2p_data``), RenikudPlus for
+        Hebrew with the bundle's weights (``<bundle>/frontend/renikud/model.onnx``) when no ``renikud_path`` is given,
+        and the Yiddish G2P in ``<bundle>/frontend/yi``.
 
         The G2P is built on first Hebrew segment, so Latin-only synthesis never
         pulls the Hebrew weights. ``speaker`` / ``target_speaker`` are RenikudPlus
@@ -204,20 +205,23 @@ class TextProcessor:
             if self._yi is None:
                 d = os.path.join(self.frontend_dir, "yi")
                 if d not in sys.path:
-                    sys.path.insert(0, d)
+                    sys.path.append(d)
                 from yiddish_labels import text_to_ipa   # checks its tables at import
                 self._yi = text_to_ipa
             if re.search(r"\d", content):
                 # no Yiddish number reader: the G2P would drop the digits silently
                 raise ValueError(f"Yiddish text with digits: spell the numbers out in words: {content[:80]!r}")
             # the cleaning the Yiddish G2P expects: no sof pasuq, tags, quotes or word-final hyphen pieces
-            t = re.sub(r"<[^>]+>", "", re.sub(r'[„“”«»‹›‚‘]', "", content.replace("׃", "")))
-            t = re.sub(r"\S+-(?=\s|$)", "", t).strip()
-            out = self._yi(t)
-            if _n_words(out) < _n_words(t):
-                # the Yiddish G2P skips words it cannot read: name them instead of dropping them silently
-                lost = [w for w in t.split() if _n_words(w) and not _n_words(self._yi(w))]
-                print(f"[WARN] Yiddish G2P dropped {_n_words(t) - _n_words(out)} word(s) "
+            src = re.sub(r"<[^>]+>", "", re.sub(r'[„“”«»‹›‚‘]', "", content.replace("׃", ""))).strip()
+            t = re.sub(r"\S+-(?=\s|$)", "", src).strip()
+            out = self._yi(t) if t else ""
+            if _n_words(out) < _n_words(src):
+                # the Yiddish G2P skips words it cannot read (and word-final hyphen pieces are cut before it):
+                # name them instead of dropping them silently
+                lost = [w for w in src.split() if _n_words(w) and (w.endswith("-") or not _n_words(self._yi(w)))]
+                if not _n_words(out):
+                    raise ValueError(f"the Yiddish G2P can read none of {content[:80]!r} ({lost})")
+                print(f"[WARN] Yiddish G2P dropped {_n_words(src) - _n_words(out)} word(s) "
                       f"{lost or ''} in {content[:80]!r}; they will not be spoken", file=sys.stderr)
             return out
         if has_hebrew or lang == "he":
@@ -234,7 +238,7 @@ class TextProcessor:
                     from polyg2p import Phonemizer
                 except ImportError as e:
                     raise RuntimeError(
-                        "This release bundle needs polyg2p for en/de/es/it: "
+                        "This release bundle needs polyg2p for en/de/es/it/ru: "
                         "pip install <bundle>/frontend/polyg2p-*.whl"
                     ) from e
                 self._poly = Phonemizer(data_dir=d)
@@ -276,6 +280,8 @@ class TextProcessor:
         if not _INLINE_LANG_PAIR.search(text):
             seg = self._phonemize_segment(text, lang)
             return f"<{lang}>{seg}</{lang}>" if seg else ""
+        if self.release:
+            return self._phonemize_mixed_release(text, lang)
         pieces, last_end = [], 0
         for m in _INLINE_LANG_PAIR.finditer(text):
             if m.start() > last_end:
@@ -292,6 +298,31 @@ class TextProcessor:
             if seg:
                 pieces.append(f"<{lang}>{seg}</{lang}>")
         return re.sub(r"\s+", " ", " ".join(pieces)).strip()
+
+    def _phonemize_mixed_release(self, text: str, lang: str) -> str:
+        """Release bundles, text with inline spans: each span's IPA gets its own language's view (Hebrew rules on
+        Hebrew spans only), without the terminal '.' a span's G2P or view adds when the source span does not end a
+        sentence; the join is normalised once in ``lang`` by :func:`encode_tagged`. No span ids: the whole input is
+        wrapped in ``<lang>`` ... ``</lang>`` once."""
+        from .ipa_text import normalize_ipa
+        segs, last_end = [], 0
+        for m in _INLINE_LANG_PAIR.finditer(text):
+            segs.append((lang, text[last_end:m.start()]))
+            segs.append((m.group(1), m.group(2)))
+            last_end = m.end()
+        segs.append((lang, text[last_end:]))
+        segs = [(lg, t.strip()) for lg, t in segs if t.strip()]
+        parts = []
+        for k, (lg, src) in enumerate(segs):
+            if not any(c.isalnum() for c in src):
+                parts.append(re.sub(r'["“”„]', "", src))   # punctuation between spans, kept as written
+                continue
+            ipa = normalize_ipa(_LANG_TAG_RE.sub("", self._phonemize_segment(src, lg)), lang=lg, final_period=False)
+            if k < len(segs) - 1 and ipa.endswith(".") and not ipa.endswith("..") and re.search(r"\w$", src):
+                ipa = ipa[:-1].rstrip()
+            parts.append(ipa)
+        out = " ".join(p for p in parts if p.strip())
+        return f"<{lang}>{out}</{lang}>" if out else ""
 
 
 class UnicodeProcessor:
@@ -665,6 +696,7 @@ class TextToSpeech:
         so the same ``speed`` behaves more consistently across languages and in
         mixed inline-``<lang>`` text. If omitted (``None``), mixed text defaults
         to :data:`DEFAULT_MIXED_PACE_BLEND`, while single-language defaults to 0.
+        With a release bundle it defaults to 0 everywhere: the model's own durations.
         """
         self.check_style(style)
         phonemize = not text_is_phonemes
@@ -683,7 +715,14 @@ class TextToSpeech:
                     for t, lg in zip(text, langs)
                 ]
             else:
-                text = prepare_text_for_synthesis(text, lang=lang)
+                # release bundles: no slowed spans (the model's own durations, one chunk as the model reads it)
+                text = prepare_text_for_synthesis(text, lang=lang, mark_slow=not self.release)
+        if phonemize and self.text_processor.release:
+            if isinstance(text, list):
+                langs = lang if isinstance(lang, list) else [lang] * len(text)
+                text = [tag_latin_runs(t, lg) for t, lg in zip(text, langs)]
+            else:
+                text = tag_latin_runs(text, lang)
         # Computed after normalization: it can introduce <en> spans (emails,
         # spelled codes, loanwords) that should count as mixed-language text.
         if isinstance(text, list):
@@ -693,7 +732,7 @@ class TextToSpeech:
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
-            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
+            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang and not self.release else 0.0)
         )
         if isinstance(text, list):
             assert isinstance(lang, list) and len(text) == len(lang), (
@@ -729,7 +768,8 @@ class TextToSpeech:
         prev_is_slow = False
         for seg_text, is_slow in segments:
             seg_speed = speed * SLOW_SPEED_SCALE if is_slow else speed
-            seg_pace_blend = SLOW_PACE_BLEND if is_slow else pace_blend_eff
+            # release bundles: the model's own durations unless pace_blend is passed (slow spans included)
+            seg_pace_blend = SLOW_PACE_BLEND if is_slow and not self.release else pace_blend_eff
             seg_pace_dpt = SLOW_PACE_DPT_REF if is_slow else pace_dpt_ref
             if phonemize and self.g2p is not None:
                 seg_text = self.g2p.phonemize(seg_text, lang=lang)
@@ -765,6 +805,10 @@ class TextToSpeech:
         Only tagged voices are checked; a bundle without a ``blue_release`` section is an older (v2) model."""
         tag = getattr(style, "model", None)
         if tag is None:
+            if self.release and not getattr(self, "_untagged_warned", False):
+                self._untagged_warned = True
+                print("[WARN] this voice JSON has no \"model\" tag: a voice works only with the model it was exported "
+                      "from (the previous model's voices do not work with this bundle)", file=sys.stderr)
             return
         bundle = (self.release or {}).get("model") if self.release else "v2"
         if bundle is not None and bundle != tag:
@@ -812,13 +856,15 @@ class TextToSpeech:
                 prepare_text_for_synthesis(t, lang=lang_code, mark_slow=False)
                 for t, lang_code in zip(text_list, lang_list)
             ]
+        phonemize = not text_is_phonemes
+        if phonemize and self.text_processor.release:
+            text_list = [tag_latin_runs(t, lg) for t, lg in zip(text_list, lang_list)]
         has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text_list)
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
-            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
+            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang and not self.release else 0.0)
         )
-        phonemize = not text_is_phonemes
         if phonemize and self.g2p is not None:
             text_list = [
                 self.g2p.phonemize(t, lang=lang_code)
@@ -1045,9 +1091,11 @@ def load_voice_style(voice_style_paths: list[str], verbose: bool = False) -> Sty
     dp_style = np.zeros([bsz, dp_dims[1], dp_dims[2]], dtype=np.float32)
 
     # Fill in the data
+    tags = set()
     for i, voice_style_path in enumerate(voice_style_paths):
         with open(voice_style_path, "r") as f:
             voice_style = json.load(f)
+        tags.add(voice_style.get("model"))
 
         ttl_data = np.array(
             voice_style["style_ttl"]["data"], dtype=np.float32
@@ -1059,13 +1107,8 @@ def load_voice_style(voice_style_paths: list[str], verbose: bool = False) -> Sty
 
     if verbose:
         print(f"Loaded {bsz} voice styles")
-    tags = set()
-    for p in voice_style_paths:
-        with open(p, "r") as f:
-            tags.add(json.load(f).get("model"))
-    tags.discard(None)
     if len(tags) > 1:
-        raise ValueError(f"voice JSONs of different models in one style: {sorted(tags)}")
+        raise ValueError(f"voice JSONs of different models in one style: {sorted(map(str, tags))}")
     return Style(ttl_style, dp_style, model=tags.pop() if tags else None)
 
 
@@ -1113,6 +1156,7 @@ class BlueTTS:
             style = Style(
                 style.ttl.mean(axis=0, keepdims=True),
                 style.dp.mean(axis=0, keepdims=True),
+                model=style.model,
             )
         self.style = style
 

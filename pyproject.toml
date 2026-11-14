@@ -1,7 +1,7 @@
 [project]
 name = "blue-onnx"
 version = "3.0.0"
-description = "Hebrew Text-to-Speech inference using ONNX and TensorRT"
+description = "Multilingual text-to-speech inference using ONNX and TensorRT"
 license = "MIT"
 readme = "README.md"
 requires-python = ">=3.12"

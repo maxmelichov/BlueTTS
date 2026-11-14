@@ -101,14 +101,24 @@ samples, sr = tts.synthesize(mixed, lang="he")
 ```
 
 The normalizer also emits these itself, for emails and Latin loanwords. Their presence
-switches `pace_blend` on automatically (see below).
+switches `pace_blend` on automatically for older bundles (see below).
+
+With a release bundle, Latin-script words in Hebrew text get a span of their own: "קניתי
+iPhone 15 חדש" is read as "קניתי <en>iPhone 15</en> חדש" (a run of Latin words, with the
+numbers after them, goes to English polyg2p as one span). An all-capitals tail after a
+lower-case letter is read as an acronym ("BlueTTS" as "Blue TTS"), and accents are dropped
+for the English G2P ("café" as "cafe"). Spans have no ids of their own: each chunk is still
+wrapped once in the request's `<lang>` tags. A span's phonemes get their own language's view
+(Hebrew rules on Hebrew spans only), then the chunk is normalised once in the request's language.
 
 ## Pace blending
 
 The duration head uses a different seconds-per-token per language, so one `speed` value
 is inconsistent across mixed text. `pace_blend` in `(0, 1]` pulls predicted duration
 toward a fixed seconds-per-text-token before dividing by `speed`. Left at `None` it
-defaults to `0.25` for text containing inline spans and `0` otherwise.
+defaults to `0.25` for text containing inline spans and `0` otherwise; with a release bundle it defaults to `0`
+everywhere (the model's own durations), and is applied only when passed; the normalizer's slowed spans
+(spelled codes, numbers) are not used with a release bundle either.
 
 ## Accelerators
 
@@ -143,8 +153,11 @@ front end next to `onnx/`, and `blue_onnx` switches to it:
   Hebrew uses RenikudPlus with the bundle's `frontend/renikud/model.onnx`.
   `BLUE_G2P_NOLEX=1` switches German / Italian to rules only (`frontend/polyg2p_data_nolex`);
   `BLUE_ES_VARIANT=es-419` selects Latin American Spanish for the G2P.
-- **Russian, Yiddish.** `ru` goes through polyg2p too (its stress tables are in `frontend/polyg2p_data`);
-  `yi` uses the Yiddish G2P and its context model in the bundle's `frontend/yi`.
+- **Russian, Yiddish.** `ru` goes through polyg2p too (its stress tables are in `frontend/polyg2p_data`; it
+  reads numbers itself); `yi` uses the Yiddish G2P and its context model in the bundle's `frontend/yi`. Yiddish has
+  no number reader: spell numbers out (digits raise), and a word the Yiddish G2P cannot read is reported.
+  Its context model gives the release's readings on CPU onnxruntime 1.27–1.29 (the pinned range); the GPU and
+  OpenVINO builds can read some Yiddish words differently.
 - **Ids.** The phonemes get the model's normalization (`ipa_text.py`) and every chunk is
   wrapped in `<lang>` … `</lang>` ids, as the model was trained.
 - **Chunks.** No chunk is longer than `blue_release.inference.max_chunk_tokens` ids (300), tags

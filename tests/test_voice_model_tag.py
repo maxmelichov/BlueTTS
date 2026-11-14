@@ -43,6 +43,10 @@ class TestVoiceModelTag(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check({"model": "bluev3-800000"}, self.v3)
 
+    def test_tagged_and_untagged_not_blended(self):
+        with self.assertRaises(ValueError):
+            load_voice_style([self.v3, self.v2])
+
     def test_mixed_models_in_one_style(self):
         other = _voice(os.path.join(self.tmp, "o.json"), "bluev3-800000")
         with self.assertRaises(ValueError):
