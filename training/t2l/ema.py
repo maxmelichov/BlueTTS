@@ -56,3 +56,14 @@ class ModelEMA:
                     self._shadow_by_id[id(p)].copy_(v)
                     n += 1
         return n
+
+
+def ema_checkpoint(ckpt):
+    """A training checkpoint with ``ckpt["ema"]`` -> an ordinary checkpoint of the EMA weights and EMA'd CFG tokens
+    (u_text / u_ref / u_key), without optimizer, scheduler or the EMA state."""
+    sd = ckpt["ema"]
+    out = {k: v for k, v in ckpt.items() if k not in ("optimizer", "scheduler", "ema")}
+    out.update({k: sd[k] for k in ("vf_estimator", "text_encoder", "reference_encoder")})
+    out.update({k: v for k, v in sd.get("uncond", {}).items() if k in ("u_text", "u_ref", "u_key")})
+    out.update(ema_decay=sd["decay"], ema_updates=sd["updates"])
+    return out

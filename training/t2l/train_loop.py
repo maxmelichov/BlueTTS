@@ -22,7 +22,7 @@ from training.data.audio_utils import ensure_sr
 from training.data.text_vocab import normalize_text, text_to_indices_multilang, wrap_lang_tags
 from training.utils import check_stats_provenance, compress_latents
 from training.t2l.builders import build_models
-from training.t2l.ema import ModelEMA
+from training.t2l.ema import ModelEMA, ema_checkpoint
 from training.t2l.cfg_utils import (
     DistributedWeightedSampler,
     _latest_ckpt_in_dir,
@@ -367,11 +367,13 @@ def train(
 
     scheduler = build_lr_scheduler(optimizer, lr, lr_milestones, global_step, scheduler_state, finetune)
 
-    # EMA on rank 0 only: DDP keeps every rank's weights identical.
+    # EMA on rank 0 only: DDP keeps every rank's weights identical. The CFG tokens (u_text/u_ref/u_key) are
+    # averaged too, so an EMA checkpoint never pairs EMA weights with the live tokens. An older ckpt['ema']
+    # without 'uncond' leaves their shadows at the resumed tokens.
     ema = None
     if ema_decay > 0 and rank == 0:
         ema = ModelEMA([("vf_estimator", vf_estimator), ("text_encoder", text_encoder),
-                        ("reference_encoder", reference_encoder)], decay=ema_decay)
+                        ("reference_encoder", reference_encoder), ("uncond", uncond_params)], decay=ema_decay)
         if latest_ckpt is not None and "ema" in checkpoint:
             n_loaded = ema.load_state_dicts(checkpoint["ema"])
             print(f"[EMA] decay {ema_decay}: restored {n_loaded} tensors (updates={ema.updates})")
@@ -769,10 +771,7 @@ def train(
                 print(f"Saved checkpoint to {ckpt_path}")
                 if ema is not None:
                     # The EMA weights as an ordinary checkpoint, loadable by inference / export as is.
-                    ema_sd = ckpt["ema"]
-                    ema_ckpt = {k: v for k, v in ckpt.items() if k not in ("optimizer", "scheduler", "ema")}
-                    ema_ckpt.update({k: ema_sd[k] for k in ("vf_estimator", "text_encoder", "reference_encoder")},
-                                    ema_decay=ema_sd["decay"], ema_updates=ema_sd["updates"])
+                    ema_ckpt = ema_checkpoint(ckpt)
                     ema_path = os.path.join(checkpoint_dir, "ema", f"ckpt_step_{global_step}.pt")
                     os.makedirs(os.path.dirname(ema_path), exist_ok=True)
                     torch.save(ema_ckpt, ema_path)

@@ -94,9 +94,15 @@ error rate against the IPA for a language without orthographic text.
 
 Hard cases (Sec 2.5): `--hard_frac` of the prompts get a word repeated 3-5 times (lwr), 2-3 words repeated 2-3 times
 (smr) or the sentence said twice (gsr), at the same word positions in the IPA and the ASR text. Each rollout draws
-5-8 steps with a 2-step SDE window starting at step 1-3. BlueV3 v3.0.0 (checkpoint 701500) is its 700k EMA after
-`--iters 1500 --rollout_cfg 4 --hard_frac 0.33 --ref_max_frames 129 --dp_ref_max_frames 144 --score_workers 2`, the
-defaults otherwise (`--rollout_cfg 4` is Flow-GRPO's guided form; the paper rolls out without CFG).
+5-8 steps with a 2-step SDE window starting at step 1-3.
+
+The recipe used for BlueV3 v3.0.0 (checkpoint 701500): the 64M layout (`--config config/tts_st3.json` for the T2L
+run and for RL; its `train.ema_decay` writes `<out>/ema/ckpt_step_N.pt`), RL started from that EMA checkpoint
+(`--ckpt <out>/ema/ckpt_step_700000.pt` in place of the `--ckpt` line below), the ASR reward on (a `transcript`
+column; drop `--w_asr 0`), plus `--iters 1500 --rollout_cfg 4 --hard_frac 0.33 --ref_max_frames 129
+--dp_ref_max_frames 144 --score_workers 2`; the other options at their defaults. The CLI defaults
+alone are the paper's setting (no CFG in the rollouts, 30% hard cases), not this recipe; prompts and references come
+from your own `--data`, so a run reproduces the recipe, not the checkpoint.
 
 ```bash
 uv run python -m training.rl.cli \
