@@ -1,8 +1,8 @@
 """Synthesize messy real-world text: numbers, dates, times, codes, emails.
 
 `normalize_text=True` rewrites anything G2P cannot read aloud into words before
-phonemization, and reads spelled codes / phone numbers / dates / times more
-slowly so digit groups stay intelligible.
+phonemization. Prices, dates and times are read inline; spelled codes and phone
+numbers are read a little more slowly so digit groups stay intelligible.
 
 Run:
     uv run python examples/normalize.py
