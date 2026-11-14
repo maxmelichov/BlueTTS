@@ -1,6 +1,6 @@
 [project]
 name = "blue-onnx"
-version = "2.5.0"
+version = "3.0.0"
 description = "Hebrew Text-to-Speech inference using ONNX and TensorRT"
 license = "MIT"
 readme = "README.md"
@@ -9,7 +9,8 @@ dependencies = [
     "numpy",
     "num2words",
     "librosa",
-    "onnxruntime",
+    # 1.27-1.29: the Yiddish front end's context model reads differently on 1.24 and from 1.30 on
+    "onnxruntime>=1.27,<1.30",
     "soundfile",
     "huggingface-hub>=0.26.0",
     "renikud-plus",
