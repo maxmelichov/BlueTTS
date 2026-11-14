@@ -10,7 +10,7 @@ parser.add_argument("--text", default="שלום עולם")
 parser.add_argument("--lang", default="he")
 parser.add_argument("--voice", default="noa")
 parser.add_argument("--out", default="output.wav")
-parser.add_argument("--onnx-dir", default="onnx_models")
+parser.add_argument("--onnx-dir", default="bluev3_onnx/onnx")
 parser.add_argument("--text-is-phonemes", action="store_true")
 args = parser.parse_args()
 

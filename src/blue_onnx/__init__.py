@@ -2,7 +2,9 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
+import unicodedata
 from contextlib import contextmanager
 from importlib import import_module
 from typing import Optional, Union
@@ -26,6 +28,8 @@ from .text_norm import (  # noqa: F401  (re-exported as the package's public API
 )
 
 AVAILABLE_LANGS = ["en", "es", "de", "it", "he"]
+# Release bundles also speak these: Russian through polyg2p, Yiddish through the bundle's frontend/yi.
+RELEASE_LANGS = ["ru", "yi"]
 BLUE_SYNTH_MAX_CHUNK_LEN = 300
 # When ``pace_blend > 0``, duration is nudged toward this many seconds of audio per
 # text input token, so the same ``speed`` value tracks more closely across languages.
@@ -105,8 +109,15 @@ class TextProcessor:
         renikud_path: Optional[str] = None,
         speaker: int = 0,
         target_speaker: int = 0,
+        release: Optional[dict] = None,
+        frontend_dir: Optional[str] = None,
     ):
         """``renikud_path`` is optional: RenikudPlus fetches its own weights.
+
+        ``release`` (the ``blue_release`` section of a bundle's ``tts.json``) switches to the G2Ps that model was
+        trained with: polyg2p for en/de/es/it (data files from ``POLYG2P_DATA`` or ``<bundle>/frontend/polyg2p_data``)
+        and RenikudPlus for Hebrew with the bundle's weights (``<bundle>/frontend/renikud/model.onnx``) when no
+        ``renikud_path`` is given.
 
         The G2P is built on first Hebrew segment, so Latin-only synthesis never
         pulls the Hebrew weights. ``speaker`` / ``target_speaker`` are RenikudPlus
@@ -114,6 +125,10 @@ class TextProcessor:
         """
         self.renikud = None
         self.renikud_path = renikud_path
+        self.release = release
+        self.frontend_dir = frontend_dir
+        self._poly = None
+        self._yi = None
         self.speaker = speaker
         self.target_speaker = target_speaker
         if renikud_path and not os.path.exists(renikud_path):
@@ -174,6 +189,47 @@ class TextProcessor:
             print(f"[WARN] espeak-ng fallback failed for lang={lang}: {e}")
             return text
 
+    def _release_g2p(self, content: str, lang: str, has_hebrew: bool) -> Optional[str]:
+        """G2P of a ``blue_release`` bundle; None = not handled here (falls through to the default path)."""
+        if lang == "yi":
+            if not self.frontend_dir:
+                raise ValueError("lang='yi' needs the bundle's frontend/yi folder")
+            content = "".join(c for c in content if unicodedata.category(c) != "Cf")   # invisible format marks
+            if self._yi is None:
+                d = os.path.join(self.frontend_dir, "yi")
+                if d not in sys.path:
+                    sys.path.insert(0, d)
+                from yiddish_labels import text_to_ipa   # checks its tables at import
+                self._yi = text_to_ipa
+            # the cleaning the Yiddish G2P expects: no sof pasuq, tags, quotes or word-final hyphen pieces
+            t = re.sub(r"<[^>]+>", "", re.sub(r'[„“”«»‹›‚‘]', "", content.replace("׃", "")))
+            return self._yi(re.sub(r"\S+-(?=\s|$)", "", t).strip())
+        if has_hebrew or lang == "he":
+            return None   # Hebrew: RenikudPlus, the package's own path (weights: the bundle's frontend/renikud/model.onnx)
+        if lang in ("en", "de", "es", "it", "ru"):
+            if self._poly is None:
+                # BLUE_G2P_NOLEX=1: German / Italian rules-only (the bundle's polyg2p_data_nolex, without the
+                # CC BY-SA lexicons)
+                sub = "polyg2p_data_nolex" if os.environ.get("BLUE_G2P_NOLEX", "0") == "1" else "polyg2p_data"
+                d = os.environ.get("POLYG2P_DATA") or (os.path.join(self.frontend_dir, sub)
+                                                        if self.frontend_dir else None)
+                os.environ.setdefault("POLYG2P_EN_MODEL", "large")
+                try:
+                    from polyg2p import Phonemizer
+                except ImportError as e:
+                    raise RuntimeError(
+                        "This release bundle needs polyg2p for en/de/es/it: "
+                        "pip install <bundle>/frontend/polyg2p-*.whl"
+                    ) from e
+                self._poly = Phonemizer(data_dir=d)
+            t = re.sub(r"\s*\[[^\]]*\]\s*", " ", content).strip()
+            if not any(ch.isalnum() for ch in t):
+                return t
+            # Spanish: Castilian by default; BLUE_ES_VARIANT=es-419 = Latin American Spanish (the tag stays <es>)
+            code = os.environ.get("BLUE_ES_VARIANT", "es") if lang == "es" else lang
+            return self._poly.phonemize(t, code)
+        return None
+
     def _phonemize_segment(self, content: str, lang: str) -> str:
         # Guard against malformed/unmatched tags leaking into phonemizer input.
         content = _LANG_TAG_RE.sub("", content).strip()
@@ -184,6 +240,10 @@ class TextProcessor:
         if not content:
             return ""
         has_hebrew = any("\u0590" <= c <= "\u05ff" for c in content)
+        if self.release:
+            out = self._release_g2p(content, lang, has_hebrew)
+            if out is not None:
+                return out
         if has_hebrew or lang == "he":
             if not has_hebrew:
                 return content
@@ -242,6 +302,9 @@ class UnicodeProcessor:
             self._codepoint_indexer = {int(k): int(v) for k, v in raw.items()} \
                 if all(isinstance(k, str) and k.isdigit() for k in raw.keys()) \
                 else {int(k): int(v) for k, v in raw.items()}
+        # vocab.json "lang_tag" (blue_release bundles): ids are wrapped '<lang>' ... '</lang>' (see ipa_text.py)
+        self.lang_tag = raw.get("lang_tag") if isinstance(raw, dict) else None
+        self.release = False
 
     def _preprocess_text(self, text: str, lang: str, affricate_ligatures: bool = False) -> str:
         # Same steps and order as training's normalize_text (text_vocab.py), so the ids match.
@@ -336,11 +399,20 @@ class UnicodeProcessor:
     def __call__(
         self, text_list: list[str], lang_list: list[str], affricate_ligatures: bool = False, lang_tags: bool = False
     ) -> tuple[np.ndarray, np.ndarray]:
-        text_list = [
-            self._preprocess_text(t, lang, affricate_ligatures)
-            for t, lang in zip(text_list, lang_list)
-        ]
-        encoded = [self._encode(t, keep_tags=lang_tags) for t in text_list]
+        if self.release:
+            from .ipa_text import encode_tagged
+            for lang in lang_list:
+                if lang not in AVAILABLE_LANGS + RELEASE_LANGS:
+                    raise ValueError(f"Invalid language: {lang}")
+            tag = (self.lang_tag["open"], self.lang_tag["close"], self.lang_tag["slash"])
+            encoded = [np.array(encode_tagged(t, lg, self._char_to_id, self.pad_id, tag), dtype=np.int64)
+                       for t, lg in zip(text_list, lang_list)]
+        else:
+            text_list = [
+                self._preprocess_text(t, lang, affricate_ligatures)
+                for t, lang in zip(text_list, lang_list)
+            ]
+            encoded = [self._encode(t, keep_tags=lang_tags) for t in text_list]
         text_ids_lengths = np.array([len(e) for e in encoded], dtype=np.int64)
         text_ids = np.full(
             (len(encoded), int(text_ids_lengths.max())), self.pad_id, dtype=np.int64
@@ -372,6 +444,7 @@ class TextToSpeech:
         latent_stats: Optional[tuple[np.ndarray, np.ndarray, float]] = None,
     ):
         self.cfgs = cfgs
+        self.release = cfgs.get("blue_release")
         self.text_processor = text_processor
         self.g2p = g2p
         self.dp_ort = dp_ort
@@ -515,7 +588,8 @@ class TextToSpeech:
                 xt, *_ = self.vector_est_ort.run(None, cond)
         wav, *_ = self.vocoder_ort.run(None, {"latent": self._prepare_vocoder_latent(xt)})
         frame_len = self.base_chunk_size * self.chunk_compress_factor
-        if wav.shape[-1] > 2 * frame_len:
+        trim = (self.release or {}).get("inference", {}).get("trim_edges", True)
+        if trim and wav.shape[-1] > 2 * frame_len:
             wav = wav[..., frame_len:-frame_len]
         if wav.ndim == 3 and wav.shape[1] == 1:
             wav = wav[:, 0, :]
@@ -897,7 +971,16 @@ def load_text_to_speech(
         onnx_dir, opts, providers
     )
     text_processor = load_text_processor(onnx_dir)
-    g2p = TextProcessor(renikud_path)
+    release = cfgs.get("blue_release")
+    if release:
+        text_processor.release = bool(release.get("inference", {}).get("lang_tags")) and text_processor.lang_tag is not None
+        fe = os.path.join(os.path.dirname(os.path.abspath(onnx_dir)), "frontend")
+        shipped = os.path.join(fe, "renikud", "model.onnx")
+        if renikud_path is None and os.path.exists(shipped):
+            renikud_path = shipped
+        g2p = TextProcessor(renikud_path, release=release, frontend_dir=fe if os.path.isdir(fe) else None)
+    else:
+        g2p = TextProcessor(renikud_path)
     u_text, u_ref = load_uncond(onnx_dir)
     if u_text is None and "cfg_scale" not in {i.name for i in vector_est_ort.get_inputs()}:
         print("[WARN] no cfg_scale graph input and no uncond.npz — cfg_scale will be ignored.")
@@ -968,7 +1051,7 @@ class BlueTTS:
 
     def __init__(
         self,
-        onnx_dir: str = "onnx_models",
+        onnx_dir: str = "bluev3_onnx/onnx",
         style_json: Union[str, list[str]] = "voices/noa.json",
         renikud_path: Optional[str] = None,
         config_path: str = "config/tts.json",
@@ -993,10 +1076,10 @@ class BlueTTS:
         self,
         text: str,
         lang: str = "he",
-        total_step: int = 8,
-        cfg_scale: float = DEFAULT_CFG_SCALE,
+        total_step: Optional[int] = None,
+        cfg_scale: Optional[float] = None,
         speed: float = 1.0,
-        silence_duration: float = 0.0,
+        silence_duration: Optional[float] = None,
         text_is_phonemes: bool = False,
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
@@ -1018,6 +1101,10 @@ class BlueTTS:
         straight to a PCM WAV never clips (see :func:`limit_peak`). Pass
         ``peak_limit=None`` for the raw vocoder output.
         """
+        rel = (self.tts.release or {}).get("inference", {})
+        total_step = total_step if total_step is not None else int(rel.get("steps", 8))
+        cfg_scale = cfg_scale if cfg_scale is not None else float(rel.get("cfg_scale", DEFAULT_CFG_SCALE))
+        silence_duration = silence_duration if silence_duration is not None else float(rel.get("join_silence_s", 0.0))
         audio, _ = self.tts(
             text,
             lang=lang,
