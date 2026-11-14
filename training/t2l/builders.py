@@ -37,12 +37,14 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
     spte_style_dim = spte_cfg.get("style_dim", 256)
     spte_n_units = spte_cfg.get("n_units", 256)
     spte_n_style = se_n_style
+    spte_key_mode = spte_cfg.get("style_key_mode", "baked")
 
     um_cfg = ttl_cfg["uncond_masker"]
     uncond_init_std = um_cfg["std"]
     um_text_dim = um_cfg["text_dim"]
     um_n_style = um_cfg["n_style"]
     um_style_value_dim = um_cfg["style_value_dim"]
+    um_style_key_uncond = um_cfg.get("style_key_uncond", False)
 
     vf_cfg = ttl_cfg["vector_field"]
     vf_in_channels = vf_cfg["proj_in"]["ldim"] * vf_cfg["proj_in"]["chunk_compress_factor"]
@@ -50,9 +52,11 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
     vf_hidden = vf_cfg["proj_in"]["odim"]
     vf_time_dim = vf_cfg["time_encoder"]["time_dim"]
     vf_time_hdim = vf_cfg["time_encoder"].get("hdim", 256)
+    vf_st3_time_freqs = vf_cfg["time_encoder"].get("supertonic3_freqs", False)
     vf_n_blocks = vf_cfg["main_blocks"]["n_blocks"]
     vf_text_dim = vf_cfg["main_blocks"]["text_cond_layer"]["text_dim"]
     vf_text_n_heads = vf_cfg["main_blocks"]["text_cond_layer"]["n_heads"]
+    vf_text_n_units = vf_cfg["main_blocks"]["text_cond_layer"].get("n_units", 256)
     vf_style_dim = vf_cfg["main_blocks"]["style_cond_layer"]["style_dim"]
     vf_rotary_scale = vf_cfg["main_blocks"]["text_cond_layer"]["rotary_scale"]
     vf_use_residual = vf_cfg["main_blocks"]["text_cond_layer"].get("use_residual", True)
@@ -66,6 +70,10 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
 
     vf_main_blocks_cfg = vf_cfg.get("main_blocks", {})
     vf_last_convnext_cfg = vf_cfg.get("last_convnext", {})
+    # ConvNeXt gamma init; with Adam a 1e-6 gamma can stay near zero and leave a block unused
+    layer_scale_init = ttl_cfg.get("layer_scale_init", 1e-6)
+    # padded rows compute what they compute alone (B=1 inference)
+    edge_fill = ttl_cfg.get("edge_fill", False)
 
     ae_enc_arch = ae_cfg_json['encoder']
     ae_spec_cfg = ae_enc_arch.get('spec_processor', {})
@@ -97,6 +105,9 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         spte_style_dim=spte_style_dim,
         spte_n_units=spte_n_units,
         spte_n_style=spte_n_style,
+        layer_scale_init=layer_scale_init,
+        edge_fill=edge_fill,
+        spte_key_mode=spte_key_mode,
     ).to(device)
 
     reference_encoder = ReferenceEncoder(
@@ -111,6 +122,8 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         prototype_dim=se_prototype_dim,
         n_units=se_n_units,
         style_value_dim=se_style_value_dim,
+        layer_scale_init=layer_scale_init,
+        edge_fill=edge_fill,
     ).to(device)
 
     vf_estimator = VectorFieldEstimator(
@@ -129,13 +142,22 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         time_hdim=vf_time_hdim,
         use_residual=vf_use_residual,
         rotary_base=vf_rotary_base,
+        text_n_units=vf_text_n_units,
+        supertonic3_time_freqs=vf_st3_time_freqs,
+        layer_scale_init=layer_scale_init,
+        edge_fill=edge_fill,
     ).to(device)
+    if spte_key_mode == "projected":
+        # one Parameter; each state_dict keeps its own key
+        vf_estimator.tile = text_encoder.speech_prompted_text_encoder.style_key
 
     uncond_params = UncondParams(
         text_dim=um_text_dim,
         n_style=um_n_style,
         style_value_dim=um_style_value_dim,
         init_std=uncond_init_std,
+        uncond_key=um_style_key_uncond,
+        style_key_dim=um_cfg.get("style_key_dim", um_style_value_dim),
     ).to(device)
 
     dp_model = None

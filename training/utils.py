@@ -1,3 +1,4 @@
+import hashlib
 import random
 
 import numpy as np
@@ -16,8 +17,13 @@ def seed_all(seed: int = 42, deterministic: bool = True) -> None:
     torch.backends.cudnn.benchmark = not deterministic
 
 
-def seed_worker(worker_id: int, base_seed: int | None = None) -> None:
-    seed = worker_id if base_seed is None else base_seed + worker_id
+def seed_worker(worker_id: int, base_seed: int | None = None, rank: int = 0, start_step: int = 0) -> None:
+    """DataLoader worker seed: ``base_seed + worker_id``, else from (worker, rank, resume step) so DDP ranks
+    and resumes do not replay the same draws."""
+    if base_seed is not None:
+        seed = base_seed + worker_id
+    else:
+        seed = int(np.random.SeedSequence([worker_id, rank, start_step]).generate_state(1)[0])
     np.random.seed(seed)
     random.seed(seed)
     torch.manual_seed(seed)
@@ -31,7 +37,8 @@ def compress_latents(z: torch.Tensor, factor: int = 6) -> torch.Tensor:
     B, C, T = z.shape
     if T % factor != 0:
         pad = factor - (T % factor)
-        z = torch.nn.functional.pad(z, (0, pad))
+        # repeat the last frame: a zero frame is a latent the decoder never saw in training
+        z = F.pad(z, (0, pad), mode="replicate")
         T = T + pad
     return z.view(B, C, T // factor, factor).permute(0, 1, 3, 2).flatten(1, 2)
 
@@ -39,6 +46,32 @@ def compress_latents(z: torch.Tensor, factor: int = 6) -> torch.Tensor:
 def decompress_latents(z: torch.Tensor, factor: int = 6, target_channels: int = 24) -> torch.Tensor:
     B, _, T_low = z.shape
     return z.view(B, target_channels, factor, T_low).permute(0, 1, 3, 2).flatten(2, 3)
+
+
+def encoder_fingerprint(encoder_state: dict) -> str:
+    """sha256 over an AE encoder state_dict (BatchNorm buffers included): the identity of its latent stats."""
+    h = hashlib.sha256()
+    for k in sorted(encoder_state):
+        t = encoder_state[k].detach().cpu()
+        t = t.float() if t.is_floating_point() else t.long()
+        h.update(k.encode())
+        h.update(str(tuple(t.shape)).encode())
+        h.update(t.contiguous().numpy().tobytes())
+    return h.hexdigest()
+
+
+def check_stats_provenance(stats: dict, encoder_state: dict) -> str:
+    """Refuse latent stats measured with a different AE encoder; warn when the file has no fingerprint."""
+    prov = stats.get("provenance") or {}
+    if "enc_sha256" not in prov:
+        return "[stats] WARNING: no encoder fingerprint in the stats file; cannot check it matches this AE"
+    fp = encoder_fingerprint(encoder_state)
+    if fp != prov["enc_sha256"]:
+        raise ValueError(
+            f"latent stats were measured with a different AE encoder (stats {prov['enc_sha256'][:12]}, "
+            f"this encoder {fp[:12]}); recompute them with compute_latent_stats.py"
+        )
+    return f"[stats] encoder fingerprint {fp[:12]} matches"
 
 
 def _resolve_vocab_size(char_dict_path, default=256):
@@ -73,6 +106,7 @@ def load_ttl_config(config_path="configs/tts.json"):
     se = ttl["style_encoder"]
     vf = ttl["vector_field"]
     um = ttl["uncond_masker"]
+    spte = ttl.get("speech_prompted_text_encoder", {})
 
     # ---- Vocab sizes ----
     char_dict_path = te.get("char_dict_path", te.get("text_embedder", {}).get("char_dict_path"))
@@ -129,6 +163,8 @@ def load_ttl_config(config_path="configs/tts.json"):
         "vocab_size":       vocab_size,
         "char_dict_path":   char_dict_path,
         "dp_vocab_size":    dp_vocab_size,
+        "affricate_ligatures": bool(full_config.get("affricate_ligatures", False)),
+        "lang_tags":        bool(full_config.get("lang_tags", False)),
 
         # Latent space
         "latent_dim":           ttl["latent_dim"],
@@ -137,13 +173,17 @@ def load_ttl_config(config_path="configs/tts.json"):
         "normalizer_scale":     ttl["normalizer"]["scale"],
         "sigma_min":            ttl["flow_matching"]["sig_min"],
         "Ke":                   ttl["batch_expander"]["n_batch_expand"],
+        "edge_fill":            ttl.get("edge_fill", False),
+        "dp_edge_fill":         dp.get("edge_fill", False),
 
         # Text Encoder
         "te_d_model":           te["text_embedder"]["char_emb_dim"],
         "te_convnext_layers":   te["convnext"]["num_layers"],
+        "te_dilation_lst":      te["convnext"].get("dilation_lst", [1] * te["convnext"]["num_layers"]),
         "te_expansion_factor":  te["convnext"]["intermediate_dim"] // te["text_embedder"]["char_emb_dim"],
         "te_attn_n_layers":     te["attn_encoder"]["n_layers"],
         "te_attn_p_dropout":    te["attn_encoder"]["p_dropout"],
+        "te_style_key_mode":    spte.get("style_key_mode", "baked"),
 
         # Style / Reference Encoder
         "se_d_model":    se["proj_in"]["odim"],
@@ -164,9 +204,13 @@ def load_ttl_config(config_path="configs/tts.json"):
         # Vector Field Estimator
         "vf_hidden":        vf["proj_in"]["odim"],
         "vf_time_dim":      vf["time_encoder"]["time_dim"],
+        "vf_st3_time_freqs": vf["time_encoder"].get("supertonic3_freqs", False),
         "vf_n_blocks":      vf["main_blocks"]["n_blocks"],
         "vf_text_dim":      vf["main_blocks"]["text_cond_layer"]["text_dim"],
         "vf_text_n_heads":  vf["main_blocks"]["text_cond_layer"]["n_heads"],
+        "vf_text_n_units":  vf["main_blocks"]["text_cond_layer"].get("n_units", 256),
+        "vf_main_blocks":   vf["main_blocks"],
+        "vf_last_convnext": vf.get("last_convnext", {}),
         "vf_style_dim":     vf["main_blocks"]["style_cond_layer"]["style_dim"],
         "vf_rotary_scale":  vf["main_blocks"]["text_cond_layer"]["rotary_scale"],
 
