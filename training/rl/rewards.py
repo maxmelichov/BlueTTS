@@ -5,18 +5,23 @@ The ASR reward is any callable `asr(wav, sr, text, lang) -> error rate in [0, 1]
 """
 
 import os
-import unicodedata
 
 import numpy as np
 import torch
 import torchaudio
 
 
-def _to_16k(wav, sr):
+def _to_16k(wav, sr, kaiser=False):
+    """kaiser: the training resampler (sinc, Kaiser window, width 64), used for the speaker and DNSMOS rewards."""
     w = torch.as_tensor(np.asarray(wav, dtype=np.float32))
     if w.dim() == 1:
         w = w[None]
-    return torchaudio.functional.resample(w, sr, 16000) if sr != 16000 else w
+    if sr == 16000:
+        return w
+    if kaiser:
+        return torchaudio.functional.resample(w, sr, 16000, lowpass_filter_width=64, rolloff=0.9475937167399596,
+                                              resampling_method="sinc_interp_kaiser", beta=14.769656459379492)
+    return torchaudio.functional.resample(w, sr, 16000)
 
 
 def error_rate(ref, hyp):
@@ -29,10 +34,19 @@ def error_rate(ref, hyp):
     return min(1.0, d[-1] / max(1, len(ref)))
 
 
-def words(text):
-    """Lower-case words with punctuation removed (the WER normalisation)."""
-    s = "".join(" " if unicodedata.category(ch).startswith("P") else ch for ch in text.lower())
-    return s.split()
+_BASIC = None
+
+
+def words(text, english=None):
+    """WER words. `english`: Whisper's English normaliser (the tokenizer's `normalize`), for English text; otherwise
+    Whisper's BasicTextNormalizer without diacritics (lower case, punctuation and symbols removed), Russian ё -> е."""
+    global _BASIC
+    if english is not None:
+        return english(text).split()
+    if _BASIC is None:
+        from transformers.models.whisper.english_normalizer import BasicTextNormalizer
+        _BASIC = BasicTextNormalizer(remove_diacritics=True)
+    return _BASIC(text.replace("ё", "е").replace("Ё", "Е")).split()
 
 
 class SpeakerSim:
@@ -50,7 +64,7 @@ class SpeakerSim:
     @torch.no_grad()
     def embed(self, wav, sr):
         """[T] or [B, T] audio -> [B, 192] unit-norm embeddings."""
-        w = _to_16k(wav, sr)
+        w = _to_16k(wav, sr, kaiser=True)
         e = self.model.encode_batch(w.to(self.device)).reshape(w.shape[0], -1)
         return torch.nn.functional.normalize(e, dim=-1)
 
@@ -83,20 +97,25 @@ class DNSMOS:
         self._run = dnsmos.run
 
     def __call__(self, wav, sr):
-        # the decoder can overshoot 1.0 and DNSMOS refuses such input
-        w16 = np.clip(_to_16k(wav, sr)[0].numpy(), -1.0, 1.0)
+        # the decoder can overshoot 1.0 and DNSMOS refuses such input: peak-normalised to <= 1
+        w16 = _to_16k(wav, sr, kaiser=True)[0].numpy()
+        w16 = np.clip(w16 / max(1.0, float(np.abs(w16).max())), -1.0, 1.0)
         return float(self._run(w16, sr=16000)["ovrl_mos"])
 
 
 class WhisperASR:
-    """Word error rate of a Whisper transcript against the target text (the paper's 1 - WER reward)."""
+    """Word error rate of a Whisper transcript in the prompt's language against its orthographic text (the paper's
+    1 - WER reward). English goes through Whisper's English normaliser, other languages through `words`."""
 
     def __init__(self, model="openai/whisper-large-v3", device="cpu"):
         from transformers import pipeline
 
-        self.pipe = pipeline("automatic-speech-recognition", model=model, device=torch.device(device))
+        dev = torch.device(device)
+        self.pipe = pipeline("automatic-speech-recognition", model=model, device=dev,
+                             torch_dtype=torch.float16 if dev.type == "cuda" else torch.float32)
 
     def __call__(self, wav, sr, text, lang=None):
         out = self.pipe({"raw": _to_16k(wav, sr)[0].numpy(), "sampling_rate": 16000},
-                        generate_kwargs={"task": "transcribe", **({"language": lang} if lang else {})})
-        return error_rate(words(text), words(out["text"]))
+                        generate_kwargs={"task": "transcribe", "num_beams": 1, **({"language": lang} if lang else {})})
+        en = self.pipe.tokenizer.normalize if lang == "en" else None
+        return error_rate(words(text, en), words(out["text"], en))

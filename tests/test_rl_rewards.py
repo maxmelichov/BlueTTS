@@ -1,4 +1,4 @@
-"""GRPO ASR reward: word normalisation and the capped edit-distance error rate."""
+"""GRPO ASR reward: word normalisation and the capped edit-distance error rate, on synthetic transcripts."""
 
 from __future__ import annotations
 
@@ -24,8 +24,26 @@ class TestRewards(unittest.TestCase):
         self.assertEqual(error_rate([], []), 0.0)
 
     def test_words(self):
-        self.assertEqual(words("Hello, World! It's  fine."), ["hello", "world", "it", "s", "fine"])
-        self.assertEqual(words("ʃalˈom, ʔolˈam."), ["ʃalˈom", "ʔolˈam"])
+        # Whisper's basic normaliser without diacritics; Russian ё -> е
+        self.assertEqual(words("Mañana, ¿vamos al MERCADO?"), ["manana", "vamos", "al", "mercado"])
+        self.assertEqual(words("Wir treffen uns morgen."), ["wir", "treffen", "uns", "morgen"])
+        self.assertEqual(words("Всё хорошо!"), ["все", "хорошо"])
+        self.assertEqual(words("È così."), ["e", "cosi"])
+
+    def test_synthetic_transcripts(self):
+        # 1 - WER: an exact transcript in another casing / punctuation / accents scores 0 error
+        ref = "Mañana vamos al mercado con los niños."
+        self.assertEqual(error_rate(words(ref), words("mañana vamos al mercado, con los ninos")), 0.0)
+        self.assertAlmostEqual(error_rate(words(ref), words("Mañana vamos mercado con los niños.")), 1 / 7)
+        self.assertEqual(error_rate(words("Всё хорошо."), words("все хорошо")), 0.0)
+
+    def test_english_normaliser(self):
+        try:
+            from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
+        except ImportError:
+            self.skipTest("transformers not installed")
+        en = EnglishTextNormalizer({})
+        self.assertEqual(error_rate(words("Mr. Smith isn't here.", en), words("mister smith is not here", en)), 0.0)
 
 
 if __name__ == "__main__":

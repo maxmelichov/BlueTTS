@@ -46,12 +46,21 @@ def clipped_surrogate(logp, old_logp, adv, clip):
     return loss, ratio
 
 
-def vf_cond(vf, x, h, style_ttl, latent_mask, text_mask, t):
-    """Conditional velocity for a group of latents that share one prompt (no CFG in rollouts or log-probs)."""
+def vf_cond(vf, x, h, style_ttl, latent_mask, text_mask, t, cfg=1.0, uncond=None):
+    """Velocity for a group of latents that share one prompt. cfg == 1: the conditional branch only (the paper:
+    rollouts and log-probs without CFG). cfg != 1: v_u + cfg * (v_c - v_u) with uncond = (u_text, u_ref, u_key) as the
+    T2L sampler builds the unconditional branch (u_key None: the VF's own keys); Flow-GRPO's train.cfg form, the same
+    guided velocity in the rollouts and in the update."""
     B = x.shape[0]
-    return vf(noisy_latent=x, text_emb=h.expand(B, -1, -1), style_ttl=style_ttl.expand(B, -1, -1),
-              latent_mask=latent_mask.expand(B, -1, -1), text_mask=text_mask.expand(B, -1, -1),
+    kw = dict(noisy_latent=x, latent_mask=latent_mask.expand(B, -1, -1), text_mask=text_mask.expand(B, -1, -1),
               current_step=torch.full((B,), t, device=x.device))
+    v = vf(text_emb=h.expand(B, -1, -1), style_ttl=style_ttl.expand(B, -1, -1), **kw)
+    if cfg == 1.0:
+        return v
+    u_text, u_ref, u_key = uncond
+    v_u = vf(text_emb=u_text.expand(B, -1, h.shape[2]), style_ttl=u_ref.expand(B, -1, -1),
+             style_keys=u_key.expand(B, -1, -1) if u_key is not None else None, **kw)
+    return v_u + cfg * (v - v_u)
 
 
 def sample_window(rng, steps_min, steps_max, smin_lo, smin_hi, sde_steps):
@@ -63,7 +72,8 @@ def sample_window(rng, steps_min, steps_max, smin_lo, smin_hi, sde_steps):
 
 
 @torch.no_grad()
-def rollout(vf, h, style_ttl, latent_mask, text_mask, group_size, channels, n_steps, window, noise_level, generator):
+def rollout(vf, h, style_ttl, latent_mask, text_mask, group_size, channels, n_steps, window, noise_level, generator,
+            cfg=1.0, uncond=None):
     """G latents for one prompt with the inference Euler loop; steps in `window` are SDE steps whose transitions are
     stored for the update. Returns (x1, transitions)."""
     dt = 1.0 / n_steps
@@ -71,7 +81,7 @@ def rollout(vf, h, style_ttl, latent_mask, text_mask, group_size, channels, n_st
                     generator=generator) * latent_mask
     traj = []
     for k in range(n_steps):
-        v = vf_cond(vf, x, h, style_ttl, latent_mask, text_mask, k * dt)
+        v = vf_cond(vf, x, h, style_ttl, latent_mask, text_mask, k * dt, cfg, uncond)
         if k in window:
             mean, sd = sde_mean_std(x, v, k, dt, noise_level)
             x_next = (mean + sd * torch.randn(x.shape, device=x.device, generator=generator)) * latent_mask
@@ -95,12 +105,13 @@ def advantages(sim, err, mos, w_sim=1.0, w_err=1.0, w_mos=0.4):
 
 
 def ppo_backward(vf, vf_ref, h, style_ttl, latent_mask, text_mask, traj, adv, clip=1e-4, beta=0.04, noise_level=0.5,
-                 micro_batch=4, weight=1.0, h_ref=None):
+                 micro_batch=4, weight=1.0, h_ref=None, adv_clip=5.0, cfg=1.0, uncond=None):
     """Backward of Eq. 10 for one prompt: clipped surrogate + beta * KL to the frozen reference `vf_ref` on `h_ref`
     (default `h`), averaged over the SDE steps and the group, scaled by `weight`, one micro-batch graph at a time.
-    Returns the mean loss, KL, clip fraction and ratio."""
+    Advantages are clipped to +-adv_clip (Flow-GRPO); `cfg` / `uncond` as in the rollout. Returns the mean loss, KL,
+    clip fraction and ratio."""
     h_ref = h if h_ref is None else h_ref
-    A_all = torch.as_tensor(adv, device=latent_mask.device, dtype=torch.float32)
+    A_all = torch.as_tensor(adv, device=latent_mask.device, dtype=torch.float32).clamp(-adv_clip, adv_clip)
     G = A_all.shape[0]
     mb = max(1, min(micro_batch, G))
     n = len(traj)
@@ -111,13 +122,13 @@ def ppo_backward(vf, vf_ref, h, style_ttl, latent_mask, text_mask, traj, adv, cl
             sl = slice(i0, i0 + mb)
             A, x = A_all[sl], st["x"][sl]
             frac = A.shape[0] / G
-            v = vf_cond(vf, x, h, style_ttl, latent_mask, text_mask, k * dt)
+            v = vf_cond(vf, x, h, style_ttl, latent_mask, text_mask, k * dt, cfg, uncond)
             mean, sd = sde_mean_std(x, v, k, dt, noise_level)
             logp = gauss_logp(st["x_next"][sl], mean * latent_mask, sd, latent_mask)
             loss, ratio = clipped_surrogate(logp, st["logp"][sl], A, clip)
             if beta > 0:
                 with torch.no_grad():
-                    v_ref = vf_cond(vf_ref, x, h_ref, style_ttl, latent_mask, text_mask, k * dt)
+                    v_ref = vf_cond(vf_ref, x, h_ref, style_ttl, latent_mask, text_mask, k * dt, cfg, uncond)
                     mean_ref, _ = sde_mean_std(x, v_ref, k, dt, noise_level)
                 kl = gaussian_kl(mean, mean_ref, sd, latent_mask)
                 loss = loss + beta * kl

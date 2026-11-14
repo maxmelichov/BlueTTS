@@ -22,6 +22,7 @@ if torch is not None:
         rollout,
         sample_window,
         sde_mean_std,
+        vf_cond,
     )
 
 
@@ -99,9 +100,51 @@ class TestFlowGRPO(unittest.TestCase):
 
     def test_window(self):
         rng = random.Random(0)
-        for _ in range(200):
+        seen = set()
+        for _ in range(400):
             n, w = sample_window(rng, 5, 8, 1, 3, 2)
             self.assertTrue(5 <= n <= 8 and 1 <= w.start <= 3 and len(w) == 2 and w.stop <= n)
+            seen.add((n, w.start))
+        self.assertEqual(seen, {(n, s) for n in range(5, 9) for s in range(1, 4)})   # every step count and start
+
+    def test_guided_velocity(self):
+        class KeyVF(torch.nn.Module):
+            def forward(self, noisy_latent, text_emb, style_ttl, latent_mask, text_mask, current_step, style_keys=None):
+                k = 0.0 if style_keys is None else style_keys.mean()
+                return noisy_latent * text_emb.mean() + style_ttl.mean() + k + current_step[:, None, None]
+
+        torch.manual_seed(0)
+        vf = KeyVF()
+        x, h, s = torch.randn(3, 6, 5), torch.randn(1, 4, 2), torch.randn(1, 2, 4)
+        lm, tm = torch.ones(1, 1, 5), torch.ones(1, 1, 2)
+        unc = (torch.randn(1, 4, 1), torch.randn(1, 2, 4), torch.randn(1, 2, 3))
+        v_c = vf_cond(vf, x, h, s, lm, tm, 0.25)
+        self.assertTrue(torch.equal(vf_cond(vf, x, h, s, lm, tm, 0.25, 1.0, unc), v_c))   # cfg 1: conditional only
+        B = x.shape[0]
+        v_u = vf(noisy_latent=x, text_emb=unc[0].expand(B, -1, 2), style_ttl=unc[1].expand(B, -1, -1),
+                 latent_mask=lm.expand(B, -1, -1), text_mask=tm.expand(B, -1, -1),
+                 current_step=torch.full((B,), 0.25), style_keys=unc[2].expand(B, -1, -1))
+        torch.testing.assert_close(vf_cond(vf, x, h, s, lm, tm, 0.25, 4.0, unc), 4.0 * v_c - 3.0 * v_u)
+
+    def test_advantage_clip(self):
+        class TinyVF(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = torch.nn.Conv1d(6, 6, 1)
+
+            def forward(self, noisy_latent, text_emb, style_ttl, latent_mask, text_mask, current_step):
+                return self.w(noisy_latent) + text_emb.mean() + style_ttl.mean()
+
+        torch.manual_seed(0)
+        vf = TinyVF()
+        h, style, tm, lm = torch.randn(1, 4, 3), torch.randn(1, 2, 4), torch.ones(1, 1, 3), torch.ones(1, 1, 5)
+        _, traj = rollout(vf, h, style, lm, tm, 3, 6, 5, range(1, 3), 0.5, torch.Generator().manual_seed(0))
+        grads = []
+        for adv, clip in ((np.array([9.0, -9.0, 1.0]), 5.0), (np.array([5.0, -5.0, 1.0]), 1e9)):
+            vf.zero_grad()
+            ppo_backward(vf, vf, h, style, lm, tm, traj, adv, beta=0.0, adv_clip=clip)
+            grads.append(torch.cat([p.grad.flatten() for p in vf.parameters()]))
+        self.assertTrue(torch.equal(grads[0], grads[1]))
 
     def test_on_policy_ratio_is_one_and_clip_is_inert(self):
         class TinyVF(torch.nn.Module):
