@@ -147,6 +147,10 @@ front end next to `onnx/`, and `blue_onnx` switches to it:
   `yi` uses the Yiddish G2P and its context model in the bundle's `frontend/yi`.
 - **Ids.** The phonemes get the model's normalization (`ipa_text.py`) and every chunk is
   wrapped in `<lang>` … `</lang>` ids, as the model was trained.
+- **Chunks.** No chunk is longer than `blue_release.inference.max_chunk_tokens` ids (300), tags
+  included. Sentences are packed while they fit; a longer sentence is cut after its last comma,
+  semicolon or colon that fits, else at its last space, never inside a word or an inline span
+  unless nothing else fits.
 - **Defaults.** In `BlueTTS.synthesize`, `total_step`, `cfg_scale` and `silence_duration` come from
   `blue_release.inference` (`load_text_to_speech` callers pass them, e.g. 8 steps, CFG 4.0); the fixed
   edge trim is skipped when `trim_edges` is false.
