@@ -1,7 +1,8 @@
 # Examples
 
-Run these from the **repository root**, with graphs in `./onnx_models` (see
-[Models](../README.md#models)) and the `voices/*.json` that ship with the repo.
+Run these from the **repository root**, with the BlueV3 bundle in `./bluev3_onnx` (see
+[Quick start](../README.md#quick-start); `ONNX_DIR` / `--onnx-dir` point elsewhere; `zero_shot.py` needs
+`notmax123/blue-onnx-v2` in `./onnx_models`) and the `voices/*.json` that ship with the repo.
 
 ```bash
 uv run python examples/basic.py       # he / en / es / it / de + mixed in one run

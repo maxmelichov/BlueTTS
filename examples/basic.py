@@ -9,14 +9,14 @@ from src.blue_onnx import limit_peak, load_text_to_speech, load_voice_style
 
 Path("examples/out").mkdir(parents=True, exist_ok=True)
 
-onnx_dir = os.environ.get("ONNX_DIR", "onnx_models")
+onnx_dir = os.environ.get("ONNX_DIR", "bluev3_onnx/onnx")
 tts = load_text_to_speech(onnx_dir=onnx_dir)
 style = load_voice_style(["voices/noa.json"])
 audio, _ = tts(
     "Hello, this is a short test.",
     lang="en",
     style=style,
-    total_step=5,
+    total_step=8,
     cfg_scale=4.0,
 )
 if audio.ndim == 2:

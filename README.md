@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>Multilingual text-to-speech on ONNX Runtime</b><br>
-  Hebrew &middot; English &middot; Spanish &middot; Italian &middot; German
+  Hebrew &middot; English &middot; Spanish &middot; Italian &middot; German &middot; Russian &middot; Yiddish
 </p>
 
 <p align="center">
@@ -21,20 +21,22 @@
 git clone https://github.com/maxmelichov/BlueTTS.git
 cd BlueTTS
 uv sync
-uv run hf download notmax123/BlueTTS2.5-onnx --repo-type model --local-dir ./onnx_models
+uv run hf download notmax123/BlueV3-onnx --include "onnx/*" "voices/*" "frontend/*" --local-dir ./bluev3_onnx
+uv pip install ./bluev3_onnx/frontend/polyg2p-*.whl     # G2P for en / de / es / it (Linux x86-64, glibc >= 2.34)
 ```
-
-Voice JSONs ship in [`voices/`](voices/), so you are ready to synthesize:
 
 ```python
 import soundfile as sf
 from blue_onnx import BlueTTS
 
-tts = BlueTTS(onnx_dir="onnx_models", style_json="voices/noa.json")
+tts = BlueTTS(onnx_dir="bluev3_onnx/onnx", style_json="bluev3_onnx/voices/noa.json")
 samples, sr = tts.synthesize("שלום, זהו מודל דיבור בעברית.", lang="he")
 sf.write("out.wav", samples, sr)
+
+samples, sr = tts.synthesize("Hello, this is BlueTTS.", lang="en")
 ```
 
+The bundle sets the operating point itself (8 steps, CFG 4.0, speed 1.0, language tags on).
 Numbers, dates, prices and codes are spoken as words automatically. Mix languages
 inline with `<en>…</en>`:
 
@@ -42,8 +44,10 @@ inline with `<en>…</en>`:
 samples, sr = tts.synthesize("שלום לכולם, <en>welcome to the presentation</en>.", lang="he")
 ```
 
-Hebrew grapheme-to-phoneme is handled by [RenikudPlus](https://github.com/maxmelichov/RenikudPlus),
-which downloads its own weights the first time you synthesize Hebrew.
+Hebrew grapheme-to-phoneme is [RenikudPlus](https://github.com/maxmelichov/RenikudPlus), with the
+weights shipped in the bundle (`frontend/renikud/model.onnx`); English, German, Spanish and Italian
+use polyg2p (its wheel in the bundle is for Linux x86-64). The bundle runs on `blue_onnx`; `blue_trt` does not
+read it yet. Details: [Release bundles](src/blue_onnx/README.md#release-bundles).
 
 ## Documentation
 
@@ -70,30 +74,41 @@ Optional extras are documented per use case: [accelerators](src/blue_onnx/README
 
 ## Models
 
-**Current — [notmax123/BlueTTS2.5-onnx](https://huggingface.co/notmax123/BlueTTS2.5-onnx)**
+**Current — BlueV3 `v3.0.0`** (checkpoint `701500`): the text-to-latent EMA at 700k plus 1,500 iterations
+of FlowTTS-GRPO reinforcement learning ([arXiv 2606.23190](https://arxiv.org/abs/2606.23190)).
 
-```bash
-uv run hf download notmax123/BlueTTS2.5-onnx --repo-type model --local-dir ./onnx_models
+| | |
+|---|---|
+| [notmax123/BlueV3-onnx](https://huggingface.co/notmax123/BlueV3-onnx) | ONNX bundle: `onnx/` (the `blue_onnx` layout + `reference_encoder`), `voices/`, `frontend/` |
+| [notmax123/BlueV3](https://huggingface.co/notmax123/BlueV3) | PyTorch checkpoints (text-to-latent `ckpt_step_701500.pt`, duration predictor), latent stats, config, voices |
+| [notmax123/blue-codec](https://huggingface.co/notmax123/blue-codec) | the audio autoencoder, folder `bluev3_codec/` |
+
+Languages: Hebrew, English, German, Spanish, Italian, Russian, Yiddish. Operating point: 8 Euler steps,
+CFG 4.0, speed 1.0, language tags on. Russian and Yiddish take IPA for now (`blue_onnx` has no G2P for them yet):
+
+```python
+samples, sr = tts.synthesize("prʲɪvʲˈet, kak dʲɪɫˈa?", lang="ru", text_is_phonemes=True)
 ```
 
-Ships the core graphs (`text_encoder`, `vector_estimator`, `vocoder`,
-`duration_predictor_style`), the runtime `tts.json` / `vocab.json`, `stats.npz` and
-`uncond.npz`, a `reference_encoder` for reference-audio conditioning, and five voice
-JSONs under `voices/`. Guidance comes from `uncond.npz` rather than a baked `cfg_scale`
-input, and the vocoder takes the de-normalized latent — `blue_onnx` detects both from
-the graphs, so nothing to configure.
+**Voices.** 15 voice JSONs (LibriTTS-R speakers, CC BY 4.0) in the bundle's `voices/`: female `maya`,
+`noa`, `lily`, `tamar`, `shira`, `yael`, `emma`, `sara`; male `adam`, `daniel`, `david`, `jonathan`, `ethan`,
+`michael`, `ariel`. A voice JSON is valid only for the checkpoint it was exported from; voices of earlier
+releases do not work with BlueV3.
 
-This bundle is also the input to [`create_tensorrt.py`](exports/README.md#build-tensorrt-engines):
-its file names line up with the engines `blue_trt` expects.
+**Scores** (unseen test set and unseen voices, 8 steps, CFG 4; before RL = the 700k model):
 
-**Previous — [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2)**.
-Still supported and still the only bundle with the zero-shot voice-conversion graphs
-(`codec_encoder`, `style_encoder`, `duration_style_encoder`) that `examples/zero_shot.py`
-and `blue_onnx.style` need.
+| | before RL | v3.0.0 |
+|---|---|---|
+| Hebrew phone error rate | 1.85 % | **1.53 %** |
+| Hebrew speaker similarity | 0.650 | **0.660** |
+| Hebrew DNSMOS OVRL | 3.39 | **3.41** |
+| English word error rate | 1.82 % | 1.88 % (no change) |
+| English speaker similarity | 0.660 | **0.671** |
 
-Neither bundle includes per-voice **style JSON** — use [`voices/*.json`](voices/) from this
-repo, or [export your own](exports/README.md#export-a-new-voice) from a reference clip
-(needs the PyTorch checkpoints at [notmax123/blue-v2](https://huggingface.co/notmax123/blue-v2)).
+**Previous — [notmax123/BlueTTS2.5-onnx](https://huggingface.co/notmax123/BlueTTS2.5-onnx)** and
+[notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2) still load as before (no
+`blue_release` section in their `tts.json`). blue-onnx-v2 is the only bundle with the zero-shot
+voice-conversion graphs that `examples/zero_shot.py` and `blue_onnx.style` need.
 
 ## Citations
 
@@ -119,6 +134,15 @@ repo, or [export your own](exports/README.md#export-a-new-voice) from a referenc
       archivePrefix={arXiv},
       primaryClass={cs.SD},
       url={https://arxiv.org/abs/2512.17293},
+}
+@misc{wang2026flowttsgrpo,
+      title={FlowTTS-GRPO: Online Reinforcement Learning with Multi-Objective Reward Optimization for Flow-Matching Based Text-to-Speech},
+      author={Haoxu Wang and Biao Tian and Weiqin Li and Xiang Lv and Han Zhao and Xiangang Li},
+      year={2026},
+      eprint={2606.23190},
+      archivePrefix={arXiv},
+      primaryClass={eess.AS},
+      url={https://arxiv.org/abs/2606.23190},
 }
 ```
 

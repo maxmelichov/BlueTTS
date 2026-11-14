@@ -10,7 +10,7 @@ parser.add_argument("--text", default="שלום עולם")
 parser.add_argument("--lang", default="he")
 parser.add_argument("--voice", default="noa")
 parser.add_argument("--out", default="output.wav")
-parser.add_argument("--onnx-dir", default="onnx_models")
+parser.add_argument("--onnx-dir", default="bluev3_onnx/onnx")
 parser.add_argument("--text-is-phonemes", action="store_true")
 args = parser.parse_args()
 
@@ -21,7 +21,7 @@ audio, _ = tts(
     args.text,
     lang=args.lang,
     style=style,
-    total_step=5,
+    total_step=8,
     cfg_scale=4.0,
     text_is_phonemes=args.text_is_phonemes,
 )
