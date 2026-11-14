@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+import re
 import unittest
 from pathlib import Path
 
@@ -17,6 +19,8 @@ from src.blue_onnx import (
     length_to_mask,
     strip_lang_tags_from_phoneme_string,
 )
+from src.blue_onnx import _strip_tags_keep_spans as strip_tags_keep_spans
+from src.blue_onnx.ipa_text import encode_tagged, normalize_ipa_spans, strip_outer_lang_tags, tagged_len
 
 # Shipped config/tts.json: ae.sample_rate, ae.base_chunk_size, ttl.chunk_compress_factor.
 SR, BASE_CHUNK, CCF = 44100, 512, 6
@@ -53,6 +57,142 @@ class TestChunkText(unittest.TestCase):
     def test_paragraph_split(self):
         chunks = chunk_text("First para.\n\nSecond para.", max_len=300)
         self.assertEqual(len(chunks), 2)
+
+    def test_short_sentences_pack_as_before(self):
+        rng = random.Random(0)
+        for _ in range(200):
+            text = " ".join(_sentence(rng, rng.randint(1, 12)) for _ in range(rng.randint(1, 12)))
+            if rng.random() < 0.3:
+                text = text.replace(". ", ".\n\n", 1)
+            for max_len in (40, 80, 300):
+                if all(len(s) <= max_len for s in _old_sentences(text)):
+                    self.assertEqual(chunk_text(text, max_len=max_len), _old_chunk_text(text, max_len))
+
+    def test_long_sentence_cut_at_last_comma_that_fits(self):
+        s = "aaa bbb ccc, ddd eee; fff ggg hhh iii, jjj kkk lll mmm nnn."
+        self.assertEqual(chunk_text(s, max_len=40), ["aaa bbb ccc, ddd eee; fff ggg hhh iii,", "jjj kkk lll mmm nnn."])
+        self.assertEqual(chunk_text(s, max_len=30), ["aaa bbb ccc, ddd eee;", "fff ggg hhh iii,", "jjj kkk lll mmm nnn."])
+
+    def test_no_punctuation_cut_at_last_space(self):
+        self.assertEqual(chunk_text("aaa bbb ccc ddd eee fff", max_len=10), ["aaa bbb", "ccc ddd", "eee fff"])
+
+    def test_no_space_cut_at_the_limit(self):
+        self.assertEqual(chunk_text("x" * 25, max_len=10), ["x" * 10, "x" * 10, "x" * 5])
+
+    def test_ids_exact_limit_and_one_over(self):
+        # release bundles count ids: '<he>' + normalised IPA (final '.' added) + '</he>'
+        s = "ʃalˈom ma niʃmˈa, ʔanˈi bsedˈeʁ"
+        n = tagged_len(s, "he")
+        self.assertEqual(n, len(encode_tagged(s, "he", {c: 1 for c in "<>/he" + s + "."})))
+        self.assertEqual(chunk_text(s, max_len=300, fits=lambda c: tagged_len(c, "he") <= n), [s])
+        cut = chunk_text(s, max_len=300, fits=lambda c: tagged_len(c, "he") <= n - 1)
+        self.assertEqual(cut, ["ʃalˈom ma niʃmˈa,", "ʔanˈi bsedˈeʁ"])
+
+    def test_every_chunk_fits(self):
+        rng = random.Random(1)
+        for _ in range(100):
+            text = " ".join(_sentence(rng, rng.randint(1, 60)) for _ in range(rng.randint(1, 4)))
+            fits = lambda c: tagged_len(c, "he") <= 60   # noqa: E731
+            chunks = chunk_text(text, max_len=300, fits=fits)
+            self.assertTrue(all(fits(c) for c in chunks), chunks)
+            self.assertEqual(" ".join(chunks).split(), text.split())   # nothing lost, no word split
+
+    def test_inline_span_not_cut(self):
+        ipa = "<he>ʔanˈi ɡˈaʁ lejˈad</he> <en>tˈaɪmz skwˈɛɹ ænd sˈɛntɹəl pˈɑːɹk</en> <he>kvˈaʁ ʃanˈim ʁabˈot</he>"
+        text, in_span = strip_tags_keep_spans(ipa, "he")
+        self.assertEqual(text, strip_lang_tags_from_phoneme_string(ipa))
+        self.assertEqual(chunk_text(text, max_len=50, in_span=in_span),
+                         ["ʔanˈi ɡˈaʁ lejˈad", "tˈaɪmz skwˈɛɹ ænd sˈɛntɹəl pˈɑːɹk kvˈaʁ ʃanˈim", "ʁabˈot"])
+        # without the spans the cut falls inside the English
+        self.assertEqual(chunk_text(text, max_len=50)[0], "ʔanˈi ɡˈaʁ lejˈad tˈaɪmz skwˈɛɹ ænd sˈɛntɹəl")
+
+    def test_inline_span_longer_than_a_chunk_is_cut_at_its_spaces(self):
+        ipa = "<he>ʃalˈom</he> <en>wˈʌn tˈuː θɹˈiː fˈɔːɹ fˈaɪv sˈɪks</en> <he>toda</he>"
+        text, in_span = strip_tags_keep_spans(ipa, "he")
+        chunks = chunk_text(text, max_len=20, in_span=in_span)
+        self.assertTrue(all(len(c) <= 20 for c in chunks), chunks)
+        self.assertEqual(" ".join(chunks), text)
+
+    def test_kept_spans_are_the_release_string(self):
+        # release bundles keep other-language tags (flagged as inside their span) for encode_tagged
+        ipa = "<he>ʔanˈi ɡˈaʁ,</he> <en>tˈaɪmz skwˈɛɹ</en> <he>!</he>"
+        text, in_span = strip_tags_keep_spans(ipa, "he", keep=True)
+        self.assertEqual(text, strip_outer_lang_tags(ipa, "he"))
+        self.assertEqual(len(in_span), len(text))
+        self.assertEqual("".join(c for c, f in zip(text, in_span) if f), "<en>tˈaɪmz skwˈɛɹ</en>")
+
+    def test_kept_span_not_cut_and_stays_tagged(self):
+        ipa = "<he>ʔanˈi ɡˈaʁ lejˈad</he> <en>tˈaɪmz skwˈɛɹ ænd sˈɛntɹəl pˈɑːɹk</en> <he>kvˈaʁ ʃanˈim ʁabˈot</he>"
+        text, in_span = strip_tags_keep_spans(ipa, "he", keep=True)
+        self.assertEqual(chunk_text(text, max_len=50, in_span=in_span),
+                         ["ʔanˈi ɡˈaʁ lejˈad", "<en>tˈaɪmz skwˈɛɹ ænd sˈɛntɹəl pˈɑːɹk</en> kvˈaʁ ʃanˈim", "ʁabˈot"])
+
+    def test_kept_span_longer_than_a_chunk_closed_and_reopened(self):
+        ipa = "<he>ʃalˈom</he> <en>wˈʌn tˈuː θɹˈiː fˈɔːɹ fˈaɪv sˈɪks</en> <he>toda</he>"
+        text, in_span = strip_tags_keep_spans(ipa, "he", keep=True)
+        plain, plain_span = strip_tags_keep_spans(ipa, "he")
+        chunks = chunk_text(text, max_len=20, in_span=in_span)
+        # the same cuts as without the tags, each English piece in its own <en> pair
+        self.assertEqual([_untag(c) for c in chunks], chunk_text(plain, max_len=20, in_span=plain_span))
+        self.assertEqual(chunks[0], "ʃalˈom")
+        self.assertTrue(all(c.count("<en>") == c.count("</en>") for c in chunks), chunks)
+        self.assertTrue(all(c.startswith("<en>") and c.endswith("</en>") for c in chunks[1:-1]), chunks)
+
+    def test_ids_counted_with_each_span_normalised_as_its_language(self):
+        # English 'ʦ' stays one id inside a Hebrew chunk; the Hebrew rules would spell it 'ts'
+        s = "ʔanˈi ʁaʔˈiti <en>kˈæʦ</en> belˈondon"
+        n = tagged_len(s, "he")
+        self.assertEqual(n, len(encode_tagged(s, "he", {c: 1 for c in "<>/he" + normalize_ipa_spans(s, "he")})))
+        self.assertEqual(n, tagged_len(_untag(s), "he") - 1)
+        text, in_span = strip_tags_keep_spans(f"<he>{s.replace('<en>', '</he> <en>').replace('</en>', '</en> <he>')}</he>",
+                                              "he", keep=True)
+        self.assertEqual(text, s)
+        self.assertEqual(chunk_text(text, max_len=300, fits=lambda c: tagged_len(c, "he") <= n, in_span=in_span), [s])
+
+    def test_hard_cut_never_splits_a_tag(self):
+        text = "<en>" + "a" * 30 + "</en>"
+        chunks = chunk_text(text, max_len=12, in_span=[True] * len(text))
+        self.assertEqual("".join(_untag(c) for c in chunks), "a" * 30)
+        self.assertTrue(all(re.fullmatch(r"<en>a+</en>", c) for c in chunks), chunks)
+
+
+def _untag(s: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"</?\w+>", " ", s)).strip()
+
+
+def _sentence(rng: random.Random, n: int) -> str:
+    words = ["".join(rng.choice("abdeiklmnoʃʁˈ") for _ in range(rng.randint(1, 9))) for _ in range(n)]
+    for i in range(len(words) - 1):
+        if rng.random() < 0.15:
+            words[i] += rng.choice(",;:")
+    return " ".join(words) + rng.choice(".?!")
+
+
+_OLD_SENTENCE = (r"(?<!Mr\.)(?<!Mrs\.)(?<!Ms\.)(?<!Dr\.)(?<!Prof\.)(?<!Sr\.)(?<!Jr\.)(?<!Ph\.D\.)(?<!etc\.)(?<!e\.g\.)"
+                 r"(?<!i\.e\.)(?<!vs\.)(?<!Inc\.)(?<!Ltd\.)(?<!Co\.)(?<!Corp\.)(?<!St\.)(?<!Ave\.)(?<!Blvd\.)(?<!\b[A-Z]\.)"
+                 r"(?<=[.!?])\s+")
+
+
+def _old_sentences(text: str) -> list[str]:
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", text.strip()) if p.strip()]
+    return [s for p in paragraphs for s in re.split(_OLD_SENTENCE, p)]
+
+
+def _old_chunk_text(text: str, max_len: int) -> list[str]:
+    """chunk_text before long sentences were cut (v3.0.0-inference), for the texts it already handled."""
+    chunks = []
+    for paragraph in [p.strip() for p in re.split(r"\n\s*\n+", text.strip()) if p.strip()]:
+        current = ""
+        for sentence in re.split(_OLD_SENTENCE, paragraph):
+            if len(current) + len(sentence) + 1 <= max_len:
+                current += (" " if current else "") + sentence
+            else:
+                if current:
+                    chunks.append(current.strip())
+                current = sentence
+        if current:
+            chunks.append(current.strip())
+    return chunks
 
 
 class TestLengthToMask(unittest.TestCase):

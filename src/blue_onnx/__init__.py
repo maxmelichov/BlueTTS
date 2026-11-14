@@ -7,12 +7,13 @@ import time
 import unicodedata
 from contextlib import contextmanager
 from importlib import import_module
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 from unicodedata import normalize
 
 import numpy as np
 import onnxruntime as ort
 
+from .ipa_text import strip_outer_lang_tags, tag_latin_runs
 from .text_norm import (  # noqa: F401  (re-exported as the package's public API)
     EMOJI_RE,
     SLOW_MARK_OPEN,
@@ -512,6 +513,22 @@ class TextToSpeech:
         noisy_latent = noisy_latent * latent_mask
         return noisy_latent, latent_mask
 
+    def _chunk_fits(self, lang: str) -> Optional[Callable[[str], bool]]:
+        """Release bundles: a chunk fits in ``max_chunk_tokens`` ids, its ``<lang>`` tags included (the model's
+        training range); older bundles count characters only."""
+        limit = (self.release or {}).get("inference", {}).get("max_chunk_tokens")
+        if not (limit and self.text_processor.release):
+            return None
+        from .ipa_text import tagged_len
+        return lambda s: tagged_len(s, lang) <= int(limit)
+
+    def _flatten_tags(self, phonemes: str, lang: str) -> str:
+        """Release bundles keep other-language spans for :func:`encode_tagged` (their own IPA normalisation);
+        older bundles drop every tag, as their tokenizer does."""
+        if self.text_processor.release:
+            return strip_outer_lang_tags(phonemes, lang)
+        return strip_lang_tags_from_phoneme_string(phonemes)
+
     def _infer(
         self,
         text_list: list[str],
@@ -657,6 +674,12 @@ class TextToSpeech:
                 ]
             else:
                 text = prepare_text_for_synthesis(text, lang=lang)
+        if phonemize and self.text_processor.release:
+            if isinstance(text, list):
+                langs = lang if isinstance(lang, list) else [lang] * len(text)
+                text = [tag_latin_runs(t, lg) for t, lg in zip(text, langs)]
+            else:
+                text = tag_latin_runs(text, lang)
         # Computed after normalization: it can introduce <en> spans (emails,
         # spelled codes, loanwords) that should count as mixed-language text.
         if isinstance(text, list):
@@ -677,7 +700,7 @@ class TextToSpeech:
                     self.g2p.phonemize(t, lang=lang_code)
                     for t, lang_code in zip(text, lang)
                 ]
-            text = [strip_lang_tags_from_phoneme_string(t) for t in text]
+            text = [self._flatten_tags(t, lg) for t, lg in zip(text, lang)]
             return self._infer(
                 text,
                 lang,
@@ -706,8 +729,8 @@ class TextToSpeech:
             seg_pace_dpt = SLOW_PACE_DPT_REF if is_slow else pace_dpt_ref
             if phonemize and self.g2p is not None:
                 seg_text = self.g2p.phonemize(seg_text, lang=lang)
-            seg_text = strip_lang_tags_from_phoneme_string(seg_text)
-            for chunk in chunk_text(seg_text, max_len=max_len):
+            seg_text, in_span = _strip_tags_keep_spans(seg_text, lang, keep=self.text_processor.release)
+            for chunk in chunk_text(seg_text, max_len=max_len, fits=self._chunk_fits(lang), in_span=in_span):
                 wav, dur_onnx = self._infer(
                     [chunk],
                     [lang],
@@ -772,19 +795,21 @@ class TextToSpeech:
                 prepare_text_for_synthesis(t, lang=lang_code, mark_slow=False)
                 for t, lang_code in zip(text_list, lang_list)
             ]
+        phonemize = not text_is_phonemes
+        if phonemize and self.text_processor.release:
+            text_list = [tag_latin_runs(t, lg) for t, lg in zip(text_list, lang_list)]
         has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text_list)
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
             else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
         )
-        phonemize = not text_is_phonemes
         if phonemize and self.g2p is not None:
             text_list = [
                 self.g2p.phonemize(t, lang=lang_code)
                 for t, lang_code in zip(text_list, lang_list)
             ]
-        text_list = [strip_lang_tags_from_phoneme_string(t) for t in text_list]
+        text_list = [self._flatten_tags(t, lg) for t, lg in zip(text_list, lang_list)]
         return self._infer(
             text_list,
             lang_list,
@@ -1140,43 +1165,197 @@ def sanitize_filename(text: str, max_len: int) -> str:
     return re.sub(r"[^\w]", "_", prefix, flags=re.UNICODE)
 
 
-def chunk_text(text: str, max_len: int = 300) -> list[str]:
+_PARAGRAPH_RE = re.compile(r"\n\s*\n+")
+# Split by sentence boundaries (period, question mark, exclamation mark followed by space)
+# But exclude common abbreviations like Mr., Mrs., Dr., etc. and single capital letters like F.
+_SENTENCE_RE = re.compile(
+    r"(?<!Mr\.)(?<!Mrs\.)(?<!Ms\.)(?<!Dr\.)(?<!Prof\.)(?<!Sr\.)(?<!Jr\.)(?<!Ph\.D\.)(?<!etc\.)(?<!e\.g\.)(?<!i\.e\.)"
+    r"(?<!vs\.)(?<!Inc\.)(?<!Ltd\.)(?<!Co\.)(?<!Corp\.)(?<!St\.)(?<!Ave\.)(?<!Blvd\.)(?<!\b[A-Z]\.)(?<=[.!?])\s+"
+)
+_CUT_MARKS = ",;:"
+
+
+def chunk_text(
+    text: str,
+    max_len: int = 300,
+    fits: Optional[Callable[[str], bool]] = None,
+    in_span: Optional[list[bool]] = None,
+) -> list[str]:
     """
     Split text into chunks by paragraphs and sentences.
 
     Args:
         text: Input text to chunk
-        max_len: Maximum length of each chunk (default: 300)
+        max_len: Maximum length of each chunk in characters (default: 300)
+        fits: Optional further limit on a chunk (release bundles: its ids against ``max_chunk_tokens``)
+        in_span: Per character of ``text``, whether it is inside an inline ``<lang>`` span
+            (see :func:`_strip_tags_keep_spans`); a long sentence is cut there only as a last resort.
+            Release bundles keep other-language spans' tags in ``text`` (flagged as inside): they are
+            not counted as characters, a chunk is checked against ``fits`` with its spans closed, and
+            a span cut by a chunk boundary is closed and reopened (see :func:`_close_spans`).
 
     Returns:
         List of text chunks
+
+    Sentences are packed while the chunk fits. A sentence that does not fit alone is cut: after
+    the last comma, semicolon or colon that leaves a piece that fits, else at the last space,
+    else at the last character that fits (see :func:`_cut_sentence`). It was kept whole, and a
+    420-character sentence became one 18 s chunk, far past the lengths the model was trained on.
     """
-    # Split by paragraph (two or more newlines)
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", text.strip()) if p.strip()]
+    def ok(s: str) -> bool:
+        return _untagged_len(s) <= max_len and (fits is None or fits(_balance_spans(s)))
 
     chunks = []
-
-    for paragraph in paragraphs:
-        paragraph = paragraph.strip()
-        if not paragraph:
-            continue
-
-        # Split by sentence boundaries (period, question mark, exclamation mark followed by space)
-        # But exclude common abbreviations like Mr., Mrs., Dr., etc. and single capital letters like F.
-        pattern = r"(?<!Mr\.)(?<!Mrs\.)(?<!Ms\.)(?<!Dr\.)(?<!Prof\.)(?<!Sr\.)(?<!Jr\.)(?<!Ph\.D\.)(?<!etc\.)(?<!e\.g\.)(?<!i\.e\.)(?<!vs\.)(?<!Inc\.)(?<!Ltd\.)(?<!Co\.)(?<!Corp\.)(?<!St\.)(?<!Ave\.)(?<!Blvd\.)(?<!\b[A-Z]\.)(?<=[.!?])\s+"
-        sentences = re.split(pattern, paragraph)
-
+    for p0, p1 in _stripped_parts(text, 0, len(text), _PARAGRAPH_RE):
         current_chunk = ""
-
-        for sentence in sentences:
-            if len(current_chunk) + len(sentence) + 1 <= max_len:
-                current_chunk += (" " if current_chunk else "") + sentence
+        for s0, s1 in _stripped_parts(text, p0, p1, _SENTENCE_RE):
+            sentence = text[s0:s1]
+            if ok(sentence):
+                pieces = [sentence]
             else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = sentence
+                pieces = _cut_sentence(sentence, ok, in_span[s0:s1] if in_span else None)
+            for piece in pieces:
+                joined = f"{current_chunk} {piece}" if current_chunk else piece
+                if ok(joined):
+                    current_chunk = joined
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    current_chunk = piece
 
         if current_chunk:
             chunks.append(current_chunk.strip())
 
-    return chunks
+    return _close_spans(chunks)
+
+
+def _stripped_parts(text: str, start: int, end: int, sep: re.Pattern) -> list[tuple[int, int]]:
+    """``[p.strip() for p in sep.split(text[start:end].strip()) if p.strip()]``, as (start, end) offsets."""
+    parts, pos = [], start
+    for m in list(sep.finditer(text, start, end)) + [None]:
+        a, b = pos, (m.start() if m else end)
+        while a < b and text[a].isspace():
+            a += 1
+        while b > a and text[b - 1].isspace():
+            b -= 1
+        if a < b:
+            parts.append((a, b))
+        if m:
+            pos = m.end()
+    return parts
+
+
+def _cut_sentence(s: str, ok: Callable[[str], bool], in_span: Optional[list[bool]] = None) -> list[str]:
+    """Pieces of a sentence too long for one chunk, each one ``ok``.
+
+    Cut after the last comma, semicolon or colon that fits, else at the last space, past a quarter
+    of what is left: the rule of the site's ChunkPacker, so both give the same chunks. Failing that,
+    the same before the quarter (the site cuts inside a word there), all outside inline spans, so
+    "<en>Times Square</en>" stays whole; then inside a span too long for a chunk; and only a single
+    word longer than a chunk is cut at the last character that fits.
+    """
+    out = []
+    flags = list(in_span) if in_span else [False] * len(s)
+    while s and not ok(s):
+        lo = len(s) // 4
+        tries = [(marks, inside, floor) for inside in (False, True) for floor in (lo, 0) for marks in (_CUT_MARKS, " ")]
+        cut = next((c for t in tries if (c := _last_cut(s, flags, ok, *t))), 0)
+        if not cut:
+            cut = len(s) - 1
+            while cut > 1 and (not ok(s[:cut]) or _inside_tag(s, cut)):
+                cut -= 1
+        piece = s[:cut].strip()
+        if piece:
+            out.append(piece)
+        rest = s[cut:]
+        skip = len(rest) - len(rest.lstrip())
+        s = rest.strip()
+        flags = flags[cut + skip:cut + skip + len(s)]
+    if s:
+        out.append(s)
+    return out
+
+
+def _last_cut(s: str, flags: list[bool], ok: Callable[[str], bool], marks: str, inside: bool, floor: int) -> int:
+    """The last cut (after a mark, at a space) past ``floor``, in or out of spans, whose piece is ``ok``; 0 if none."""
+    for k in range(len(s) - 1, floor, -1):
+        if s[k] in marks and flags[k] == inside:
+            cut = k if s[k] == " " else k + 1
+            if ok(s[:cut]):
+                return cut
+    return 0
+
+
+def _strip_tags_keep_spans(phonemes: str, lang: str, keep: bool = False) -> tuple[str, list[bool]]:
+    """:func:`strip_lang_tags_from_phoneme_string`, plus which characters were inside an other-language span.
+
+    ``keep`` (release bundles): other-language tags stay in the text, flagged as inside their span, so the
+    string is :func:`ipa_text.strip_outer_lang_tags`'s and :func:`encode_tagged` normalises each span as its
+    own language."""
+    chars, flags, inside = [], [], None
+    for tok in re.split(r"(</?\w+>)", phonemes):
+        if _LANG_TAG_RE.fullmatch(tok):
+            name = tok.strip("</>")
+            other = name != lang
+            if keep and other:
+                chars.extend(tok)
+                flags.extend([True] * len(tok))
+            else:
+                chars.append(" ")
+                flags.append(False)
+            inside = None if tok.startswith("</") else (name if other else None)
+        else:
+            chars.extend(tok)
+            flags.extend([inside is not None] * len(tok))
+    raw = "".join(chars)
+    out, out_flags, pos = [], [], 0
+    for m in re.finditer(r"\s+", raw):
+        out.append(raw[pos:m.start()])
+        out_flags.extend(flags[pos:m.start()])
+        out.append(" ")
+        out_flags.append(all(flags[m.start():m.end()]))
+        pos = m.end()
+    out.append(raw[pos:])
+    out_flags.extend(flags[pos:])
+    text = "".join(out)
+    lead = len(text) - len(text.lstrip())
+    text_s = text.strip()
+    return text_s, out_flags[lead:lead + len(text_s)]
+
+
+def _untagged_len(s: str) -> int:
+    # Inline tags (kept for release bundles) carry no ids: length as before they were kept.
+    return len(_LANG_TAG_RE.sub("", s))
+
+
+def _balance_spans(s: str) -> str:
+    """``s`` as :func:`_close_spans` would send it on its own: a leading ``</xx>`` gets its ``<xx>``, a span
+    still open at the end is closed. (A piece wholly inside a long span carries no tag and is measured with the
+    outer language's rules, which never give fewer ids than English's.)"""
+    tags = _LANG_TAG_RE.findall(s)
+    if not tags:
+        return s
+    if tags[0].startswith("</"):
+        s = "<" + tags[0][2:] + s
+    last = tags[-1]
+    return s if last.startswith("</") else f"{s}</{last[1:]}"
+
+
+def _inside_tag(s: str, cut: int) -> bool:
+    """Whether a cut at ``cut`` would split an inline tag."""
+    k = s.rfind("<", 0, cut)
+    return k >= 0 and s.find(">", k) >= cut and _LANG_TAG_RE.match(s, k) is not None
+
+
+def _close_spans(chunks: list[str]) -> list[str]:
+    """A ``<xx>`` span cut by a sentence break is closed at the chunk's end and reopened in the next chunk."""
+    out, carry = [], None
+    for c in chunks:
+        if carry:
+            c = f"<{carry}>{c}"
+        carry = None
+        for m in _LANG_TAG_RE.finditer(c):
+            t = m.group(0)
+            carry = None if t.startswith("</") else t[1:-1]
+        out.append(f"{c}</{carry}>" if carry else c)
+    return out
