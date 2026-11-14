@@ -387,7 +387,7 @@ def main() -> None:
 
     out_json = args.out if args.out.endswith(".json") else args.out + ".json"
     os.makedirs(os.path.dirname(out_json) or ".", exist_ok=True)
-    with open(out_json, "w") as f:
+    with open(out_json, "w", encoding="utf-8") as f:
         json.dump(payload, f)
     print(f"[OK] wrote {out_json}")
 

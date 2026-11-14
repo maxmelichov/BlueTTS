@@ -418,7 +418,7 @@ def load_text_processor(weights_dir: str) -> UnicodeProcessor:
 
 def load_voice_style(voice_style_paths: list[str], device: str = "cpu", verbose: bool = False) -> Style:
     bsz = len(voice_style_paths)
-    with open(voice_style_paths[0], "r") as f:
+    with open(voice_style_paths[0], "r", encoding="utf-8") as f:
         first = json.load(f)
     ttl_dims = first["style_ttl"]["dims"]
     dp_dims = first["style_dp"]["dims"] if "style_dp" in first else None
@@ -427,7 +427,7 @@ def load_voice_style(voice_style_paths: list[str], device: str = "cpu", verbose:
     dp = np.zeros([bsz, dp_dims[1], dp_dims[2]], dtype=np.float32) if dp_dims else None
 
     for i, path in enumerate(voice_style_paths):
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             d = json.load(f)
         ttl[i] = np.array(d["style_ttl"]["data"], dtype=np.float32).reshape(ttl_dims[1], ttl_dims[2])
         if dp is not None and "style_dp" in d:
