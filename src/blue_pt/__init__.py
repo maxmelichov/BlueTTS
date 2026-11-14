@@ -1,12 +1,12 @@
 """BlueTTS PT — PyTorch inference module mirroring ``blue_onnx`` layout.
 
 **Checkpoint compatibility.** This loads whatever checkpoint you point it at, and
-architecture drift between generations is silent unless caught: ``ConvNeXtStack``
-is fixed at ``expansion=2`` (pwconv width ``2 * hidden``), matching the shipped
-ONNX graphs. An older checkpoint built at expansion 4 will fail in
+architecture drift between generations is silent unless caught: the
+``ConvNeXtStack`` width comes from the config's ``intermediate_dim``. A
+checkpoint loaded with the wrong config fails in
 :func:`_load_into` with a shape mismatch — that is the intended outcome, not a
 bug to work around. ``pt_models/checkpoints/text2latent/ckpt_step_767000.pt`` is
-one such stale checkpoint; use a current one that matches ``config/tts.json``.
+one such stale checkpoint; use a current one that matches its config.
 """
 
 import json
@@ -83,9 +83,12 @@ class TextToSpeech:
         self.ldim = int(cfgs.get("latent_dim", cfgs.get("ttl", {}).get("latent_dim", 24)))
         self.normalizer_scale = float(cfgs.get("normalizer_scale", 1.0))
         self.compressed_channels = self.ldim * self.chunk_compress_factor
+        self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
+        self.lang_tags = bool(cfgs.get("lang_tags", False))
 
         self._u_text = u_text
         self._u_ref = u_ref
+        self._u_key = getattr(vector_estimator, "u_key", None)  # set by load_pt_models; None = the VF's tile
         self.mean = mean
         self.std = std
 
@@ -129,7 +132,7 @@ class TextToSpeech:
         ), "Number of texts must match number of style vectors"
         bsz = len(text_list)
 
-        text_ids_np, text_mask_np = self.text_processor(text_list, lang_list)
+        text_ids_np, text_mask_np = self.text_processor(text_list, lang_list, self.affricate_ligatures, self.lang_tags)
         text_ids = torch.from_numpy(text_ids_np).long().to(self.device)
         text_mask = torch.from_numpy(text_mask_np).float().to(self.device)
 
@@ -159,11 +162,14 @@ class TextToSpeech:
         )
         h_text_null: Optional[torch.Tensor] = None
         h_ref_null: Optional[torch.Tensor] = None
+        key_null: Optional[torch.Tensor] = None
         u_mask: Optional[torch.Tensor] = None
         if use_cfg:
             assert self._u_text is not None and self._u_ref is not None
             h_text_null = self._u_text.expand(bsz, -1, h_text.shape[2])
             h_ref_null = self._u_ref.expand(bsz, -1, -1)
+            if self._u_key is not None:
+                key_null = self._u_key.expand(bsz, -1, -1)
             u_mask = torch.ones(bsz, 1, h_text.shape[2], device=self.device)
 
         for step in range(total_step):
@@ -176,7 +182,7 @@ class TextToSpeech:
             if use_cfg:
                 v_uncond = self.vector_estimator(
                     noisy_latent=x_in, text_emb=h_text_null, style_ttl=h_ref_null,
-                    latent_mask=latent_mask, text_mask=u_mask, current_step=t,
+                    latent_mask=latent_mask, text_mask=u_mask, current_step=t, style_keys=key_null,
                 )
                 v = v_uncond + cfg_scale * (v_cond - v_uncond)
             else:
@@ -456,23 +462,27 @@ def load_pt_models(
     Optional[torch.Tensor],
     Optional[torch.Tensor],
 ]:
+    """A checkpoint's u_key is attached to the returned vf_estimator as a non-persistent buffer."""
     vocab_size = cfg.get("vocab_size", 256)
     se_n_style = cfg.get("se_n_style", 50)
     latent_dim = int(cfg.get("latent_dim", 24))
     ccf = int(cfg.get("chunk_compress_factor", 6))
     compressed = latent_dim * ccf
 
-    u_text, u_ref = None, None
+    u_text, u_ref, u_key = None, None, None
     if text2latent_ckpt:
         combined = torch.load(text2latent_ckpt, map_location="cpu", weights_only=False)
         te_sd = combined["text_encoder"]
         vf_sd = combined["vf_estimator"]
         u_text = combined.get("u_text")
         u_ref = combined.get("u_ref")
+        u_key = combined.get("u_key")
         if u_text is not None:
             u_text = u_text.to(device)
         if u_ref is not None:
             u_ref = u_ref.to(device)
+        if u_key is not None:
+            u_key = u_key.to(device)
     else:
         te_sd = _load_sd(os.path.join(weights_dir, "text_encoder.pt"), "text_encoder")
         vf_sd = _load_sd(os.path.join(weights_dir, "vector_estimator.pt"), "vf_estimator")
@@ -484,6 +494,8 @@ def load_pt_models(
                     u_text = un["u_text"].to(device)
                 if "u_ref" in un:
                     u_ref = un["u_ref"].to(device)
+                if "u_key" in un:
+                    u_key = un["u_key"].to(device)
 
     emb_key = "text_embedder.char_embedder.weight"
     if emb_key in te_sd and te_sd[emb_key].shape[0] != vocab_size:
@@ -496,6 +508,9 @@ def load_pt_models(
         n_attn_layers=cfg.get("te_attn_n_layers", 4),
         expansion_factor=cfg.get("te_expansion_factor", 4),
         p_dropout=0.0,
+        dilation_lst=cfg.get("te_dilation_lst"),
+        edge_fill=cfg.get("edge_fill", False),
+        spte_key_mode=cfg.get("te_style_key_mode", "baked"),
     ).to(device).eval()
     _load_into(text_encoder, te_sd, "text_encoder")
 
@@ -509,8 +524,16 @@ def load_pt_models(
         num_superblocks=cfg.get("vf_n_blocks", 4),
         time_embed_dim=cfg.get("vf_time_dim", 64),
         rope_gamma=cfg.get("vf_rotary_scale", 10.0),
+        main_blocks_cfg=cfg.get("vf_main_blocks"),
+        last_convnext_cfg=cfg.get("vf_last_convnext"),
+        text_n_heads=cfg.get("vf_text_n_heads", 4),
+        text_n_units=cfg.get("vf_text_n_units", 256),
+        supertonic3_time_freqs=cfg.get("vf_st3_time_freqs", False),
+        edge_fill=cfg.get("edge_fill", False),
     ).to(device).eval()
     _load_into(vf_estimator, vf_sd, "vf_estimator")
+    if u_key is not None:
+        vf_estimator.register_buffer("u_key", u_key, persistent=False)
 
     dp_path = dp_ckpt or os.path.join(weights_dir, "duration_predictor.pt")
     dp_sd = _load_sd(dp_path, "state_dict")
@@ -523,6 +546,7 @@ def load_pt_models(
         latent_channels=compressed,
         style_dp=cfg.get("dp_style_tokens", 8),
         style_dim=cfg.get("dp_style_dim", 16),
+        edge_fill=cfg.get("dp_edge_fill", False),
     ).to(device).eval()
     _load_into(dp_model, dp_sd, "duration_predictor")
 

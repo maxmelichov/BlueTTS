@@ -45,7 +45,7 @@ audio, _ = tts(
     "שימו לב נוסעים יקרים, הרכבת תיכנס לתחנת תל אביב מרכז בעוד מספר דקות.",
     lang="he",
     style=style,
-    total_step=5,
+    total_step=8,
     cfg_scale=4.0,
     text_is_phonemes=False,
 )
