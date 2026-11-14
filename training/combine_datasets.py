@@ -77,7 +77,7 @@ def load_spktree(spec):
                     spk = offset + int(os.path.basename(os.path.dirname(root)))
                 except ValueError:
                     continue
-                text = open(os.path.join(root, fn)).read().strip()
+                text = open(os.path.join(root, fn), encoding="utf-8").read().strip()
                 if text:
                     rows.append({"filename": wav, "whisper_phonemes": text,
                                  "speaker_id": spk, "wer_score": 0.0, "lang": lang})
@@ -251,7 +251,7 @@ if __name__ == "__main__":
     direct.add_argument("--lang", default="he")
     args = p.parse_args()
 
-    config = json.load(open(args.config)) if args.config else _direct_config(args)
+    config = json.load(open(args.config, encoding="utf-8")) if args.config else _direct_config(args)
     out = args.output or config.get("output", "combined_dataset.csv")
     clean_out = args.clean_output or config.get("clean_output", "combined_dataset_cleaned.csv")
 
