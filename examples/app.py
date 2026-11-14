@@ -15,7 +15,7 @@ parser.add_argument("--text-is-phonemes", action="store_true")
 args = parser.parse_args()
 
 tts = load_text_to_speech(onnx_dir=args.onnx_dir)
-style = load_voice_style([f"voices/{args.voice}.json"])
+style = load_voice_style([f"voices/v2/{args.voice}.json"])
 
 audio, _ = tts(
     args.text,

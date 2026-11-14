@@ -8,7 +8,7 @@ The inference package. Three entry points, in increasing order of control.
 import soundfile as sf
 from blue_onnx import BlueTTS
 
-tts = BlueTTS(onnx_dir="onnx_models", style_json="voices/noa.json")
+tts = BlueTTS(onnx_dir="onnx_models", style_json="voices/v2/noa.json")
 samples, sr = tts.synthesize("שלום, זהו מודל דיבור בעברית.", lang="he")
 sf.write("out.wav", samples, sr)
 ```
@@ -31,7 +31,7 @@ Defaults suited to arbitrary user text: `normalize_text=True` and peak limiting 
 from blue_onnx import load_text_to_speech, load_voice_style, limit_peak
 
 tts = load_text_to_speech("onnx_models")
-style = load_voice_style(["voices/noa.json"])
+style = load_voice_style(["voices/v2/noa.json"])
 wav, dur = tts("Hello world.", lang="en", style=style, total_step=5,
                normalize_text=True, silence_duration=0.15)
 wav = limit_peak(wav)            # always, before writing a PCM WAV
