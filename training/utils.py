@@ -46,7 +46,7 @@ def _resolve_vocab_size(char_dict_path, default=256):
     import os as _os
     if char_dict_path and _os.path.exists(char_dict_path):
         try:
-            with open(char_dict_path, "r") as f:
+            with open(char_dict_path, "r", encoding="utf-8") as f:
                 cd = _json.load(f)
             if isinstance(cd, dict) and "vocab_size" in cd:
                 return int(cd["vocab_size"])
@@ -62,7 +62,7 @@ def _resolve_vocab_size(char_dict_path, default=256):
 
 def load_ttl_config(config_path="configs/tts.json"):
     import json
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         full_config = json.load(f)
 
     ttl = full_config["ttl"]
