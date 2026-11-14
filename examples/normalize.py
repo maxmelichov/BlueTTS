@@ -25,9 +25,9 @@ from src.blue_onnx import (
 
 Path("examples/out").mkdir(parents=True, exist_ok=True)
 
-onnx_dir = os.environ.get("ONNX_DIR", "onnx_models")
+onnx_dir = os.environ.get("ONNX_DIR", "bluev3_onnx/onnx")
 tts = load_text_to_speech(onnx_dir=onnx_dir)
-style = load_voice_style(["voices/v2/noa.json"])
+style = load_voice_style(["voices/noa.json"])
 
 SAMPLES = [
     ("he", 'ההזמנה IL-4829-7361-05 תגיע ב 12/05/2024 בשעה 08:15, מחיר 1,500 ש"ח (50% הנחה).'),
