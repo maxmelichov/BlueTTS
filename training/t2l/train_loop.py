@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import functools
 import numpy as np
 import soundfile as sf
 from typing import Optional
@@ -18,16 +19,21 @@ from tqdm import tqdm
 
 from training.t2l.data_module import Text2LatentDataset, collate_text2latent
 from training.data.audio_utils import ensure_sr
-from training.data.text_vocab import normalize_text, text_to_indices_multilang
-from training.utils import compress_latents
+from training.data.text_vocab import normalize_text, text_to_indices_multilang, wrap_lang_tags
+from training.utils import check_stats_provenance, compress_latents
 from training.t2l.builders import build_models
+from training.t2l.ema import ModelEMA
 from training.t2l.cfg_utils import (
+    DistributedWeightedSampler,
     _latest_ckpt_in_dir,
     _validate_ttl_config,
+    all_reduce_grads,
+    build_lr_scheduler,
     ddp_state_dict,
     seed_worker,
     unwrap_ddp,
 )
+from training.t2l.rsf import rsf_loss, rsf_negative_targets, silence_latent
 from training.t2l.sampling import build_reference_only, build_reference_from_latents, sample_audio
 from training.t2l.spfm import spfm_forward_mask
 
@@ -77,7 +83,7 @@ _PHRASE_ROWS: list[tuple[str, str | None, str, list[str]]] = [
 ]
 
 
-def _phonemize_eval_with_espeak(espeak_lang: str, label: str, lines: list[str]) -> list[str]:
+def _phonemize_eval_with_espeak(espeak_lang: str, label: str, lines: list[str], affricate_ligatures: bool) -> list[str]:
     try:
         from phonemizer.backend import EspeakBackend
         from phonemizer.separator import Separator
@@ -88,19 +94,19 @@ def _phonemize_eval_with_espeak(espeak_lang: str, label: str, lines: list[str]) 
             with_stress=True,
             language_switch="remove-flags",
         )
-        return [normalize_text(s) for s in backend.phonemize(lines, separator=sep)]
+        return [normalize_text(s, affricate_ligatures=affricate_ligatures) for s in backend.phonemize(lines, separator=sep)]
     except Exception as e:  # noqa: BLE001
         print(f"[Inference] {label} phonemization failed: {e}")
         return []
 
 
-def build_periodic_eval_phrases() -> list[tuple[str, str, list[str]]]:
+def build_periodic_eval_phrases(affricate_ligatures: bool) -> list[tuple[str, str, list[str]]]:
     out: list[tuple[str, str, list[str]]] = []
     for lang, espeak, label, raw_lines in _PHRASE_ROWS:
         if espeak is None:
             out.append((lang, label, list(raw_lines)))
         else:
-            out.append((lang, label, _phonemize_eval_with_espeak(espeak, label, raw_lines)))
+            out.append((lang, label, _phonemize_eval_with_espeak(espeak, label, raw_lines, affricate_ligatures)))
     return out
 
 
@@ -162,6 +168,8 @@ def train(
         full_config = json.load(f)
     ttl_cfg = full_config["ttl"]
     ae_cfg_json = full_config.get("ae", {})
+    affricate_ligatures = bool(full_config.get("affricate_ligatures", False))
+    lang_tags = bool(full_config.get("lang_tags", False))
 
     _validate_ttl_config(ttl_cfg)
 
@@ -173,11 +181,23 @@ def train(
     normalizer_scale = ttl_cfg["normalizer"]["scale"]
     sigma_min = ttl_cfg["flow_matching"]["sig_min"]
 
+    # ttl.train (optional): AdamW weight decay and the steps at which the lr is halved
+    train_cfg = ttl_cfg.get("train", {})
+    weight_decay = float(train_cfg.get("weight_decay", 0.01))
+    lr_milestones = [int(m) for m in train_cfg.get("lr_milestones", [300_000, 600_000])]
+    ema_decay = float(train_cfg.get("ema_decay", 0.0))  # 0 = no EMA
+
     um_cfg = ttl_cfg["uncond_masker"]
     prob_both_uncond = um_cfg["prob_both_uncond"]
     prob_text_uncond = um_cfg["prob_text_uncond"]
     if puncond is None:
         puncond = prob_both_uncond + prob_text_uncond
+
+    # RobustSpeechFlow (arXiv 2605.22083, training/t2l/rsf.py): plain flow matching until start_step.
+    rsf_cfg = ttl_cfg.get("rsf", {})
+    rsf_enabled = rsf_cfg.get("enabled", False)
+    rsf_start_step = rsf_cfg.get("start_step", 0)
+    rsf_z_sil = None
 
     if rank == 0:
         print(
@@ -185,6 +205,8 @@ def train(
             f"ccf={chunk_compress_factor} | Ke={Ke} (config {cfg_Ke}) | "
             f"normalizer={normalizer_scale} | sig_min={sigma_min}\n"
             f"  uncond: prob_both={prob_both_uncond} prob_text={prob_text_uncond} total_puncond={puncond}\n"
+            f"  optim: lr={lr} weight_decay={weight_decay} lr_milestones={lr_milestones} (gamma 0.5)\n"
+            f"  lang_tags={lang_tags}\n"
             f"{'=' * 60}\n"
         )
 
@@ -258,14 +280,20 @@ def train(
             )
 
     ae_encoder.eval().requires_grad_(False)
+    print(check_stats_provenance(stats, ae_encoder.state_dict()))
     ae_decoder.eval().requires_grad_(False)
     mel_spec.eval()
 
     u_text, u_ref = uncond_params.u_text, uncond_params.u_ref
+    u_key = getattr(uncond_params, "u_key", None)
+    shared_key = text_encoder.speech_prompted_text_encoder.style_key is not None
+    # used outside any DDP forward: gradients averaged across ranks by hand
+    uncond_tokens = [p for p in (u_text, u_ref, u_key) if p is not None]
 
-    params = list(text_encoder.parameters()) + list(reference_encoder.parameters()) + \
-             list(vf_estimator.parameters()) + list(uncond_params.parameters())
-    optimizer = AdamW(params, lr=lr)
+    # each parameter once: the projected style key is shared by the text encoder and the VF
+    params = list({id(p): p for m in (text_encoder, reference_encoder, vf_estimator, uncond_params)
+                   for p in m.parameters()}.values())
+    optimizer = AdamW(params, lr=lr, weight_decay=weight_decay)
 
     global_step = 0
     scheduler_state = None
@@ -297,11 +325,28 @@ def train(
         if 'reference_encoder' in checkpoint: reference_encoder.load_state_dict(checkpoint['reference_encoder'], strict=False)
         if 'u_text' in checkpoint: u_text.data = checkpoint['u_text']
         if 'u_ref' in checkpoint: u_ref.data = checkpoint['u_ref']
+        # the loads above are non-strict: refuse a style-key layout that differs from the config
+        ck_shared = 'speech_prompted_text_encoder.style_key' in checkpoint.get('text_encoder', {})
+        ck_ukey = checkpoint.get('u_key') is not None
+        if (ck_shared, ck_ukey) != (shared_key, u_key is not None):
+            raise RuntimeError(
+                f"{latest_ckpt}: style-key layout projected={ck_shared} u_key={ck_ukey}, but the config has "
+                f"style_key_mode projected={shared_key} style_key_uncond={u_key is not None}")
+        if shared_key or u_key is not None:
+            missing = [k for m, n in ((text_encoder, 'text_encoder'), (vf_estimator, 'vf_estimator'))
+                       for k in m.state_dict() if k not in checkpoint.get(n, {})]
+            if missing or shapes_changed:
+                raise RuntimeError(f"{latest_ckpt}: incomplete checkpoint for this config (missing {missing[:8]}, "
+                                   f"shapes_changed={shapes_changed})")
+            if u_key is not None:
+                u_key.data.copy_(checkpoint['u_key'])
 
-        optimizer = AdamW(params, lr=lr)
+        optimizer = AdamW(params, lr=lr, weight_decay=weight_decay)
         if 'optimizer' in checkpoint and not (finetune or shapes_changed):
             try:
                 optimizer.load_state_dict(checkpoint['optimizer'])
+                for pg in optimizer.param_groups:
+                    pg['weight_decay'] = weight_decay  # the config, not the saved state, sets it
             except Exception as e:
                 if rank == 0:
                     print(f"Warning: Failed to load optimizer state: {e}")
@@ -320,14 +365,18 @@ def train(
                     )
         if 'scheduler' in checkpoint and not shapes_changed: scheduler_state = checkpoint['scheduler']
 
-    scheduler_last_epoch = -1 if finetune else (global_step - 1)
-    if scheduler_last_epoch != -1:
-        for pg in optimizer.param_groups: pg.setdefault('initial_lr', pg['lr'])
+    scheduler = build_lr_scheduler(optimizer, lr, lr_milestones, global_step, scheduler_state, finetune)
 
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[300_000, 600_000], gamma=0.5, last_epoch=scheduler_last_epoch)
-    if scheduler_state and not finetune:
-        try: scheduler.load_state_dict(scheduler_state)
-        except: pass
+    # EMA on rank 0 only: DDP keeps every rank's weights identical.
+    ema = None
+    if ema_decay > 0 and rank == 0:
+        ema = ModelEMA([("vf_estimator", vf_estimator), ("text_encoder", text_encoder),
+                        ("reference_encoder", reference_encoder)], decay=ema_decay)
+        if latest_ckpt is not None and "ema" in checkpoint:
+            n_loaded = ema.load_state_dicts(checkpoint["ema"])
+            print(f"[EMA] decay {ema_decay}: restored {n_loaded} tensors (updates={ema.updates})")
+        else:
+            print(f"[EMA] decay {ema_decay}: initialised {len(ema.params)} tensors from the current weights")
 
     if dist.is_initialized():
         text_encoder = DDP(text_encoder, device_ids=[local_rank], find_unused_parameters=True)
@@ -349,12 +398,19 @@ def train(
         sample_rate=ae_sample_rate,
         max_wav_len=ae_sample_rate * 20,
         max_text_len=300,
+        affricate_ligatures=affricate_ligatures,
+        lang_tags=lang_tags,
     )
     if rank == 0:
         print(f"Dataset loaded with {len(dataset)} samples.")
 
     # Sampler Setup
-    if dist.is_initialized():
+    if "sample_weight" in dataset.df.columns:
+        w = dataset.df["sample_weight"].astype(float).fillna(0.0).values
+        sampler = DistributedWeightedSampler(
+            torch.from_numpy(w).double(), num_replicas=dist.get_world_size() if dist.is_initialized() else 1, rank=rank
+        )
+    elif dist.is_initialized():
         sampler = DistributedSampler(dataset, shuffle=True)
     else:
         # Calculate inverse-frequency weights for balanced speaker sampling
@@ -377,7 +433,7 @@ def train(
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=2,
-        worker_init_fn=seed_worker
+        worker_init_fn=functools.partial(seed_worker, rank=rank, start_step=global_step),
     )
     
     # Validation Batch
@@ -431,9 +487,11 @@ def train(
         print("Starting training loop...")
 
     epoch = 0
+    epoch_base = global_step  # offsets set_epoch so a resume does not replay the epoch-0 draw order
+    last_saved_step = global_step  # the checkpoint we resumed from (or step 0) is not written again
 
     while global_step < max_steps:
-        if dist.is_initialized() and hasattr(sampler, 'set_epoch'): sampler.set_epoch(epoch)
+        if hasattr(sampler, 'set_epoch'): sampler.set_epoch(epoch_base + epoch)
         epoch += 1
 
         text_encoder.train()
@@ -447,6 +505,8 @@ def train(
         spfm_total_samples = 0
         spfm_score_sum = 0.0
         spfm_call_batches = 0
+        epoch_rsf_rand = 0.0
+        epoch_rsf_aug = 0.0
 
         for batch_idx, batch in enumerate(progress_bar):
             if global_step >= max_steps: break
@@ -486,6 +546,10 @@ def train(
             B = wavs.shape[0]
 
             with torch.no_grad():
+                # zero-pad to whole hop * chunk_compress_factor chunks, the layout the AE and inference use
+                chunk = hop_length * chunk_compress_factor
+                wavs = F.pad(wavs, (0, (-wavs.shape[-1]) % chunk))
+                ref_wavs = F.pad(ref_wavs, (0, (-ref_wavs.shape[-1]) % chunk))
                 mel = mel_spec(wavs.squeeze(1))
                 z = ae_encoder(mel)
                 z = compress_latents(z, factor=chunk_compress_factor)
@@ -499,6 +563,9 @@ def train(
             _, C, T = z_1.shape
             valid_mel_len = lengths.to(device).float() / hop_length
             valid_z_len = (valid_mel_len / chunk_compress_factor).ceil().long().clamp(min=1, max=T)
+            # drop the centred STFT's extra frame: inference has no masked frame after the longest row
+            T = int(valid_z_len.max())
+            z_1 = z_1[:, :, :T]
 
             latent_mask = (torch.arange(T, device=device).expand(B, T) < valid_z_len.unsqueeze(1)).unsqueeze(1).float()
             z_1 = z_1 * latent_mask
@@ -552,6 +619,7 @@ def train(
                 device=device,
                 B=B,
                 rank=rank,
+                u_key=u_key,
             )
             spfm_mask = spfm_out.spfm_mask
             if spfm_out.ran_spfm:
@@ -602,6 +670,12 @@ def train(
             u_ref_batch = u_ref.expand(B_eff, -1, -1)
             ref_values_final = ref_values_exp * mask_style_cond + u_ref_batch * mask_style_uncond
 
+            # style-dropped rows (both-drop, SPFM-dirty) key on u_key
+            style_keys_final = None
+            if u_key is not None:
+                tile = unwrap_ddp(vf_estimator).tile.expand(B_eff, -1, -1)
+                style_keys_final = torch.where(mask_style_uncond > 0.5, u_key.expand(B_eff, -1, -1), tile)
+
             x_t_in = x_t * latent_mask_exp
             v_pred = vf_estimator(
                 noisy_latent=x_t_in,
@@ -610,12 +684,29 @@ def train(
                 latent_mask=latent_mask_exp,
                 text_mask=text_mask_final,
                 current_step=t,
+                style_keys=style_keys_final,
             )
 
             final_mask = latent_mask_exp * target_loss_mask_exp
-            loss_raw = F.l1_loss(v_pred, v_target, reduction='none')
             mask_ct = final_mask.expand(-1, C, -1)
-            loss = (loss_raw * mask_ct).sum() / (mask_ct.sum() + 1e-8)
+            if rsf_enabled and global_step >= rsf_start_step:
+                if rsf_z_sil is None:
+                    rsf_z_sil = silence_latent(ae_encoder, mel_spec, mean, std, normalizer_scale,
+                                               chunk_compress_factor, ae_sample_rate, device)
+                    if rank == 0:
+                        print(f"[RSF] on from step {global_step}: lambda_rand {rsf_cfg['lambda_rand']} "
+                              f"lambda_aug {rsf_cfg['lambda_aug']}; silence latent norm {rsf_z_sil.norm().item():.3f}")
+                v_rand, v_aug, m_rand = rsf_negative_targets(
+                    z_1_exp, latent_mask_exp, x_0, valid_z_len.repeat_interleave(Ke), rsf_z_sil, Ke, sigma_min,
+                    fps=ae_sample_rate / hop_length / chunk_compress_factor,
+                )
+                loss, rsf_rand, rsf_aug = rsf_loss(v_pred, v_target, mask_ct, v_rand, v_aug, m_rand,
+                                                   rsf_cfg["lambda_rand"], rsf_cfg["lambda_aug"])
+                epoch_rsf_rand += rsf_rand
+                epoch_rsf_aug += rsf_aug
+            else:
+                loss_raw = F.l1_loss(v_pred, v_target, reduction='none')
+                loss = (loss_raw * mask_ct).sum() / (mask_ct.sum() + 1e-8)
 
             if global_step % 1000 == 0 and rank == 0:
                 with torch.no_grad():
@@ -634,10 +725,13 @@ def train(
             loss.backward()
 
             if (batch_idx + 1) % accumulation_steps == 0:
+                all_reduce_grads(uncond_tokens)
                 torch.nn.utils.clip_grad_norm_(params, 10.0)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+                if ema is not None:
+                    ema.update()
                 global_step += 1
 
             epoch_loss += loss.item() * accumulation_steps
@@ -649,21 +743,41 @@ def train(
             )
             if finetune:
                 postfix["mode"] = "FT"
+            if rsf_enabled and global_step >= rsf_start_step:
+                postfix["rsf_rand"] = epoch_rsf_rand / num_batches
+                postfix["rsf_aug"] = epoch_rsf_aug / num_batches
             progress_bar.set_postfix(**postfix)
 
-            if global_step % 1000 == 0 and rank == 0:
+            # under accumulation global_step stays on a multiple of 1000 for several micro-batches: save once
+            if global_step % 1000 == 0 and global_step != last_saved_step and rank == 0:
+                last_saved_step = global_step
                 ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{global_step}.pt")
-                torch.save({
+                ckpt = {
                     "vf_estimator": ddp_state_dict(vf_estimator),
                     "text_encoder": ddp_state_dict(text_encoder),
                     "reference_encoder": ddp_state_dict(reference_encoder),
                     "u_text": u_text.data,
                     "u_ref": u_ref.data,
+                    **({"u_key": u_key.data} if u_key is not None else {}),
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "global_step": global_step,
-                }, ckpt_path)
+                }
+                if ema is not None:
+                    ckpt["ema"] = ema.state_dicts()
+                torch.save(ckpt, ckpt_path)
                 print(f"Saved checkpoint to {ckpt_path}")
+                if ema is not None:
+                    # The EMA weights as an ordinary checkpoint, loadable by inference / export as is.
+                    ema_sd = ckpt["ema"]
+                    ema_ckpt = {k: v for k, v in ckpt.items() if k not in ("optimizer", "scheduler", "ema")}
+                    ema_ckpt.update({k: ema_sd[k] for k in ("vf_estimator", "text_encoder", "reference_encoder")},
+                                    ema_decay=ema_sd["decay"], ema_updates=ema_sd["updates"])
+                    ema_path = os.path.join(checkpoint_dir, "ema", f"ckpt_step_{global_step}.pt")
+                    os.makedirs(os.path.dirname(ema_path), exist_ok=True)
+                    torch.save(ema_ckpt, ema_path)
+                    print(f"Saved EMA checkpoint to {ema_path}")
+                del ckpt
                 print("Running inference (periodic log)...")
 
                 # Unwrap for inference to avoid DDP sync issues on single rank
@@ -677,7 +791,7 @@ def train(
                 dev = str(device) if isinstance(device, torch.device) else device
 
                 try:
-                    eval_phrase_rows = build_periodic_eval_phrases()
+                    eval_phrase_rows = build_periodic_eval_phrases(affricate_ligatures)
 
                     # Computes style_ttl + style_dp once from the reference wav,
                     # then reuses them across all sentences — matches ONNX inference pattern.
@@ -704,6 +818,8 @@ def train(
 
                         for i, text in enumerate(sentences):
                             ids = text_to_indices_multilang(text, base_lang=lang)
+                            if lang_tags:
+                                ids = wrap_lang_tags(ids, lang)
                             txt_ids = torch.tensor(ids, dtype=torch.long).unsqueeze(0).to(device)
                             txt_mask = torch.ones(1, 1, txt_ids.shape[1], device=device)
 
@@ -745,6 +861,8 @@ def train(
                         for lang, label, sentences in eval_phrase_rows:
                             for i, text in enumerate(sentences):
                                 ids = text_to_indices_multilang(text, base_lang=lang)
+                                if lang_tags:
+                                    ids = wrap_lang_tags(ids, lang)
                                 txt_ids = torch.tensor(ids, dtype=torch.long).unsqueeze(0).to(device)
                                 txt_mask = torch.ones(1, 1, txt_ids.shape[1], device=device)
 
@@ -846,10 +964,18 @@ def train(
 
         # Flush remaining gradients if dataloader length is not divisible by accumulation_steps
         if num_batches % accumulation_steps != 0:
+            # rescale to the mean over the k micro-batches actually accumulated
+            k = num_batches % accumulation_steps
+            for p in params:
+                if p.grad is not None:
+                    p.grad.mul_(accumulation_steps / k)
+            all_reduce_grads(uncond_tokens)
             torch.nn.utils.clip_grad_norm_(params, 10.0)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update()
             global_step += 1
 
         if spfm_call_batches > 0:

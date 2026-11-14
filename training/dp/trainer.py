@@ -9,7 +9,7 @@ from tqdm import tqdm
 from training.dp.data_module import get_dp_dataloader
 from training.dp.models.dp_network import DPNetwork
 from training.data.text_vocab import VOCAB_SIZE
-from training.utils import LinearMelSpectrogram, compress_latents
+from training.utils import LinearMelSpectrogram, check_stats_provenance, compress_latents
 from bluecodec import LatentEncoder
 
 
@@ -40,6 +40,7 @@ def _build_dp_models(
     predictor_cfg,
     ae_checkpoint,
     device,
+    edge_fill=False,
 ):
     ae_enc_arch = full_cfg["ae"]["encoder"]
     ae_spec_cfg = ae_enc_arch.get("spec_processor", {})
@@ -85,6 +86,7 @@ def _build_dp_models(
         sentence_encoder_cfg=sentence_encoder_cfg,
         style_encoder_cfg=style_encoder_cfg,
         predictor_cfg=predictor_cfg,
+        edge_fill=edge_fill,
     ).to(device)
 
     return mel_spec, ae_encoder, model
@@ -126,11 +128,14 @@ def train_duration_predictor(
     print(f"{'='*60}\n")
     
     mel_spec, ae_encoder, model = _build_dp_models(
-        full_cfg, style_dp, style_dim, sentence_encoder_cfg, style_encoder_cfg, predictor_cfg, ae_checkpoint, device
+        full_cfg, style_dp, style_dim, sentence_encoder_cfg, style_encoder_cfg, predictor_cfg, ae_checkpoint, device,
+        edge_fill=dp_cfg.get("edge_fill", False),
     )
     
     optimizer = AdamW(model.parameters(), lr=lr)
-    dataloader = get_dp_dataloader(metadata_path, batch_size)
+    lang_tags = bool(full_cfg.get("lang_tags", False))
+    dataloader = get_dp_dataloader(metadata_path, batch_size, affricate_ligatures=bool(full_cfg.get("affricate_ligatures", False)),
+                                   lang_tags=lang_tags)
     
     if not os.path.exists(stats_path):
         print(f"Error: Stats file {stats_path} not found.")
@@ -144,6 +149,7 @@ def train_duration_predictor(
         std = stats["std"].to(device).view(1, -1, 1)
     if mean.shape[1] != compressed_channels:
         print(f"Warning: stats channels ({mean.shape[1]}) != expected compressed_channels ({compressed_channels}).")
+    print(check_stats_provenance(stats, ae_encoder.state_dict()))
         
     global_step = 0
     mean_loss = 0.0

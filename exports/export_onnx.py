@@ -3,7 +3,7 @@
 
 Produces (in --onnx_dir):
   - text_encoder.onnx
-  - vector_estimator.onnx   (u_text / u_ref baked in; CFG done internally)
+  - vector_estimator.onnx   (u_text / u_ref, and u_key when the checkpoint has it, baked in; CFG done internally)
   - vocoder.onnx            (mean/std/normalizer_scale baked in; unnorm+reshape in-graph)
   - duration_predictor.onnx (style-conditioned: takes style_dp from the voice JSON)
 """
@@ -149,13 +149,15 @@ def _replace_mha(module: nn.Module) -> None:
 # ── graph wrappers that bake runtime conditioning into the ONNX graph ─────────
 
 class VectorFieldEstimatorCFG(nn.Module):
-    """Wraps VF and bakes u_text / u_ref so CFG is one ONNX call per diffusion step."""
+    """Wraps VF and bakes u_text / u_ref (and u_key, if given) so CFG is one ONNX call per diffusion step."""
 
-    def __init__(self, model: VectorFieldEstimator, u_text: torch.Tensor, u_ref: torch.Tensor):
+    def __init__(self, model: VectorFieldEstimator, u_text: torch.Tensor, u_ref: torch.Tensor,
+                 u_key: torch.Tensor | None = None):
         super().__init__()
         self.model = model
         self.register_buffer("u_text", u_text.detach().clone())
         self.register_buffer("u_ref", u_ref.detach().clone())
+        self.register_buffer("u_key", u_key.detach().clone() if u_key is not None else None)
 
     def forward(self, noisy_latent, text_emb, style_ttl, latent_mask, text_mask,
                 current_step, total_step, cfg_scale):
@@ -164,13 +166,14 @@ class VectorFieldEstimatorCFG(nn.Module):
         u_text_b = self.u_text.expand(B, -1, T_text)
         u_ref_b = self.u_ref.expand(B, -1, -1)
         u_mask = torch.ones_like(text_mask)
+        u_key_b = self.u_key.expand(B, -1, -1) if self.u_key is not None else None
 
         den_cond = self.model(noisy_latent=noisy_latent, text_emb=text_emb, style_ttl=style_ttl,
                               latent_mask=latent_mask, text_mask=text_mask,
                               current_step=current_step, total_step=total_step)
         den_uncond = self.model(noisy_latent=noisy_latent, text_emb=u_text_b, style_ttl=u_ref_b,
                                 latent_mask=latent_mask, text_mask=u_mask,
-                                current_step=current_step, total_step=total_step)
+                                current_step=current_step, total_step=total_step, style_keys=u_key_b)
         return den_uncond + cfg_scale * (den_cond - den_uncond)
 
 
@@ -381,7 +384,9 @@ def main():
     u_text, u_ref = t2l.get("u_text"), t2l.get("u_ref")
     if u_text is None or u_ref is None:
         raise RuntimeError(f"u_text/u_ref missing in {args.ttl_ckpt}; re-export with uncond params.")
-    print(f"[INFO] baking uncond: u_text {tuple(u_text.shape)}, u_ref {tuple(u_ref.shape)}")
+    u_key = t2l.get("u_key")
+    print(f"[INFO] baking uncond: u_text {tuple(u_text.shape)}, u_ref {tuple(u_ref.shape)}"
+          + (f", u_key {tuple(u_key.shape)}" if u_key is not None else ""))
 
     stats = _load_state(args.stats)
     mean = stats["mean"].to(torch.float32)
@@ -403,6 +408,9 @@ def main():
         n_attn_layers=cfg["te_attn_n_layers"],
         expansion_factor=cfg["te_expansion_factor"],
         p_dropout=cfg["te_attn_p_dropout"],
+        dilation_lst=cfg["te_dilation_lst"],
+        edge_fill=cfg["edge_fill"],
+        spte_key_mode=cfg["te_style_key_mode"],
     ).eval()
     _load_into(text_enc, t2l, "text_encoder")
 
@@ -412,6 +420,7 @@ def main():
         num_blocks=cfg["se_num_blocks"],
         num_tokens=n_style,
         num_heads=cfg["se_n_heads"],
+        edge_fill=cfg["edge_fill"],
     ).eval()
     _load_into(ref_enc, t2l, "reference_encoder")
     _replace_mha(ref_enc)
@@ -422,6 +431,10 @@ def main():
         text_dim=cfg["vf_text_dim"], style_dim=cfg["vf_style_dim"],
         num_style_tokens=n_style, num_superblocks=cfg["vf_n_blocks"],
         time_embed_dim=cfg["vf_time_dim"], rope_gamma=cfg["vf_rotary_scale"],
+        main_blocks_cfg=cfg["vf_main_blocks"], last_convnext_cfg=cfg["vf_last_convnext"],
+        text_n_heads=cfg["vf_text_n_heads"], text_n_units=cfg["vf_text_n_units"],
+        supertonic3_time_freqs=cfg["vf_st3_time_freqs"],
+        edge_fill=cfg["edge_fill"],
     ).eval()
     _load_into(vf, t2l, "vf_estimator")
 
@@ -440,6 +453,7 @@ def main():
         vocab_size=dp_vocab_size,
         style_dp=cfg["dp_style_tokens"],
         style_dim=cfg["dp_style_dim"],
+        edge_fill=cfg["dp_edge_fill"],
     ).eval()
 
     # DP checkpoints may have been trained with a larger char-embedding table;
@@ -492,7 +506,7 @@ def main():
         all_ok &= verify(text_enc, te_path, te_inputs, te_names, "text_encoder", atol=1e-4, rtol=1e-3)
 
     # ---- 2) vector field estimator (CFG baked in) --------------------------
-    vf_wrapped = VectorFieldEstimatorCFG(vf, u_text, u_ref).eval()
+    vf_wrapped = VectorFieldEstimatorCFG(vf, u_text, u_ref, u_key).eval()
     vf_path = os.path.join(args.onnx_dir, "vector_estimator.onnx")
     vf_inputs = (noisy_latent, text_emb, style_ttl, latent_mask, text_mask, cur_step, tot_step, cfg_scale)
     vf_names = ["noisy_latent", "text_emb", "style_ttl", "latent_mask", "text_mask",
@@ -505,7 +519,14 @@ def main():
         "denoised_latent": {0: "B", 2: "T_lat"},
     }, do_slim=args.slim, do_int8=args.int8)
     if do_verify:
-        all_ok &= verify(vf_wrapped, vf_path, vf_inputs, vf_names, "vector_estimator")
+        # Verify on real TE/RE outputs at a mid step: N(0,1) inputs at t=0 are ill-conditioned for the 64M field.
+        g = torch.Generator().manual_seed(0)
+        with torch.no_grad():
+            v_style = ref_enc(z_pred, mask=ref_mask)
+            v_text = text_enc(torch.randint(3, 100, (B, T_text), generator=g), v_style, text_mask)
+        vf_check = (noisy_latent, v_text, v_style, latent_mask, text_mask,
+                    torch.full((B,), 3.0), torch.full((B,), 8.0), cfg_scale)
+        all_ok &= verify(vf_wrapped, vf_path, vf_check, vf_names, "vector_estimator")
 
     # ---- 3) vocoder (stats+reshape baked in) -------------------------------
     voc_wrapped = VocoderWithStats(

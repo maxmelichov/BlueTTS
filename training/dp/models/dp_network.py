@@ -16,6 +16,7 @@ class DPNetwork(TTSDurationModel):
         sentence_encoder_cfg: dict = None,
         style_encoder_cfg: dict = None,
         predictor_cfg: dict = None,
+        edge_fill: bool = False,
     ):
         super().__init__(
             vocab_size=vocab_size,
@@ -24,6 +25,7 @@ class DPNetwork(TTSDurationModel):
             sentence_encoder_cfg=sentence_encoder_cfg,
             style_encoder_cfg=style_encoder_cfg,
             predictor_cfg=predictor_cfg,
+            edge_fill=edge_fill,
         )
 
     def forward(
