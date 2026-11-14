@@ -1043,7 +1043,10 @@ def load_latent_stats(
 def load_text_to_speech(
     onnx_dir: str, use_gpu: bool = False, config_path: str = "config/tts.json",
     renikud_path: Optional[str] = None,
+    providers: Optional[list[str]] = None,
 ) -> TextToSpeech:
+    """Load a bundle's graphs. ``providers`` is passed to every ONNX Runtime session
+    (e.g. ``["CUDAExecutionProvider", "CPUExecutionProvider"]``); the default is CPU."""
     opts = ort.SessionOptions()
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -1052,7 +1055,10 @@ def load_text_to_speech(
     n_threads = int(os.environ.get("ORT_NUM_THREADS", min(8, os.cpu_count() or 1)))
     opts.intra_op_num_threads = n_threads
     opts.inter_op_num_threads = 1
-    if use_gpu:
+    if providers:
+        providers = list(providers)
+        print(f"Using ONNX Runtime providers {providers} (intra_op_threads={n_threads})")
+    elif use_gpu:
         raise NotImplementedError("GPU mode is not fully tested")
     else:
         providers = ["CPUExecutionProvider"]
@@ -1150,9 +1156,10 @@ class BlueTTS:
         style_json: Union[str, list[str]] = "voices/noa.json",
         renikud_path: Optional[str] = None,
         config_path: str = "config/tts.json",
+        providers: Optional[list[str]] = None,
     ):
         self.tts = load_text_to_speech(
-            onnx_dir, config_path=config_path, renikud_path=renikud_path
+            onnx_dir, config_path=config_path, renikud_path=renikud_path, providers=providers
         )
         paths = [style_json] if isinstance(style_json, str) else list(style_json)
         style = load_voice_style(paths)
@@ -1182,8 +1189,13 @@ class BlueTTS:
         pace_dpt_ref: Optional[float] = None,
         peak_limit: Optional[float] = 0.95,
         normalize_text: bool = True,
+        style: Optional[Style] = None,
     ) -> tuple[np.ndarray, int]:
         """Synthesize ``text`` and return mono float32 samples plus the sample rate.
+
+        ``style`` overrides the voice loaded at construction for this call (a
+        :class:`Style` from :func:`load_voice_style`), so one instance can serve
+        several voices.
 
         Accepts inline ``<lang>…</lang>`` spans and splits long input into chunks
         joined by ``silence_duration`` seconds of silence, as
@@ -1205,7 +1217,7 @@ class BlueTTS:
         audio, _ = self.tts(
             text,
             lang=lang,
-            style=self.style,
+            style=self.style if style is None else style,
             total_step=total_step,
             speed=speed,
             cfg_scale=cfg_scale,
