@@ -23,6 +23,19 @@ class TestYiddishGuards(unittest.TestCase):
         self.assertEqual(out, "דער טאָג")
         self.assertIn("ABC", err.getvalue())
 
+    def test_hyphen_piece_reported_and_nothing_readable_raises(self):
+        import contextlib
+        import io
+        tp = TextProcessor(release={"inference": {}}, frontend_dir="/nonexistent")
+        tp._yi = lambda t: t
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            tp._release_g2p("דער קאָמפּיוטער-", "yi", True)
+        self.assertIn("קאָמפּיוטער-", err.getvalue())
+        tp._yi = lambda t: ""
+        with self.assertRaises(ValueError):
+            tp._release_g2p("ABC", "yi", True)
+
     def test_n_words(self):
         self.assertEqual(_n_words("ɡit mɔrɡn, vɛlt ."), 3)
         self.assertEqual(_n_words("אַזייגער טאָג"), 2)

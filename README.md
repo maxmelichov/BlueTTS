@@ -22,7 +22,7 @@ git clone https://github.com/maxmelichov/BlueTTS.git
 cd BlueTTS
 uv sync
 uv run hf download notmax123/BlueV3-onnx --include "onnx/*" "voices/*" "frontend/*" --local-dir ./bluev3_onnx
-uv pip install ./bluev3_onnx/frontend/polyg2p-*.whl     # G2P for en / de / es / it (Linux x86-64, glibc >= 2.34)
+uv pip install ./bluev3_onnx/frontend/polyg2p-*.whl     # G2P for en / de / es / it / ru (Linux x86-64, glibc >= 2.34)
 ```
 
 ```python
@@ -37,7 +37,7 @@ samples, sr = tts.synthesize("Hello, this is BlueTTS.", lang="en")
 ```
 
 The bundle sets the operating point itself (8 steps, CFG 4.0, speed 1.0, language tags on).
-Numbers, dates, prices and codes are spoken as words automatically. Mix languages
+Numbers, dates, prices and codes are spoken as words automatically (Yiddish: spell numbers out). Mix languages
 inline with `<en>…</en>`:
 
 ```python
