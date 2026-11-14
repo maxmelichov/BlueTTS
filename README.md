@@ -30,7 +30,7 @@ Voice JSONs ship in [`voices/`](voices/), so you are ready to synthesize:
 import soundfile as sf
 from blue_onnx import BlueTTS
 
-tts = BlueTTS(onnx_dir="onnx_models", style_json="voices/noa.json")
+tts = BlueTTS(onnx_dir="onnx_models", style_json="voices/v2/noa.json")
 samples, sr = tts.synthesize("שלום, זהו מודל דיבור בעברית.", lang="he")
 sf.write("out.wav", samples, sr)
 ```

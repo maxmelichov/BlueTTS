@@ -960,7 +960,7 @@ class BlueTTS:
     def __init__(
         self,
         onnx_dir: str = "onnx_models",
-        style_json: Union[str, list[str]] = "voices/noa.json",
+        style_json: Union[str, list[str]] = "voices/v2/noa.json",
         renikud_path: Optional[str] = None,
         config_path: str = "config/tts.json",
     ):
