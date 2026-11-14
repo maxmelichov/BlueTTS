@@ -13,7 +13,7 @@ def _voice(path, model=None):
     d = {"style_ttl": {"data": [[[0.0] * 4] * 2], "dims": [1, 2, 4]}, "style_dp": {"data": [[[0.0] * 3]], "dims": [1, 1, 3]}}
     if model:
         d["model"] = model
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(d, f)
     return path
 

@@ -44,7 +44,7 @@ def _load_config(config: str | dict[str, Any]) -> dict[str, Any]:
     if isinstance(config, dict):
         full = config
     else:
-        with open(config, "r") as f:
+        with open(config, "r", encoding="utf-8") as f:
             full = json.load(f)
     ae = full.get("ae", {})
     ttl = full.get("ttl", {})

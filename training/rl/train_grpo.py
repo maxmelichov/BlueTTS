@@ -86,7 +86,7 @@ def train_grpo(cfg, asr=None):
     dev = torch.device(cfg.device)
     os.makedirs(cfg.out, exist_ok=True)
     torch.manual_seed(cfg.seed)
-    full = json.load(open(cfg.config))
+    full = json.load(open(cfg.config, encoding="utf-8"))
     ttl = full["ttl"]
     sr, ccf, ld, ns = full["ae"].get("sample_rate", 44100), ttl["chunk_compress_factor"], ttl["latent_dim"], ttl["normalizer"]["scale"]
 
@@ -257,7 +257,7 @@ def train_grpo(cfg, asr=None):
                 ema[k].copy_(v)
 
     gen = torch.Generator(device=dev).manual_seed(cfg.seed + start)
-    log = open(os.path.join(cfg.out, "grpo_log.jsonl"), "a")
+    log = open(os.path.join(cfg.out, "grpo_log.jsonl"), "a", encoding="utf-8")
     pool = ThreadPoolExecutor(max_workers=cfg.score_workers)  # groups are scored while the next ones roll out
     for it in range(start, cfg.iters + 1):
         t0 = time.time()
