@@ -16,7 +16,7 @@ from bluecodec import LatentEncoder
 def _load_dp_config(config_path: str) -> dict:
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config file not found: {config_path}")
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         full = json.load(f)
     dp_cfg = full.get("dp")
     if isinstance(dp_cfg, dict) and dp_cfg:

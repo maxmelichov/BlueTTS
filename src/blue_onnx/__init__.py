@@ -337,7 +337,7 @@ class UnicodeProcessor:
     """
 
     def __init__(self, indexer_path: str):
-        with open(indexer_path, "r") as f:
+        with open(indexer_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
         if isinstance(raw, dict) and "char_to_id" in raw:
             self.pad_id = int(raw.get("pad_id", 0))
@@ -967,7 +967,7 @@ def load_cfgs(onnx_dir: str, config_path: str = "config/tts.json") -> dict:
     # to the single repo-level config/tts.json.
     local = os.path.join(onnx_dir, "tts.json")
     cfg_path = local if os.path.exists(local) else config_path
-    with open(cfg_path, "r") as f:
+    with open(cfg_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -1081,7 +1081,7 @@ def load_voice_style(voice_style_paths: list[str], verbose: bool = False) -> Sty
     bsz = len(voice_style_paths)
 
     # Read first file to get dimensions
-    with open(voice_style_paths[0], "r") as f:
+    with open(voice_style_paths[0], "r", encoding="utf-8") as f:
         first_style = json.load(f)
     ttl_dims = first_style["style_ttl"]["dims"]
     dp_dims = first_style["style_dp"]["dims"]
@@ -1093,7 +1093,7 @@ def load_voice_style(voice_style_paths: list[str], verbose: bool = False) -> Sty
     # Fill in the data
     tags = set()
     for i, voice_style_path in enumerate(voice_style_paths):
-        with open(voice_style_path, "r") as f:
+        with open(voice_style_path, "r", encoding="utf-8") as f:
             voice_style = json.load(f)
         tags.add(voice_style.get("model"))
 
