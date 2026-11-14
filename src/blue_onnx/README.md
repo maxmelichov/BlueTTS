@@ -103,6 +103,14 @@ samples, sr = tts.synthesize(mixed, lang="he")
 The normalizer also emits these itself, for emails and Latin loanwords. Their presence
 switches `pace_blend` on automatically (see below).
 
+With a release bundle, Latin-script words in Hebrew text get a span of their own: "קניתי
+iPhone 15 חדש" is read as "קניתי <en>iPhone 15</en> חדש" (a run of Latin words, with the
+numbers after them, goes to English polyg2p as one span). An all-capitals tail after a
+lower-case letter is read as an acronym ("BlueTTS" as "Blue TTS"), and accents are dropped
+for the English G2P ("café" as "cafe"). Spans have no ids of their own: each chunk is still
+wrapped once in the request's `<lang>` tags, and a span's phonemes get its own language's
+normalisation (`ipa_text.normalize_ipa_spans`).
+
 ## Pace blending
 
 The duration head uses a different seconds-per-token per language, so one `speed` value
