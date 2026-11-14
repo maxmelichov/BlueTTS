@@ -38,6 +38,12 @@ openvino = [
 gpu = [
     "onnxruntime-gpu>=1.24.0",
 ]
+# OpenAI-compatible HTTP server (examples/openai_server.py). mp3 / opus / aac output also need ffmpeg on PATH.
+server = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx",  # fastapi.testclient, for tests/test_openai_server.py
+]
 tensorrt = [
     # "tensorrt-cu12; sys_platform == 'linux'",  # see astral-sh/uv#14313
     "torch>=2.1.0",
