@@ -1,8 +1,8 @@
 """Synthesize messy real-world text: numbers, dates, times, codes, emails.
 
 `normalize_text=True` rewrites anything G2P cannot read aloud into words before
-phonemization, and reads spelled codes / phone numbers / dates / times more
-slowly so digit groups stay intelligible.
+phonemization. Prices, dates and times are read inline; spelled codes and phone
+numbers are read a little more slowly so digit groups stay intelligible.
 
 Run:
     uv run python examples/normalize.py
@@ -25,9 +25,9 @@ from src.blue_onnx import (
 
 Path("examples/out").mkdir(parents=True, exist_ok=True)
 
-onnx_dir = os.environ.get("ONNX_DIR", "onnx_models")
+onnx_dir = os.environ.get("ONNX_DIR", "bluev3_onnx/onnx")
 tts = load_text_to_speech(onnx_dir=onnx_dir)
-style = load_voice_style(["voices/v2/noa.json"])
+style = load_voice_style(["voices/noa.json"])
 
 SAMPLES = [
     ("he", 'ההזמנה IL-4829-7361-05 תגיע ב 12/05/2024 בשעה 08:15, מחיר 1,500 ש"ח (50% הנחה).'),

@@ -4,12 +4,14 @@ Universal IPA vocabulary for TTS, built on the piper phoneme set.
 Layout:
   0..156   = Piper core symbols
   157..243 = Extended symbols (uppercase, additional IPA, punctuation)
-  244..255 = Unused padding to hit 256
+  244      = ʣ
+  245..254 = Unused padding to hit 256
+  255, 48  = '<', '>' (language tags; 48 was the unused click 'ǂ')
 
 VOCAB_SIZE = 256 (fixed, highly optimized power of 2)
 
-Language tags have been intentionally removed to force the model 
-to learn a universal acoustic space via narrow IPA.
+text_to_indices drops inline <lang> markers; with the "lang_tags" config key,
+wrap_lang_tags puts '<lang>' + ids + '</lang>' around each whole input.
 """
 
 import re
@@ -23,7 +25,7 @@ _PIPER_MAP: dict[str, int] = {
     ":": 11, ";": 12, "?": 13, "a": 14, "b": 15, "c": 16, "d": 17, "e": 18, "f": 19,
     "h": 20, "i": 21, "j": 22, "k": 23, "l": 24, "m": 25, "n": 26, "o": 27, "p": 28, "q": 29, 
     "r": 30, "s": 31, "t": 32, "u": 33, "v": 34, "w": 35, "x": 36, "y": 37, "z": 38,
-    "æ": 39, "ç": 40, "ð": 41, "ø": 42, "ħ": 43, "ŋ": 44, "œ": 45, "ǀ": 46, "ǁ": 47, "ǂ": 48, "ǃ": 49,
+    "æ": 39, "ç": 40, "ð": 41, "ø": 42, "ħ": 43, "ŋ": 44, "œ": 45, "ǀ": 46, "ǁ": 47, "ǃ": 49,
     "ɐ": 50, "ɑ": 51, "ɒ": 52, "ɓ": 53, "ɔ": 54, "ɕ": 55, "ɖ": 56, "ɗ": 57, "ɘ": 58, "ə": 59, 
     "ɚ": 60, "ɛ": 61, "ɜ": 62, "ɞ": 63, "ɟ": 64, "ɠ": 65, "ɡ": 66, "ɢ": 67, "ɣ": 68, "ɤ": 69, 
     "ɥ": 70, "ɦ": 71, "ɧ": 72, "ɨ": 73, "ɪ": 74, "ɫ": 75, "ɬ": 76, "ɭ": 77, "ɮ": 78, "ɯ": 79,
@@ -53,7 +55,11 @@ _EXTENDED_MAP: dict[str, int] = {
     "\u02C1": 225, "\u02BE": 226, "\u02BF": 227, "\u02BB": 228, "\u02C9": 229, "\u02CA": 230, 
     "\u02CB": 231, "\u02C6": 232, "\u02E5": 233, "\u02E6": 234, "\u02E7": 235, "\u02E8": 236, 
     "\u02E9": 237, "\u0300": 238, "\u0301": 239, "\u0302": 240, "\u0304": 241, "\u030C": 242, "\u0307": 243,
+    "ʣ": 244,
 }
+
+# '>' reuses 48 so the 256-row embeddings, and existing checkpoints, keep their shape.
+_LANG_TAG_MAP: dict[str, int] = {"<": 255, ">": 48}
 
 # ============================================================
 # Core Config
@@ -63,7 +69,7 @@ PAD_ID = 0
 BOS_ID = 1
 EOS_ID = 2
 
-CHAR_TO_ID: dict[str, int] = {**_PIPER_MAP, **_EXTENDED_MAP}
+CHAR_TO_ID: dict[str, int] = {**_PIPER_MAP, **_EXTENDED_MAP, **_LANG_TAG_MAP}
 ID_TO_CHAR: dict[int, str] = {v: k for k, v in CHAR_TO_ID.items()}
 VOCAB_LIST: list[str] = list(CHAR_TO_ID.keys())
 
@@ -88,6 +94,16 @@ def text_to_indices_multilang(text: str, base_lang: str = "he") -> list[int]:
     """
     return text_to_indices(text, lang=base_lang)
 
+def wrap_lang_tags(ids: list[int], lang: str) -> list[int]:
+    """'<lang>' + ids + '</lang>', as Supertonic 3 feeds its text (e.g. 'he' -> 255 20 18 48 ... 255 200 20 18 48)."""
+    code = str(lang).strip().lower()
+    if not re.fullmatch(r"[a-z]{2,3}", code):  # e.g. 'en-us' would train on tags inference never sends
+        raise ValueError(f"language tag needs a 2-3 letter language code, got {lang!r}")
+    letters = [CHAR_TO_ID[c] for c in code]
+    lt, gt = CHAR_TO_ID["<"], CHAR_TO_ID[">"]
+    return [lt, *letters, gt] + list(ids) + [lt, CHAR_TO_ID["/"], *letters, gt]
+
+
 def indices_to_text(indices: list[int]) -> str:
     return "".join(ID_TO_CHAR.get(i, "?") for i in indices)
 
@@ -99,9 +115,19 @@ _EMOJI_PATTERN = re.compile(r"[\U0001f600-\U0001f64f\U0001f300-\U0001f5ff\U0001f
 _UNIVERSAL_REPLACEMENTS = {
     "\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'", "´": "'", "`": "'",
     "–": "-", "‑": "-", "—": "-", "_": " ", "[": " ", "]": " ", "|": " ",
+    "^": " ", "$": " ",  # BOS/EOS slots
+    "/": " ", "\\": " ", "#": " ", "…": "...",
 }
 
-def normalize_text(text: str, apply_hebrew_fixes: bool = False) -> str:
+# Affricates -> ligatures (word-final 'ts' only); config key "affricate_ligatures".
+_AFFRICATE_LIGATURES = (
+    (re.compile(r"t͡s|ts(?=[^\w]|$)", re.I), "ʦ"),
+    (re.compile(r"t͡ʃ|tʃ", re.I), "ʧ"),
+    (re.compile(r"d͡ʒ|dʒ", re.I), "ʤ"),
+    (re.compile(r"d͡z|dz", re.I), "ʣ"),
+)
+
+def normalize_text(text: str, apply_hebrew_fixes: bool = False, affricate_ligatures: bool = False) -> str:
     """
     Applies Unicode normalization and common phoneme substitutions.
     """
@@ -127,9 +153,15 @@ def normalize_text(text: str, apply_hebrew_fixes: bool = False) -> str:
     if apply_hebrew_fixes:
         text = text.replace("r", "ʁ").replace("g", "ɡ")
 
+    if affricate_ligatures:
+        for pattern, lig in _AFFRICATE_LIGATURES:
+            text = pattern.sub(lig, text)
+        if apply_hebrew_fixes:  # Hebrew rows spell /ts/ as 't', 's'
+            text = text.replace("ʦ", "ts")
+
     text = re.sub(r"\s+", " ", text).strip()
 
-    if not re.search(r"[.!?;:,'\"')\]}…。\\]』】〉》›»]$", text):
+    if not re.search(r"[.!?;:,'\"')\]}…。」』】〉》›»]$", text):
         text += "."
 
     return text

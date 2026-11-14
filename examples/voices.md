@@ -27,12 +27,12 @@ Reference clips: LibriTTS-R (Koizumi et al., 2023; CC BY 4.0), one utterance per
 
 ## Previous model (v2.5) voices
 
-The four voices of the previous model are in [`voices/v2/`](../voices/v2/): `adam`, `daniel`, `lily`, `noa` (default
-for the current code and examples).
+The four voices of the previous model are in [`voices/v2/`](../voices/v2/): `adam`, `daniel`, `lily`, `noa`. Use them
+with the v2.5 bundles (e.g. `notmax123/BlueTTS2.5-onnx` in `./onnx_models`), not with BlueV3.
 
 Each holds a `style_ttl` `[1, 50, 256]` and a `style_dp` `[1, 8, 16]` tensor extracted
 from a reference clip. A voice is language-independent — any of them can speak any of
-the five supported languages.
+the model's languages. `blue_onnx` refuses a voice whose `model` tag does not match the bundle's.
 
 ## Picking one
 
@@ -45,7 +45,7 @@ From Python:
 
 ```python
 from blue_onnx import BlueTTS
-tts = BlueTTS(onnx_dir="onnx_models", style_json="voices/v2/lily.json")
+tts = BlueTTS(onnx_dir="bluev3_onnx/onnx", style_json="voices/lily.json")
 ```
 
 ## Blending
@@ -53,7 +53,7 @@ tts = BlueTTS(onnx_dir="onnx_models", style_json="voices/v2/lily.json")
 `BlueTTS` averages several styles into one speaker if you pass a list:
 
 ```python
-tts = BlueTTS(onnx_dir="onnx_models", style_json=["voices/v2/noa.json", "voices/v2/lily.json"])
+tts = BlueTTS(onnx_dir="bluev3_onnx/onnx", style_json=["voices/noa.json", "voices/lily.json"])
 ```
 
 For *per-text* styles in one batch, load them with `load_voice_style([...])` and pass the
