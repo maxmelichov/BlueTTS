@@ -115,7 +115,7 @@ class Style:
 
 def load_cfgs(config_path: str) -> dict:
     if config_path and os.path.exists(config_path):
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             return json.load(f)
     return {}
 
@@ -171,7 +171,7 @@ def load_uncond(trt_dir: str, device: str) -> Tuple[Optional[torch.Tensor], Opti
 def load_voice_style(style_paths: List[str], device: str = "cuda") -> Style:
     """Load one or more voice-style JSONs into a batched ``Style``."""
     B = len(style_paths)
-    with open(style_paths[0]) as f:
+    with open(style_paths[0], encoding="utf-8") as f:
         first = json.load(f)
 
     def _alloc(key):
@@ -186,7 +186,7 @@ def load_voice_style(style_paths: List[str], device: str = "cuda") -> Style:
     z_ref = _alloc("z_ref")
 
     for i, path in enumerate(style_paths):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             d = json.load(f)
         for tgt, key in ((ttl, "style_ttl"), (dp, "style_dp"), (keys, "style_keys"), (z_ref, "z_ref")):
             if tgt is not None and key in d:

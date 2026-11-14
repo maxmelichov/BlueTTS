@@ -158,7 +158,7 @@ def train(
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
-    with open(config_path, 'r') as f:
+    with open(config_path, 'r', encoding="utf-8") as f:
         full_config = json.load(f)
     ttl_cfg = full_config["ttl"]
     ae_cfg_json = full_config.get("ae", {})
