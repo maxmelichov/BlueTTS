@@ -7,7 +7,8 @@ import unittest
 import torch
 import torch.nn as nn
 
-from training.t2l.ema import ModelEMA
+from training.t2l.ema import ModelEMA, ema_checkpoint
+from training.t2l.cfg_utils import UncondParams
 
 
 class TestModelEMA(unittest.TestCase):
@@ -73,6 +74,28 @@ class TestModelEMA(unittest.TestCase):
         self.assertEqual(other.updates, 3)
         for k, v in saved["m"].items():
             self.assertTrue(torch.equal(other.state_dicts()["m"][k], v))
+
+    def test_ema_checkpoint_saves_the_averaged_cfg_tokens(self):
+        torch.manual_seed(0)
+        lin, unc = nn.Linear(2, 2), UncondParams(text_dim=4, n_style=3, style_value_dim=4, uncond_key=True,
+                                                 style_key_dim=4)
+        ema = ModelEMA([("vf_estimator", lin), ("text_encoder", nn.Linear(1, 1)),
+                        ("reference_encoder", nn.Linear(1, 1)), ("uncond", unc)], decay=0.5)
+        start = {k: v.detach().clone() for k, v in unc.state_dict().items()}
+        with torch.no_grad():
+            for p in unc.parameters():
+                p.add_(1.0)
+        ema.update()  # warm-up decay min(0.5, 1/10) = 0.1: shadow = 0.1 * start + 0.9 * live
+        ckpt = {"u_text": unc.u_text.data, "u_ref": unc.u_ref.data, "u_key": unc.u_key.data,
+                "optimizer": {}, "scheduler": {}, "global_step": 1, "ema": ema.state_dicts()}
+        out = ema_checkpoint(ckpt)
+        for k in ("u_text", "u_ref", "u_key"):
+            want = 0.1 * start[k] + 0.9 * (start[k] + 1.0)
+            self.assertTrue(torch.allclose(out[k], want))
+            self.assertFalse(torch.equal(out[k], getattr(unc, k).data))  # not the live token
+        self.assertNotIn("optimizer", out)
+        self.assertNotIn("ema", out)
+        self.assertEqual(out["ema_updates"], 1)
 
 
 if __name__ == "__main__":
