@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+import re
 import unittest
 from pathlib import Path
 
@@ -13,10 +15,13 @@ from src.blue_onnx import (
     blend_duration_pace,
     chunk_text,
     get_latent_mask,
+    has_foreign_lang_span,
     latent_frames_for_duration,
     length_to_mask,
     strip_lang_tags_from_phoneme_string,
 )
+from src.blue_onnx import _strip_tags_keep_spans as strip_tags_keep_spans
+from src.blue_onnx.ipa_text import encode_tagged, tagged_len
 
 # Shipped config/tts.json: ae.sample_rate, ae.base_chunk_size, ttl.chunk_compress_factor.
 SR, BASE_CHUNK, CCF = 44100, 512, 6
@@ -46,6 +51,21 @@ class TestStripLangTags(unittest.TestCase):
         self.assertNotIn(">", s)
 
 
+class TestForeignLangSpan(unittest.TestCase):
+    """Only a span in another language makes text mixed (and turns on pace_blend)."""
+
+    def test_same_language_span_is_not_mixed(self):
+        self.assertFalse(has_foreign_lang_span("She finished <en>third</en>.", "en"))
+        self.assertFalse(has_foreign_lang_span("plain text", "en"))
+
+    def test_other_language_span_is_mixed(self):
+        self.assertTrue(has_foreign_lang_span("שלום <en>world</en>", "he"))
+        self.assertTrue(has_foreign_lang_span("Hello <es>mundo</es>", "en"))
+
+    def test_language_aliases(self):
+        self.assertFalse(has_foreign_lang_span("Hallo <de>Welt</de>", "ge"))
+
+
 class TestChunkText(unittest.TestCase):
     def test_short_sentences_single_chunk(self):
         self.assertEqual(chunk_text("Hi. There.", max_len=300), ["Hi. There."])
@@ -53,6 +73,96 @@ class TestChunkText(unittest.TestCase):
     def test_paragraph_split(self):
         chunks = chunk_text("First para.\n\nSecond para.", max_len=300)
         self.assertEqual(len(chunks), 2)
+
+    def test_short_sentences_pack_as_before(self):
+        rng = random.Random(0)
+        for _ in range(200):
+            text = " ".join(_sentence(rng, rng.randint(1, 12)) for _ in range(rng.randint(1, 12)))
+            if rng.random() < 0.3:
+                text = text.replace(". ", ".\n\n", 1)
+            for max_len in (40, 80, 300):
+                if all(len(s) <= max_len for s in _old_sentences(text)):
+                    self.assertEqual(chunk_text(text, max_len=max_len), _old_chunk_text(text, max_len))
+
+    def test_long_sentence_cut_at_last_comma_that_fits(self):
+        s = "aaa bbb ccc, ddd eee; fff ggg hhh iii, jjj kkk lll mmm nnn."
+        self.assertEqual(chunk_text(s, max_len=40), ["aaa bbb ccc, ddd eee; fff ggg hhh iii,", "jjj kkk lll mmm nnn."])
+        self.assertEqual(chunk_text(s, max_len=30), ["aaa bbb ccc, ddd eee;", "fff ggg hhh iii,", "jjj kkk lll mmm nnn."])
+
+    def test_no_punctuation_cut_at_last_space(self):
+        self.assertEqual(chunk_text("aaa bbb ccc ddd eee fff", max_len=10), ["aaa bbb", "ccc ddd", "eee fff"])
+
+    def test_no_space_cut_at_the_limit(self):
+        self.assertEqual(chunk_text("x" * 25, max_len=10), ["x" * 10, "x" * 10, "x" * 5])
+
+    def test_ids_exact_limit_and_one_over(self):
+        # release bundles count ids: '<he>' + normalised IPA (final '.' added) + '</he>'
+        s = "ʃalˈom ma niʃmˈa, ʔanˈi bsedˈeʁ"
+        n = tagged_len(s, "he")
+        self.assertEqual(n, len(encode_tagged(s, "he", {c: 1 for c in "<>/he" + s + "."})))
+        self.assertEqual(chunk_text(s, max_len=300, fits=lambda c: tagged_len(c, "he") <= n), [s])
+        cut = chunk_text(s, max_len=300, fits=lambda c: tagged_len(c, "he") <= n - 1)
+        self.assertEqual(cut, ["ʃalˈom ma niʃmˈa,", "ʔanˈi bsedˈeʁ"])
+
+    def test_every_chunk_fits(self):
+        rng = random.Random(1)
+        for _ in range(100):
+            text = " ".join(_sentence(rng, rng.randint(1, 60)) for _ in range(rng.randint(1, 4)))
+            fits = lambda c: tagged_len(c, "he") <= 60   # noqa: E731
+            chunks = chunk_text(text, max_len=300, fits=fits)
+            self.assertTrue(all(fits(c) for c in chunks), chunks)
+            self.assertEqual(" ".join(chunks).split(), text.split())   # nothing lost, no word split
+
+    def test_inline_span_not_cut(self):
+        ipa = "<he>ʔanˈi ɡˈaʁ lejˈad</he> <en>tˈaɪmz skwˈɛɹ ænd sˈɛntɹəl pˈɑːɹk</en> <he>kvˈaʁ ʃanˈim ʁabˈot</he>"
+        text, in_span = strip_tags_keep_spans(ipa, "he")
+        self.assertEqual(text, strip_lang_tags_from_phoneme_string(ipa))
+        self.assertEqual(chunk_text(text, max_len=50, in_span=in_span),
+                         ["ʔanˈi ɡˈaʁ lejˈad", "tˈaɪmz skwˈɛɹ ænd sˈɛntɹəl pˈɑːɹk kvˈaʁ ʃanˈim", "ʁabˈot"])
+        # without the spans the cut falls inside the English
+        self.assertEqual(chunk_text(text, max_len=50)[0], "ʔanˈi ɡˈaʁ lejˈad tˈaɪmz skwˈɛɹ ænd sˈɛntɹəl")
+
+    def test_inline_span_longer_than_a_chunk_is_cut_at_its_spaces(self):
+        ipa = "<he>ʃalˈom</he> <en>wˈʌn tˈuː θɹˈiː fˈɔːɹ fˈaɪv sˈɪks</en> <he>toda</he>"
+        text, in_span = strip_tags_keep_spans(ipa, "he")
+        chunks = chunk_text(text, max_len=20, in_span=in_span)
+        self.assertTrue(all(len(c) <= 20 for c in chunks), chunks)
+        self.assertEqual(" ".join(chunks), text)
+
+
+def _sentence(rng: random.Random, n: int) -> str:
+    words = ["".join(rng.choice("abdeiklmnoʃʁˈ") for _ in range(rng.randint(1, 9))) for _ in range(n)]
+    for i in range(len(words) - 1):
+        if rng.random() < 0.15:
+            words[i] += rng.choice(",;:")
+    return " ".join(words) + rng.choice(".?!")
+
+
+_OLD_SENTENCE = (r"(?<!Mr\.)(?<!Mrs\.)(?<!Ms\.)(?<!Dr\.)(?<!Prof\.)(?<!Sr\.)(?<!Jr\.)(?<!Ph\.D\.)(?<!etc\.)(?<!e\.g\.)"
+                 r"(?<!i\.e\.)(?<!vs\.)(?<!Inc\.)(?<!Ltd\.)(?<!Co\.)(?<!Corp\.)(?<!St\.)(?<!Ave\.)(?<!Blvd\.)(?<!\b[A-Z]\.)"
+                 r"(?<=[.!?])\s+")
+
+
+def _old_sentences(text: str) -> list[str]:
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", text.strip()) if p.strip()]
+    return [s for p in paragraphs for s in re.split(_OLD_SENTENCE, p)]
+
+
+def _old_chunk_text(text: str, max_len: int) -> list[str]:
+    """chunk_text before long sentences were cut (v3.0.0-inference), for the texts it already handled."""
+    chunks = []
+    for paragraph in [p.strip() for p in re.split(r"\n\s*\n+", text.strip()) if p.strip()]:
+        current = ""
+        for sentence in re.split(_OLD_SENTENCE, paragraph):
+            if len(current) + len(sentence) + 1 <= max_len:
+                current += (" " if current else "") + sentence
+            else:
+                if current:
+                    chunks.append(current.strip())
+                current = sentence
+        if current:
+            chunks.append(current.strip())
+    return chunks
 
 
 class TestLengthToMask(unittest.TestCase):
@@ -88,6 +198,38 @@ class TestUnicodeProcessor(unittest.TestCase):
 
     def test_available_langs_nonempty(self):
         self.assertIn("he", AVAILABLE_LANGS)
+
+    def _ids(self, text, affricate_ligatures=False):
+        ids, _ = self.proc([text], ["en"], affricate_ligatures)
+        return ids[0].tolist()
+
+    def test_tag_and_affricate_ids(self):
+        c2i = self.proc._char_to_id
+        self.assertEqual((c2i["<"], c2i[">"], c2i["/"], c2i["ʣ"]), (255, 48, 200, 244))
+        self.assertNotIn("ǂ", c2i)
+        # off by default: affricates stay as two tokens
+        self.assertEqual(self._ids("dzu tʃa"), [c2i[c] for c in "dzu tʃa."])
+        # on: d͡z / dz -> ʣ, tʃ -> ʧ, dʒ -> ʤ, word-final ts -> ʦ (word-internal ts stays)
+        on = lambda t: self._ids(t, affricate_ligatures=True)
+        self.assertEqual(on("dzu tʃa dʒa kats tsa"), on("ʣu ʧa ʤa kaʦ tsa"))
+        self.assertEqual(on("d\u0361za"), on("ʣa"))
+        # Hebrew keeps /ts/ as two tokens
+        he = self.proc(["kats t\u0361sa"], ["he"], True)[0][0].tolist()
+        self.assertEqual(he, self.proc(["kats tsa"], ["he"])[0][0].tolist())
+
+    def test_normalization(self):
+        c2i = self.proc._char_to_id
+        # one terminal mark, never '..' or '?.'
+        self.assertEqual(self._ids("ɡaɪt?")[-1], c2i["?"])
+        self.assertEqual(self._ids("falən")[-2:], [26, 10])
+        self.assertEqual(self._ids("ʃalˈom」")[-1], c2i.get("」", 0))
+        # NFD keeps modifier letters ('ʰ' is its own token, not 'h')
+        self.assertIn(c2i["ʰ"], self._ids("pʰa"))
+        # '/', '\\', '#' are word breaks and '…' is three dots, as in training rows
+        self.assertEqual(self._ids("a/b\\c#d"), self._ids("a b c d"))
+        self.assertEqual(self._ids("a…"), self._ids("a..."))
+        # BOS/EOS characters never reach the ids
+        self.assertEqual(self._ids("^a$"), self._ids("a"))
 
 
 class TestLatentFrameMath(unittest.TestCase):

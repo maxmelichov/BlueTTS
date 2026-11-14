@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import glob
 import os
+from collections import Counter
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from training.utils import seed_worker
 
 class UncondParams(nn.Module):
-    """Learnable unconditional tokens for CFG. Dims from ttl.uncond_masker config."""
-    def __init__(self, text_dim=256, n_style=50, style_value_dim=256, init_std=0.1):
+    """Learnable unconditional tokens for CFG. Dims from ttl.uncond_masker config.
+    uncond_key adds u_key, the VF style-attention keys of every style-dropped row."""
+    def __init__(self, text_dim=256, n_style=50, style_value_dim=256, init_std=0.1, uncond_key=False, style_key_dim=256):
         super().__init__()
         self.u_text = nn.Parameter(torch.randn(1, text_dim, 1) * init_std)
         self.u_ref = nn.Parameter(torch.randn(1, n_style, style_value_dim) * init_std)
+        if uncond_key:
+            self.u_key = nn.Parameter(torch.randn(1, n_style, style_key_dim) * init_std)
 
 def _validate_ttl_config(ttl_cfg: dict) -> None:
     """Validate every field in `ttl_cfg`."""
@@ -83,6 +88,62 @@ def _validate_ttl_config(ttl_cfg: dict) -> None:
 
 
 # --- dataloader / DDP / checkpoint helpers (kept with cfg to avoid extra tiny modules) ---
+
+
+class DistributedWeightedSampler(torch.utils.data.Sampler):
+    """Weighted draw with replacement; every rank draws the same sequence and takes its own stride."""
+
+    def __init__(self, weights, num_replicas=1, rank=0, seed=42):
+        if len(weights) < num_replicas:  # else every epoch is empty and training never ends
+            raise ValueError(f"sample_weight: {len(weights)} rows cannot be split across {num_replicas} ranks")
+        self.weights = weights
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.seed = seed
+        self.epoch = 0
+        self.num_samples = len(weights) // num_replicas
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __len__(self):
+        return self.num_samples
+
+    def __iter__(self):
+        g = torch.Generator().manual_seed(self.seed + self.epoch)
+        idx = torch.multinomial(self.weights, self.num_samples * self.num_replicas, replacement=True, generator=g)
+        return iter(idx[self.rank::self.num_replicas].tolist())
+
+
+def all_reduce_grads(params) -> None:
+    """Average gradients across ranks for parameters DDP does not sync (used outside its forward)."""
+    if not dist.is_initialized():
+        return
+    for p in params:
+        if p.grad is not None:
+            dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+
+
+def build_lr_scheduler(optimizer, base_lr, milestones, global_step, scheduler_state=None, finetune=False):
+    """MultiStepLR (gamma 0.5) positioned at ``global_step``; finetune restarts from ``base_lr``.
+    On resume the lr is pinned to the closed form: at a milestone MultiStepLR would otherwise halve twice."""
+    last_epoch = -1 if finetune else global_step - 1
+    if last_epoch != -1:
+        for pg in optimizer.param_groups:
+            pg.setdefault('initial_lr', pg['lr'])
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.5, last_epoch=last_epoch)
+    if scheduler_state and not finetune:
+        try:
+            scheduler.load_state_dict(scheduler_state)
+        except Exception:
+            pass
+    scheduler.milestones = Counter(milestones)  # a loaded state carries its own milestones
+    if not finetune and global_step > 0:
+        lr_now = base_lr * 0.5 ** sum(global_step >= m for m in milestones)
+        for pg in optimizer.param_groups:
+            pg['lr'] = lr_now
+        scheduler._last_lr = [lr_now] * len(optimizer.param_groups)
+    return scheduler
 
 
 def unwrap_ddp(module: nn.Module) -> nn.Module:

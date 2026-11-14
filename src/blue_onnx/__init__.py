@@ -2,22 +2,27 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
+import unicodedata
 from contextlib import contextmanager
 from importlib import import_module
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 from unicodedata import normalize
 
 import numpy as np
 import onnxruntime as ort
 
+from .ipa_text import tag_latin_runs
 from .text_norm import (  # noqa: F401  (re-exported as the package's public API)
+    EMOJI_RE,
     SLOW_MARK_OPEN,
     SLOW_PACE_BLEND,
     SLOW_PACE_DPT_REF,
     SLOW_SILENCE,
     SLOW_SPEED_SCALE,
     canonical_lang,
+    has_foreign_lang_span,
     prepare_text_for_synthesis,
     split_slow_segments,
     strip_emoji,
@@ -25,6 +30,8 @@ from .text_norm import (  # noqa: F401  (re-exported as the package's public API
 )
 
 AVAILABLE_LANGS = ["en", "es", "de", "it", "he"]
+# Release bundles also speak these: Russian through polyg2p, Yiddish through the bundle's frontend/yi.
+RELEASE_LANGS = ["ru", "yi"]
 BLUE_SYNTH_MAX_CHUNK_LEN = 300
 # When ``pace_blend > 0``, duration is nudged toward this many seconds of audio per
 # text input token, so the same ``speed`` value tracks more closely across languages.
@@ -71,6 +78,13 @@ _TEXT_TO_INDICES_PROCESSOR: Optional["UnicodeProcessor"] = None
 
 _INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)</\1>", re.DOTALL)
 _LANG_TAG_RE = re.compile(r"</?\w+>")
+# Affricates -> ligatures (word-final 'ts' only), for models trained with tts.json "affricate_ligatures".
+_AFFRICATE_LIGATURES = (
+    (re.compile(r"t͡s|ts(?=[^\w]|$)", re.I), "ʦ"),
+    (re.compile(r"t͡ʃ|tʃ", re.I), "ʧ"),
+    (re.compile(r"d͡ʒ|dʒ", re.I), "ʤ"),
+    (re.compile(r"d͡z|dz", re.I), "ʣ"),
+)
 
 
 def strip_lang_tags_from_phoneme_string(s: str) -> str:
@@ -81,8 +95,14 @@ def strip_lang_tags_from_phoneme_string(s: str) -> str:
     sentence splits from tearing tag pairs apart (orphan ``<en>`` / ``</he>``),
     which could confuse preprocessing or leave odd artifacts at boundaries.
     """
-    t = _LANG_TAG_RE.sub("", s)
+    t = _LANG_TAG_RE.sub(" ", s)
     return re.sub(r"\s+", " ", t).strip()
+
+
+def _n_words(t: str) -> int:
+    """Whitespace tokens that carry a letter or digit (diacritics ignored)."""
+    t = "".join(c for c in normalize("NFD", t) if not unicodedata.category(c).startswith("M"))
+    return sum(1 for w in t.split() if any(unicodedata.category(c)[0] in "LN" for c in w))
 
 
 class TextProcessor:
@@ -97,8 +117,15 @@ class TextProcessor:
         renikud_path: Optional[str] = None,
         speaker: int = 0,
         target_speaker: int = 0,
+        release: Optional[dict] = None,
+        frontend_dir: Optional[str] = None,
     ):
         """``renikud_path`` is optional: RenikudPlus fetches its own weights.
+
+        ``release`` (the ``blue_release`` section of a bundle's ``tts.json``) switches to the bundle's G2Ps: polyg2p
+        for en/de/es/it/ru (data files from ``POLYG2P_DATA`` or ``<bundle>/frontend/polyg2p_data``), RenikudPlus for
+        Hebrew with the bundle's weights (``<bundle>/frontend/renikud/model.onnx``) when no ``renikud_path`` is given,
+        and the Yiddish G2P in ``<bundle>/frontend/yi``.
 
         The G2P is built on first Hebrew segment, so Latin-only synthesis never
         pulls the Hebrew weights. ``speaker`` / ``target_speaker`` are RenikudPlus
@@ -106,6 +133,10 @@ class TextProcessor:
         """
         self.renikud = None
         self.renikud_path = renikud_path
+        self.release = release
+        self.frontend_dir = frontend_dir
+        self._poly = None
+        self._yi = None
         self.speaker = speaker
         self.target_speaker = target_speaker
         if renikud_path and not os.path.exists(renikud_path):
@@ -166,6 +197,60 @@ class TextProcessor:
             print(f"[WARN] espeak-ng fallback failed for lang={lang}: {e}")
             return text
 
+    def _release_g2p(self, content: str, lang: str, has_hebrew: bool) -> Optional[str]:
+        """G2P of a ``blue_release`` bundle; None = not handled here (falls through to the default path)."""
+        if lang == "yi":
+            if not self.frontend_dir:
+                raise ValueError("lang='yi' needs the bundle's frontend/yi folder")
+            content = "".join(c for c in content if unicodedata.category(c) != "Cf")   # invisible format marks
+            if self._yi is None:
+                d = os.path.join(self.frontend_dir, "yi")
+                if d not in sys.path:
+                    sys.path.append(d)
+                from yiddish_labels import text_to_ipa   # checks its tables at import
+                self._yi = text_to_ipa
+            if re.search(r"\d", content):
+                # no Yiddish number reader: the G2P would drop the digits silently
+                raise ValueError(f"Yiddish text with digits: spell the numbers out in words: {content[:80]!r}")
+            # the cleaning the Yiddish G2P expects: no sof pasuq, tags, quotes or word-final hyphen pieces
+            src = re.sub(r"<[^>]+>", "", re.sub(r'[„“”«»‹›‚‘]', "", content.replace("׃", ""))).strip()
+            t = re.sub(r"\S+-(?=\s|$)", "", src).strip()
+            out = self._yi(t) if t else ""
+            if _n_words(out) < _n_words(src):
+                # the Yiddish G2P skips words it cannot read (and word-final hyphen pieces are cut before it):
+                # name them instead of dropping them silently
+                lost = [w for w in src.split() if _n_words(w) and (w.endswith("-") or not _n_words(self._yi(w)))]
+                if not _n_words(out):
+                    raise ValueError(f"the Yiddish G2P can read none of {content[:80]!r} ({lost})")
+                print(f"[WARN] Yiddish G2P dropped {_n_words(src) - _n_words(out)} word(s) "
+                      f"{lost or ''} in {content[:80]!r}; they will not be spoken", file=sys.stderr)
+            return out
+        if has_hebrew or lang == "he":
+            return None   # Hebrew: RenikudPlus, the package's own path (weights: the bundle's frontend/renikud/model.onnx)
+        if lang in ("en", "de", "es", "it", "ru"):
+            if self._poly is None:
+                # BLUE_G2P_NOLEX=1: German / Italian rules-only (the bundle's polyg2p_data_nolex, without the
+                # CC BY-SA lexicons)
+                sub = "polyg2p_data_nolex" if os.environ.get("BLUE_G2P_NOLEX", "0") == "1" else "polyg2p_data"
+                d = os.environ.get("POLYG2P_DATA") or (os.path.join(self.frontend_dir, sub)
+                                                        if self.frontend_dir else None)
+                os.environ.setdefault("POLYG2P_EN_MODEL", "large")
+                try:
+                    from polyg2p import Phonemizer
+                except ImportError as e:
+                    raise RuntimeError(
+                        "This release bundle needs polyg2p for en/de/es/it/ru: "
+                        "pip install <bundle>/frontend/polyg2p-*.whl"
+                    ) from e
+                self._poly = Phonemizer(data_dir=d)
+            t = re.sub(r"\s*\[[^\]]*\]\s*", " ", content).strip()
+            if not any(ch.isalnum() for ch in t):
+                return t
+            # Spanish: Castilian by default; BLUE_ES_VARIANT=es-419 = Latin American Spanish (the tag stays <es>)
+            code = os.environ.get("BLUE_ES_VARIANT", "es") if lang == "es" else lang
+            return self._poly.phonemize(t, code)
+        return None
+
     def _phonemize_segment(self, content: str, lang: str) -> str:
         # Guard against malformed/unmatched tags leaking into phonemizer input.
         content = _LANG_TAG_RE.sub("", content).strip()
@@ -176,6 +261,10 @@ class TextProcessor:
         if not content:
             return ""
         has_hebrew = any("\u0590" <= c <= "\u05ff" for c in content)
+        if self.release:
+            out = self._release_g2p(content, lang, has_hebrew)
+            if out is not None:
+                return out
         if has_hebrew or lang == "he":
             if not has_hebrew:
                 return content
@@ -192,6 +281,8 @@ class TextProcessor:
         if not _INLINE_LANG_PAIR.search(text):
             seg = self._phonemize_segment(text, lang)
             return f"<{lang}>{seg}</{lang}>" if seg else ""
+        if self.release:
+            return self._phonemize_mixed_release(text, lang)
         pieces, last_end = [], 0
         for m in _INLINE_LANG_PAIR.finditer(text):
             if m.start() > last_end:
@@ -209,6 +300,31 @@ class TextProcessor:
                 pieces.append(f"<{lang}>{seg}</{lang}>")
         return re.sub(r"\s+", " ", " ".join(pieces)).strip()
 
+    def _phonemize_mixed_release(self, text: str, lang: str) -> str:
+        """Release bundles, text with inline spans: each span's IPA gets its own language's view (Hebrew rules on
+        Hebrew spans only), without the terminal '.' a span's G2P or view adds when the source span does not end a
+        sentence; the join is normalised once in ``lang`` by :func:`encode_tagged`. No span ids: the whole input is
+        wrapped in ``<lang>`` ... ``</lang>`` once."""
+        from .ipa_text import normalize_ipa
+        segs, last_end = [], 0
+        for m in _INLINE_LANG_PAIR.finditer(text):
+            segs.append((lang, text[last_end:m.start()]))
+            segs.append((m.group(1), m.group(2)))
+            last_end = m.end()
+        segs.append((lang, text[last_end:]))
+        segs = [(lg, t.strip()) for lg, t in segs if t.strip()]
+        parts = []
+        for k, (lg, src) in enumerate(segs):
+            if not any(c.isalnum() for c in src):
+                parts.append(re.sub(r'["“”„]', "", src))   # punctuation between spans, kept as written
+                continue
+            ipa = normalize_ipa(_LANG_TAG_RE.sub("", self._phonemize_segment(src, lg)), lang=lg, final_period=False)
+            if k < len(segs) - 1 and ipa.endswith(".") and not ipa.endswith("..") and re.search(r"\w$", src):
+                ipa = ipa[:-1].rstrip()
+            parts.append(ipa)
+        out = " ".join(p for p in parts if p.strip())
+        return f"<{lang}>{out}</{lang}>" if out else ""
+
 
 class UnicodeProcessor:
     """Character-level tokenizer backed by ``vocab.json`` (``char_to_id`` map).
@@ -217,7 +333,8 @@ class UnicodeProcessor:
       - a path to a ``vocab.json`` with ``{pad_id, char_to_id, ...}`` (this repo), or
       - a path to a legacy unicode codepoint ``indexer.json`` (``{codepoint: id}``).
 
-    Unknown characters and stripped ``<lang>`` tags map to ``pad_id``.
+    Unknown characters map to ``pad_id``. Inline ``<lang>`` tags are dropped unless
+    ``lang_tags=True``, which encodes ``<lang>`` + text + ``</lang>`` as tokens.
     """
 
     def __init__(self, indexer_path: str):
@@ -233,19 +350,20 @@ class UnicodeProcessor:
             self._codepoint_indexer = {int(k): int(v) for k, v in raw.items()} \
                 if all(isinstance(k, str) and k.isdigit() for k in raw.keys()) \
                 else {int(k): int(v) for k, v in raw.items()}
+        # vocab.json "lang_tag" (blue_release bundles): ids are wrapped '<lang>' ... '</lang>' (see ipa_text.py)
+        self.lang_tag = raw.get("lang_tag") if isinstance(raw, dict) else None
+        self.release = False
 
-    def _preprocess_text(self, text: str, lang: str) -> str:
-        # Drop inline <lang>…</lang> spans first: they are routing metadata, never
-        # speech, and the "/" -> " " replacement below would mangle a closing tag
-        # into "< he>", which then survives as literal "he" characters plus pad
-        # ids in the encoded sequence.
-        text = strip_lang_tags_from_phoneme_string(text)
-        # TODO: Need advanced normalizer for better performance
-        text = normalize("NFKD", text)
+    def _preprocess_text(self, text: str, lang: str, affricate_ligatures: bool = False) -> str:
+        # Same steps and order as training's normalize_text (text_vocab.py), so the ids match.
+        if _LANG_TAG_RE.search(text):
+            text = strip_lang_tags_from_phoneme_string(text)
+        # NFD, not NFKD: NFKD folds modifier letters (ʰ -> h); training does not.
+        text = normalize("NFD", text.strip())
 
         # Last-resort net: G2P already strips these, but ``text_is_phonemes=True``
         # skips that path entirely.
-        text = strip_emoji(text)
+        text = EMOJI_RE.sub("", text)
 
         # Replace various dashes and symbols
         replacements = {
@@ -262,25 +380,18 @@ class UnicodeProcessor:
             "[": " ",
             "]": " ",
             "|": " ",
+            "^": " ",  # BOS/EOS slots
+            "$": " ",
             "/": " ",
+            "\\": " ",
             "#": " ",
-            "→": " ",
-            "←": " ",
+            "…": "...",
         }
         for k, v in replacements.items():
             text = text.replace(k, v)
 
         # Remove special symbols
-        text = re.sub(r"[♥☆♡©\\]", "", text)
-
-        # Replace known expressions
-        expr_replacements = {
-            "@": " at ",
-            "e.g.,": "for example, ",
-            "i.e.,": "that is, ",
-        }
-        for k, v in expr_replacements.items():
-            text = text.replace(k, v)
+        text = re.sub(r"[♥☆♡©]", "", text)
 
         # Fix spacing around punctuation
         text = re.sub(r" ,", ",", text)
@@ -299,6 +410,12 @@ class UnicodeProcessor:
         while "``" in text:
             text = text.replace("``", "`")
 
+        if affricate_ligatures:
+            for pattern, lig in _AFFRICATE_LIGATURES:
+                text = pattern.sub(lig, text)
+            if lang == "he":  # as training: Hebrew spells /ts/ as 't', 's'
+                text = text.replace("ʦ", "ts")
+
         # Remove extra spaces
         text = re.sub(r"\s+", " ", text).strip()
 
@@ -315,9 +432,9 @@ class UnicodeProcessor:
         text_mask = length_to_mask(text_ids_lengths)
         return text_mask
 
-    def _encode(self, text: str) -> np.ndarray:
-        # Strip any remaining language tags before encoding.
-        text = _LANG_TAG_RE.sub("", text)
+    def _encode(self, text: str, keep_tags: bool = False) -> np.ndarray:
+        if not keep_tags:
+            text = _LANG_TAG_RE.sub("", text)
         if self._char_to_id is not None:
             pad = self.pad_id
             ids = [self._char_to_id.get(ch, pad) for ch in text]
@@ -328,12 +445,22 @@ class UnicodeProcessor:
         return np.array(ids, dtype=np.int64)
 
     def __call__(
-        self, text_list: list[str], lang_list: list[str]
+        self, text_list: list[str], lang_list: list[str], affricate_ligatures: bool = False, lang_tags: bool = False
     ) -> tuple[np.ndarray, np.ndarray]:
-        text_list = [
-            self._preprocess_text(t, lang) for t, lang in zip(text_list, lang_list)
-        ]
-        encoded = [self._encode(t) for t in text_list]
+        if self.release:
+            from .ipa_text import encode_tagged
+            for lang in lang_list:
+                if lang not in AVAILABLE_LANGS + RELEASE_LANGS:
+                    raise ValueError(f"Invalid language: {lang}")
+            tag = (self.lang_tag["open"], self.lang_tag["close"], self.lang_tag["slash"])
+            encoded = [np.array(encode_tagged(t, lg, self._char_to_id, self.pad_id, tag), dtype=np.int64)
+                       for t, lg in zip(text_list, lang_list)]
+        else:
+            text_list = [
+                self._preprocess_text(t, lang, affricate_ligatures)
+                for t, lang in zip(text_list, lang_list)
+            ]
+            encoded = [self._encode(t, keep_tags=lang_tags) for t in text_list]
         text_ids_lengths = np.array([len(e) for e in encoded], dtype=np.int64)
         text_ids = np.full(
             (len(encoded), int(text_ids_lengths.max())), self.pad_id, dtype=np.int64
@@ -345,9 +472,10 @@ class UnicodeProcessor:
 
 
 class Style:
-    def __init__(self, style_ttl_onnx: np.ndarray, style_dp_onnx: np.ndarray):
+    def __init__(self, style_ttl_onnx: np.ndarray, style_dp_onnx: np.ndarray, model: Optional[str] = None):
         self.ttl = style_ttl_onnx
         self.dp = style_dp_onnx
+        self.model = model   # the voice JSONs' "model" tag (e.g. "bluev3-701500"), None when untagged
 
 
 class TextToSpeech:
@@ -365,6 +493,7 @@ class TextToSpeech:
         latent_stats: Optional[tuple[np.ndarray, np.ndarray, float]] = None,
     ):
         self.cfgs = cfgs
+        self.release = cfgs.get("blue_release")
         self.text_processor = text_processor
         self.g2p = g2p
         self.dp_ort = dp_ort
@@ -375,6 +504,8 @@ class TextToSpeech:
         self.base_chunk_size = cfgs["ae"]["base_chunk_size"]
         self.chunk_compress_factor = cfgs["ttl"]["chunk_compress_factor"]
         self.ldim = cfgs["ttl"]["latent_dim"]
+        self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
+        self.lang_tags = bool(cfgs.get("lang_tags", False))
         self._u_text = u_text
         self._u_ref = u_ref
         self._vf_inputs = {i.name for i in vector_est_ort.get_inputs()}
@@ -430,13 +561,22 @@ class TextToSpeech:
         noisy_latent = noisy_latent * latent_mask
         return noisy_latent, latent_mask
 
+    def _chunk_fits(self, lang: str) -> Optional[Callable[[str], bool]]:
+        """Release bundles: a chunk fits in ``max_chunk_tokens`` ids, its ``<lang>`` tags included (the model's
+        training range); older bundles count characters only."""
+        limit = (self.release or {}).get("inference", {}).get("max_chunk_tokens")
+        if not (limit and self.text_processor.release):
+            return None
+        from .ipa_text import tagged_len
+        return lambda s: tagged_len(s, lang) <= int(limit)
+
     def _infer(
         self,
         text_list: list[str],
         lang_list: list[str],
         style: Style,
         total_step: int,
-        speed: float = 1.05,
+        speed: float = 1.0,
         cfg_scale: float = DEFAULT_CFG_SCALE,
         pace_blend: float = 0.0,
         pace_dpt_ref: Optional[float] = None,
@@ -445,7 +585,7 @@ class TextToSpeech:
             len(text_list) == style.ttl.shape[0]
         ), "Number of texts must match number of style vectors"
         bsz = len(text_list)
-        text_ids, text_mask = self.text_processor(text_list, lang_list)
+        text_ids, text_mask = self.text_processor(text_list, lang_list, self.affricate_ligatures, self.lang_tags)
         dur_onnx, *_ = self.dp_ort.run(
             None, {"text_ids": text_ids, "style_dp": style.dp, "text_mask": text_mask}
         )
@@ -506,7 +646,8 @@ class TextToSpeech:
                 xt, *_ = self.vector_est_ort.run(None, cond)
         wav, *_ = self.vocoder_ort.run(None, {"latent": self._prepare_vocoder_latent(xt)})
         frame_len = self.base_chunk_size * self.chunk_compress_factor
-        if wav.shape[-1] > 2 * frame_len:
+        trim = (self.release or {}).get("inference", {}).get("trim_edges", True)
+        if trim and wav.shape[-1] > 2 * frame_len:
             wav = wav[..., frame_len:-frame_len]
         if wav.ndim == 3 and wav.shape[1] == 1:
             wav = wav[:, 0, :]
@@ -556,7 +697,9 @@ class TextToSpeech:
         so the same ``speed`` behaves more consistently across languages and in
         mixed inline-``<lang>`` text. If omitted (``None``), mixed text defaults
         to :data:`DEFAULT_MIXED_PACE_BLEND`, while single-language defaults to 0.
+        With a release bundle it defaults to 0 everywhere: the model's own durations.
         """
+        self.check_style(style)
         phonemize = not text_is_phonemes
         if normalize_text:
             if text_is_phonemes:
@@ -573,17 +716,26 @@ class TextToSpeech:
                     for t, lg in zip(text, langs)
                 ]
             else:
-                text = prepare_text_for_synthesis(text, lang=lang)
+                # release bundles: no slowed spans (the model's own durations, one chunk as the model reads it)
+                text = prepare_text_for_synthesis(text, lang=lang, mark_slow=not self.release)
+        if phonemize and self.text_processor.release:
+            if isinstance(text, list):
+                langs = lang if isinstance(lang, list) else [lang] * len(text)
+                text = [tag_latin_runs(t, lg) for t, lg in zip(text, langs)]
+            else:
+                text = tag_latin_runs(text, lang)
         # Computed after normalization: it can introduce <en> spans (emails,
         # spelled codes, loanwords) that should count as mixed-language text.
         if isinstance(text, list):
-            has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text)
+            langs = lang if isinstance(lang, list) else [lang] * len(text)
+            has_inline_lang = any(has_foreign_lang_span(t, lg) for t, lg in zip(text, langs))
         else:
-            has_inline_lang = _INLINE_LANG_PAIR.search(text) is not None
+            assert isinstance(lang, str), "Single-text mode requires `lang` to be a str."
+            has_inline_lang = has_foreign_lang_span(text, lang)
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
-            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
+            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang and not self.release else 0.0)
         )
         if isinstance(text, list):
             assert isinstance(lang, list) and len(text) == len(lang), (
@@ -619,12 +771,13 @@ class TextToSpeech:
         prev_is_slow = False
         for seg_text, is_slow in segments:
             seg_speed = speed * SLOW_SPEED_SCALE if is_slow else speed
-            seg_pace_blend = SLOW_PACE_BLEND if is_slow else pace_blend_eff
+            # release bundles: the model's own durations unless pace_blend is passed (slow spans included)
+            seg_pace_blend = SLOW_PACE_BLEND if is_slow and not self.release else pace_blend_eff
             seg_pace_dpt = SLOW_PACE_DPT_REF if is_slow else pace_dpt_ref
             if phonemize and self.g2p is not None:
                 seg_text = self.g2p.phonemize(seg_text, lang=lang)
-            seg_text = strip_lang_tags_from_phoneme_string(seg_text)
-            for chunk in chunk_text(seg_text, max_len=max_len):
+            seg_text, in_span = _strip_tags_keep_spans(seg_text, lang)
+            for chunk in chunk_text(seg_text, max_len=max_len, fits=self._chunk_fits(lang), in_span=in_span):
                 wav, dur_onnx = self._infer(
                     [chunk],
                     [lang],
@@ -650,13 +803,29 @@ class TextToSpeech:
             return np.zeros((1, 0), dtype=np.float32), np.zeros((1,), dtype=np.float32)
         return wav_cat, dur_cat
 
+    def check_style(self, style: Style) -> None:
+        """Refuse a voice exported for another model: a voice JSON is valid only with the model it came from.
+        Only tagged voices are checked; a bundle without a ``blue_release`` section is an older (v2) model."""
+        tag = getattr(style, "model", None)
+        if tag is None:
+            if self.release and not getattr(self, "_untagged_warned", False):
+                self._untagged_warned = True
+                print("[WARN] this voice JSON has no \"model\" tag: a voice works only with the model it was exported "
+                      "from (the previous model's voices do not work with this bundle)", file=sys.stderr)
+            return
+        bundle = (self.release or {}).get("model") if self.release else "v2"
+        if bundle is not None and bundle != tag:
+            raise ValueError(
+                f"this voice was exported for {tag!r}, but the loaded bundle is {bundle!r}: use a voice of that "
+                "model (the previous model's voices are in voices/v2/)")
+
     def batch(
         self,
         text_list: list[str],
         lang_list: list[str],
         style: Style,
         total_step: int,
-        speed: float = 1.05,
+        speed: float = 1.0,
         cfg_scale: float = DEFAULT_CFG_SCALE,
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
@@ -676,6 +845,7 @@ class TextToSpeech:
         exported with a dynamic batch axis (``exports/export_onnx.py``); older
         batch-1 bundles raise an ONNX Runtime shape error.
         """
+        self.check_style(style)
         assert len(text_list) == len(lang_list), (
             "`text_list` and `lang_list` must have the same length."
         )
@@ -689,13 +859,17 @@ class TextToSpeech:
                 prepare_text_for_synthesis(t, lang=lang_code, mark_slow=False)
                 for t, lang_code in zip(text_list, lang_list)
             ]
-        has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text_list)
+        phonemize = not text_is_phonemes
+        if phonemize and self.text_processor.release:
+            text_list = [tag_latin_runs(t, lg) for t, lg in zip(text_list, lang_list)]
+        has_inline_lang = any(
+            has_foreign_lang_span(t, lg) for t, lg in zip(text_list, lang_list)
+        )
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
-            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
+            else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang and not self.release else 0.0)
         )
-        phonemize = not text_is_phonemes
         if phonemize and self.g2p is not None:
             text_list = [
                 self.g2p.phonemize(t, lang=lang_code)
@@ -821,12 +995,12 @@ def load_text_processor(onnx_dir: str = "") -> UnicodeProcessor:
     return UnicodeProcessor(os.path.join(os.path.dirname(__file__), "vocab.json"))
 
 
-def text_to_indices(text: str, lang: str = "he") -> list[int]:
+def text_to_indices(text: str, lang: str = "he", affricate_ligatures: bool = False, lang_tags: bool = False) -> list[int]:
     """Compatibility helper used by TRT: encode phoneme text with the bundled vocab."""
     global _TEXT_TO_INDICES_PROCESSOR
     if _TEXT_TO_INDICES_PROCESSOR is None:
         _TEXT_TO_INDICES_PROCESSOR = load_text_processor()
-    text_ids, _ = _TEXT_TO_INDICES_PROCESSOR([text], [lang])
+    text_ids, _ = _TEXT_TO_INDICES_PROCESSOR([text], [lang], affricate_ligatures, lang_tags)
     return text_ids[0].astype(np.int64).tolist()
 
 
@@ -888,7 +1062,16 @@ def load_text_to_speech(
         onnx_dir, opts, providers
     )
     text_processor = load_text_processor(onnx_dir)
-    g2p = TextProcessor(renikud_path)
+    release = cfgs.get("blue_release")
+    if release:
+        text_processor.release = bool(release.get("inference", {}).get("lang_tags")) and text_processor.lang_tag is not None
+        fe = os.path.join(os.path.dirname(os.path.abspath(onnx_dir)), "frontend")
+        shipped = os.path.join(fe, "renikud", "model.onnx")
+        if renikud_path is None and os.path.exists(shipped):
+            renikud_path = shipped
+        g2p = TextProcessor(renikud_path, release=release, frontend_dir=fe if os.path.isdir(fe) else None)
+    else:
+        g2p = TextProcessor(renikud_path)
     u_text, u_ref = load_uncond(onnx_dir)
     if u_text is None and "cfg_scale" not in {i.name for i in vector_est_ort.get_inputs()}:
         print("[WARN] no cfg_scale graph input and no uncond.npz — cfg_scale will be ignored.")
@@ -913,9 +1096,11 @@ def load_voice_style(voice_style_paths: list[str], verbose: bool = False) -> Sty
     dp_style = np.zeros([bsz, dp_dims[1], dp_dims[2]], dtype=np.float32)
 
     # Fill in the data
+    tags = set()
     for i, voice_style_path in enumerate(voice_style_paths):
         with open(voice_style_path, "r", encoding="utf-8") as f:
             voice_style = json.load(f)
+        tags.add(voice_style.get("model"))
 
         ttl_data = np.array(
             voice_style["style_ttl"]["data"], dtype=np.float32
@@ -927,7 +1112,9 @@ def load_voice_style(voice_style_paths: list[str], verbose: bool = False) -> Sty
 
     if verbose:
         print(f"Loaded {bsz} voice styles")
-    return Style(ttl_style, dp_style)
+    if len(tags) > 1:
+        raise ValueError(f"voice JSONs of different models in one style: {sorted(map(str, tags))}")
+    return Style(ttl_style, dp_style, model=tags.pop() if tags else None)
 
 
 def limit_peak(audio: np.ndarray, peak_limit: float = 0.95) -> np.ndarray:
@@ -959,8 +1146,8 @@ class BlueTTS:
 
     def __init__(
         self,
-        onnx_dir: str = "onnx_models",
-        style_json: Union[str, list[str]] = "voices/v2/noa.json",
+        onnx_dir: str = "bluev3_onnx/onnx",
+        style_json: Union[str, list[str]] = "voices/noa.json",
         renikud_path: Optional[str] = None,
         config_path: str = "config/tts.json",
     ):
@@ -969,10 +1156,12 @@ class BlueTTS:
         )
         paths = [style_json] if isinstance(style_json, str) else list(style_json)
         style = load_voice_style(paths)
+        self.tts.check_style(style)
         if style.ttl.shape[0] > 1:
             style = Style(
                 style.ttl.mean(axis=0, keepdims=True),
                 style.dp.mean(axis=0, keepdims=True),
+                model=style.model,
             )
         self.style = style
 
@@ -984,10 +1173,10 @@ class BlueTTS:
         self,
         text: str,
         lang: str = "he",
-        total_step: int = 5,
-        cfg_scale: float = DEFAULT_CFG_SCALE,
+        total_step: Optional[int] = None,
+        cfg_scale: Optional[float] = None,
         speed: float = 1.0,
-        silence_duration: float = 0.0,
+        silence_duration: Optional[float] = None,
         text_is_phonemes: bool = False,
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
@@ -1009,6 +1198,10 @@ class BlueTTS:
         straight to a PCM WAV never clips (see :func:`limit_peak`). Pass
         ``peak_limit=None`` for the raw vocoder output.
         """
+        rel = (self.tts.release or {}).get("inference", {})
+        total_step = total_step if total_step is not None else int(rel.get("steps", 8))
+        cfg_scale = cfg_scale if cfg_scale is not None else float(rel.get("cfg_scale", DEFAULT_CFG_SCALE))
+        silence_duration = silence_duration if silence_duration is not None else float(rel.get("join_silence_s", 0.0))
         audio, _ = self.tts(
             text,
             lang=lang,
@@ -1044,43 +1237,147 @@ def sanitize_filename(text: str, max_len: int) -> str:
     return re.sub(r"[^\w]", "_", prefix, flags=re.UNICODE)
 
 
-def chunk_text(text: str, max_len: int = 300) -> list[str]:
+_PARAGRAPH_RE = re.compile(r"\n\s*\n+")
+# Split by sentence boundaries (period, question mark, exclamation mark followed by space)
+# But exclude common abbreviations like Mr., Mrs., Dr., etc. and single capital letters like F.
+_SENTENCE_RE = re.compile(
+    r"(?<!Mr\.)(?<!Mrs\.)(?<!Ms\.)(?<!Dr\.)(?<!Prof\.)(?<!Sr\.)(?<!Jr\.)(?<!Ph\.D\.)(?<!etc\.)(?<!e\.g\.)(?<!i\.e\.)"
+    r"(?<!vs\.)(?<!Inc\.)(?<!Ltd\.)(?<!Co\.)(?<!Corp\.)(?<!St\.)(?<!Ave\.)(?<!Blvd\.)(?<!\b[A-Z]\.)(?<=[.!?])\s+"
+)
+_CUT_MARKS = ",;:"
+
+
+def chunk_text(
+    text: str,
+    max_len: int = 300,
+    fits: Optional[Callable[[str], bool]] = None,
+    in_span: Optional[list[bool]] = None,
+) -> list[str]:
     """
     Split text into chunks by paragraphs and sentences.
 
     Args:
         text: Input text to chunk
-        max_len: Maximum length of each chunk (default: 300)
+        max_len: Maximum length of each chunk in characters (default: 300)
+        fits: Optional further limit on a chunk (release bundles: its ids against ``max_chunk_tokens``)
+        in_span: Per character of ``text``, whether it is inside an inline ``<lang>`` span
+            (see :func:`_strip_tags_keep_spans`); a long sentence is cut there only as a last resort
 
     Returns:
         List of text chunks
+
+    Sentences are packed while the chunk fits. A sentence that does not fit alone is cut: after
+    the last comma, semicolon or colon that leaves a piece that fits, else at the last space,
+    else at the last character that fits (see :func:`_cut_sentence`). It was kept whole, and a
+    420-character sentence became one 18 s chunk, far past the lengths the model was trained on.
     """
-    # Split by paragraph (two or more newlines)
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", text.strip()) if p.strip()]
+    def ok(s: str) -> bool:
+        return len(s) <= max_len and (fits is None or fits(s))
 
     chunks = []
-
-    for paragraph in paragraphs:
-        paragraph = paragraph.strip()
-        if not paragraph:
-            continue
-
-        # Split by sentence boundaries (period, question mark, exclamation mark followed by space)
-        # But exclude common abbreviations like Mr., Mrs., Dr., etc. and single capital letters like F.
-        pattern = r"(?<!Mr\.)(?<!Mrs\.)(?<!Ms\.)(?<!Dr\.)(?<!Prof\.)(?<!Sr\.)(?<!Jr\.)(?<!Ph\.D\.)(?<!etc\.)(?<!e\.g\.)(?<!i\.e\.)(?<!vs\.)(?<!Inc\.)(?<!Ltd\.)(?<!Co\.)(?<!Corp\.)(?<!St\.)(?<!Ave\.)(?<!Blvd\.)(?<!\b[A-Z]\.)(?<=[.!?])\s+"
-        sentences = re.split(pattern, paragraph)
-
+    for p0, p1 in _stripped_parts(text, 0, len(text), _PARAGRAPH_RE):
         current_chunk = ""
-
-        for sentence in sentences:
-            if len(current_chunk) + len(sentence) + 1 <= max_len:
-                current_chunk += (" " if current_chunk else "") + sentence
+        for s0, s1 in _stripped_parts(text, p0, p1, _SENTENCE_RE):
+            sentence = text[s0:s1]
+            if ok(sentence):
+                pieces = [sentence]
             else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = sentence
+                pieces = _cut_sentence(sentence, ok, in_span[s0:s1] if in_span else None)
+            for piece in pieces:
+                joined = f"{current_chunk} {piece}" if current_chunk else piece
+                if ok(joined):
+                    current_chunk = joined
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    current_chunk = piece
 
         if current_chunk:
             chunks.append(current_chunk.strip())
 
     return chunks
+
+
+def _stripped_parts(text: str, start: int, end: int, sep: re.Pattern) -> list[tuple[int, int]]:
+    """``[p.strip() for p in sep.split(text[start:end].strip()) if p.strip()]``, as (start, end) offsets."""
+    parts, pos = [], start
+    for m in list(sep.finditer(text, start, end)) + [None]:
+        a, b = pos, (m.start() if m else end)
+        while a < b and text[a].isspace():
+            a += 1
+        while b > a and text[b - 1].isspace():
+            b -= 1
+        if a < b:
+            parts.append((a, b))
+        if m:
+            pos = m.end()
+    return parts
+
+
+def _cut_sentence(s: str, ok: Callable[[str], bool], in_span: Optional[list[bool]] = None) -> list[str]:
+    """Pieces of a sentence too long for one chunk, each one ``ok``.
+
+    Cut after the last comma, semicolon or colon that fits, else at the last space, past a quarter
+    of what is left: the rule of the site's ChunkPacker, so both give the same chunks. Failing that,
+    the same before the quarter (the site cuts inside a word there), all outside inline spans, so
+    "<en>Times Square</en>" stays whole; then inside a span too long for a chunk; and only a single
+    word longer than a chunk is cut at the last character that fits.
+    """
+    out = []
+    flags = list(in_span) if in_span else [False] * len(s)
+    while s and not ok(s):
+        lo = len(s) // 4
+        tries = [(marks, inside, floor) for inside in (False, True) for floor in (lo, 0) for marks in (_CUT_MARKS, " ")]
+        cut = next((c for t in tries if (c := _last_cut(s, flags, ok, *t))), 0)
+        if not cut:
+            cut = len(s) - 1
+            while cut > 1 and not ok(s[:cut]):
+                cut -= 1
+        piece = s[:cut].strip()
+        if piece:
+            out.append(piece)
+        rest = s[cut:]
+        skip = len(rest) - len(rest.lstrip())
+        s = rest.strip()
+        flags = flags[cut + skip:cut + skip + len(s)]
+    if s:
+        out.append(s)
+    return out
+
+
+def _last_cut(s: str, flags: list[bool], ok: Callable[[str], bool], marks: str, inside: bool, floor: int) -> int:
+    """The last cut (after a mark, at a space) past ``floor``, in or out of spans, whose piece is ``ok``; 0 if none."""
+    for k in range(len(s) - 1, floor, -1):
+        if s[k] in marks and flags[k] == inside:
+            cut = k if s[k] == " " else k + 1
+            if ok(s[:cut]):
+                return cut
+    return 0
+
+
+def _strip_tags_keep_spans(phonemes: str, lang: str) -> tuple[str, list[bool]]:
+    """:func:`strip_lang_tags_from_phoneme_string`, plus which characters were inside an other-language span."""
+    chars, flags, inside = [], [], None
+    for tok in re.split(r"(</?\w+>)", phonemes):
+        if _LANG_TAG_RE.fullmatch(tok):
+            name = tok.strip("</>")
+            inside = None if tok.startswith("</") else (name if name != lang else None)
+            chars.append(" ")
+            flags.append(False)
+        else:
+            chars.extend(tok)
+            flags.extend([inside is not None] * len(tok))
+    raw = "".join(chars)
+    out, out_flags, pos = [], [], 0
+    for m in re.finditer(r"\s+", raw):
+        out.append(raw[pos:m.start()])
+        out_flags.extend(flags[pos:m.start()])
+        out.append(" ")
+        out_flags.append(all(flags[m.start():m.end()]))
+        pos = m.end()
+    out.append(raw[pos:])
+    out_flags.extend(flags[pos:])
+    text = "".join(out)
+    lead = len(text) - len(text.lstrip())
+    text_s = text.strip()
+    return text_s, out_flags[lead:lead + len(text_s)]
