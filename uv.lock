@@ -158,6 +158,9 @@ export = [
 gpu = [
     { name = "onnxruntime-gpu" },
 ]
+hebrew = [
+    { name = "hebrew-num2words" },
+]
 openvino = [
     { name = "onnxruntime-openvino" },
 ]
@@ -174,6 +177,7 @@ dev = [
 requires-dist = [
     { name = "bluecodec", marker = "extra == 'export'", git = "https://github.com/maxmelichov/blue-codec.git" },
     { name = "espeakng-loader", specifier = ">=0.2.4" },
+    { name = "hebrew-num2words", marker = "extra == 'hebrew'", specifier = ">=0.1.0" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "librosa" },
     { name = "num2words" },
@@ -193,7 +197,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'tensorrt'", specifier = ">=2.1.0" },
     { name = "torchaudio", marker = "extra == 'export'", specifier = ">=2.1.0" },
 ]
-provides-extras = ["openvino", "gpu", "tensorrt", "export"]
+provides-extras = ["hebrew", "openvino", "gpu", "tensorrt", "export"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff" }]
@@ -538,6 +542,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/01/ee/02a2c011bdab74c6fb3c75474d40b3052059d95df7e73351460c8588d963/h11-0.16.0.tar.gz", hash = "sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1", size = 101250, upload-time = "2025-04-24T03:35:25.427Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl", hash = "sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86", size = 37515, upload-time = "2025-04-24T03:35:24.344Z" },
+]
+
+[[package]]
+name = "hebrew-num2words"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e4/8d/ea8d1fa49cf9db71cd2e7a04a7f73209acd98bfef9990df9f600a7c90265/hebrew_num2words-0.1.0.tar.gz", hash = "sha256:ef218dc8d9a781772408a6b5977049e2f4e51036891f1eae8f5dfa9855b3d33d", size = 17740, upload-time = "2026-08-29T20:06:06.492Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fb/22/b3dd47062cff6004fb3574f3e755d3f4eb5e51e262848c5b21f1e24ca094/hebrew_num2words-0.1.0-py3-none-any.whl", hash = "sha256:e63bae884cc4aafce01ce4d5dc0e7fb747ede824b15820d20dacde7fdab432b9", size = 15006, upload-time = "2026-08-29T20:06:05.161Z" },
 ]
 
 [[package]]
@@ -1270,24 +1283,28 @@ wheels = [
 
 [[package]]
 name = "onnxruntime-gpu"
-version = "1.24.2"
+version = "1.32.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "flatbuffers" },
     { name = "numpy" },
     { name = "packaging" },
     { name = "protobuf" },
-    { name = "sympy" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/92/1d/2eb4443d9e85c5e219b61cd4995ef1d30bc5981c4bbb5dd624c9445edb8d/onnxruntime_gpu-1.24.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e4a3f793b291fb678583db0e78836319ab662f10a8485f7de858631b4ea5361c", size = 252647554, upload-time = "2026-02-19T17:10:01.43Z" },
-    { url = "https://files.pythonhosted.org/packages/b9/cd/5e9b0d094e573c1409a2c1155f146ea1d5d5b805329ebde146d2c5584b2c/onnxruntime_gpu-1.24.2-cp312-cp312-win_amd64.whl", hash = "sha256:77cbfcb08943d2edba069c774451831d28be215bf875a989811188ee59e0833f", size = 207102891, upload-time = "2026-02-19T20:09:12.43Z" },
-    { url = "https://files.pythonhosted.org/packages/19/cb/ce8203fee31533f4d74891145512d1b5c09b26cebb4c1574afb233c41e0f/onnxruntime_gpu-1.24.2-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9144bda62f4826ecd88151c55892c439a7515914350c1c924d3f4328eb40bf38", size = 252647010, upload-time = "2026-02-19T17:10:12.497Z" },
-    { url = "https://files.pythonhosted.org/packages/12/5d/229b3e9699af20d55865ef792d8389aa585c1f878418a482ccc2f8ca5863/onnxruntime_gpu-1.24.2-cp313-cp313-win_amd64.whl", hash = "sha256:48272ae9101e0762c5db54703bcedb9765c685f78890535843c74d7044dd8820", size = 207105650, upload-time = "2026-02-19T20:09:21.521Z" },
-    { url = "https://files.pythonhosted.org/packages/db/c0/62878c06948cf92b45201d287985e3bdb414b497f219f41924d5058b369f/onnxruntime_gpu-1.24.2-cp313-cp313t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:1face415620b2d023c4735fbf5c8f03f26a22863e1fd768eb35e6a449b9340ba", size = 252655516, upload-time = "2026-02-19T17:10:22.722Z" },
-    { url = "https://files.pythonhosted.org/packages/c1/ff/17e4e94003c0153b40ed399b9ebb7ccc78c82cc6a1538627985a443db382/onnxruntime_gpu-1.24.2-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:938c7d1f5c6e81017138edbe313eb87477ca17f02b838eb562b4a27b7fb583c0", size = 252647655, upload-time = "2026-02-19T17:10:33.469Z" },
-    { url = "https://files.pythonhosted.org/packages/cc/db/0f94a1b31adc07f65b8184ae600e9040e4964b415a947de77c7b5d8b7b82/onnxruntime_gpu-1.24.2-cp314-cp314-win_amd64.whl", hash = "sha256:9f32e82d88eb3233ed3027713f1e832fa9d4a63741896d4caf6060fe58f72b5c", size = 209502551, upload-time = "2026-02-19T20:09:31.888Z" },
-    { url = "https://files.pythonhosted.org/packages/60/17/4a2575a40007b975a3faf37facda010ef20a20bf9bf6c04e52117ba1178b/onnxruntime_gpu-1.24.2-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:92932e6db0214babb9938aacc0c1d0523229af9ddf251fccc31aa91497b4eee0", size = 252654193, upload-time = "2026-02-19T17:10:43.111Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/8b/c48e90baf9b9389c4c709dae202938e03a01c7ffc792888bafcf60e9a6b6/onnxruntime_gpu-1.32.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:09637f3e38a1addc308dec5ef825a36eeb786e9615f45ec76aa29909df5cdd36", size = 251396935, upload-time = "2026-11-13T10:44:22.067Z" },
+    { url = "https://files.pythonhosted.org/packages/23/ae/49cf240c83e71385e482b37bfdf592d3c5da5d4736d8d27b4b551f3ca9d9/onnxruntime_gpu-1.32.0-cp312-cp312-manylinux_2_34_aarch64.whl", hash = "sha256:44c135429a1a24a5b7fa417dc0164164c34aadc1c6c03273a5b918a1339530f2", size = 311905052, upload-time = "2026-11-13T10:22:38.69Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/3b/6ce3c2548db5f8f3e639373640fa7f7fcdbcbce7b754971c0b293ab105b5/onnxruntime_gpu-1.32.0-cp312-cp312-win_amd64.whl", hash = "sha256:d8bc5d7668872889d605c1e7253581e021db7dea41a142ad2ab78d6d96f3f289", size = 157765830, upload-time = "2026-11-13T10:08:52.526Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/b6/759cc7838e5640d30e365e3b8466987172526faabf1779f0bf776f566b1e/onnxruntime_gpu-1.32.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:d3cec70e7a7dcfb085e0e6458210211541a33ffbf89c6a6e4e3d6adf7262cd6d", size = 251389345, upload-time = "2026-11-13T10:44:31.448Z" },
+    { url = "https://files.pythonhosted.org/packages/70/ba/004b5a8d8400fdfb4b01fe23d25bb746240bceb9f44c2db7fbce2107cfaa/onnxruntime_gpu-1.32.0-cp313-cp313-manylinux_2_34_aarch64.whl", hash = "sha256:6bfbb108c82889298cb1fa64a680ac773a52cb5426b16bf2e4a3cff846607a47", size = 311906099, upload-time = "2026-11-13T10:22:54.232Z" },
+    { url = "https://files.pythonhosted.org/packages/36/6e/1e44789fd69794182cf522455ad39b430794e048e97dd72f423406b1e633/onnxruntime_gpu-1.32.0-cp313-cp313-win_amd64.whl", hash = "sha256:9e7b6b5772c5cd99be9c47dace5f0b2faf4608f6ab638cdc0bccc096405baaee", size = 157777759, upload-time = "2026-11-13T10:08:59.686Z" },
+    { url = "https://files.pythonhosted.org/packages/52/49/85757d6bfe0ba4e5e44fbf8b03151d5260a8367197f549fb5976a3367001/onnxruntime_gpu-1.32.0-cp313-cp313t-manylinux_2_28_x86_64.whl", hash = "sha256:bc57d0d375b5b6059fa231ba4df1d7167b6ce6a314cfc27fe80533dc7d45d3cb", size = 251406455, upload-time = "2026-11-13T10:44:41.968Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/ad/647e4ca5aaf0f07a519020f4b348c8c7a28bf63e672e0c4ce2ffc06f5787/onnxruntime_gpu-1.32.0-cp313-cp313t-manylinux_2_34_aarch64.whl", hash = "sha256:ad48126f1203455260a4db750accec90aae601256b232d98948976eacc3b1c2b", size = 311912636, upload-time = "2026-11-13T10:23:08.232Z" },
+    { url = "https://files.pythonhosted.org/packages/3f/dd/96aa2326c63667e65282733ce6fa1206389f9f62a62d19187ffb4523b311/onnxruntime_gpu-1.32.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:98a4ec16dd3c39cff09f1fcbc11fe7cd8074d9953ee6ca3827d5c2847c2a92db", size = 251385394, upload-time = "2026-11-13T10:44:55.825Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/45/91f27e255116938a0b3d53a8987f3758897a4d6dd8780f8cc9adee18e58c/onnxruntime_gpu-1.32.0-cp314-cp314-manylinux_2_34_aarch64.whl", hash = "sha256:0f1cf2ec565062f8b9713f0ef4ff5516cc32fc719c48d7fa7819235bf4996cd5", size = 311909481, upload-time = "2026-11-13T10:23:22.103Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/58/d5c8662e1ca5a5ce06ae202dc9c92959f2cd1f4491c2c1fd80297edd7cf3/onnxruntime_gpu-1.32.0-cp314-cp314-win_amd64.whl", hash = "sha256:03905e264ed72ac091b8b77acbfa7cc191cedf912c27c6fd26ee25e7b877b53b", size = 158530311, upload-time = "2026-11-13T10:09:05.906Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/3a/bf98cd10a3a07f3e6e6e54385fb39bd73dd319a2572d0b0fe255c41263a2/onnxruntime_gpu-1.32.0-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:b7496b5846acaaad657aae988cdcffc43d77ecff21ac45c3e65415c8182a582f", size = 251406895, upload-time = "2026-11-13T10:45:10.036Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/bb/633535c1701b4fb3f6c806250174f93d1963e966af06eca0f87ceddb258c/onnxruntime_gpu-1.32.0-cp314-cp314t-manylinux_2_34_aarch64.whl", hash = "sha256:e35ca7a748eadfdd4796cbacadc400cfeea777c9eec4a14f2b9c7226fe9ad160", size = 311910602, upload-time = "2026-11-13T10:23:37.592Z" },
 ]
 
 [[package]]

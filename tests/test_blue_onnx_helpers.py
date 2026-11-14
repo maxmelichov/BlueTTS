@@ -13,6 +13,7 @@ from src.blue_onnx import (
     blend_duration_pace,
     chunk_text,
     get_latent_mask,
+    has_foreign_lang_span,
     latent_frames_for_duration,
     length_to_mask,
     strip_lang_tags_from_phoneme_string,
@@ -44,6 +45,21 @@ class TestStripLangTags(unittest.TestCase):
         s = strip_lang_tags_from_phoneme_string("<en>a b</en>  <he>ג</he>")
         self.assertNotIn("<", s)
         self.assertNotIn(">", s)
+
+
+class TestForeignLangSpan(unittest.TestCase):
+    """Only a span in another language makes text mixed (and turns on pace_blend)."""
+
+    def test_same_language_span_is_not_mixed(self):
+        self.assertFalse(has_foreign_lang_span("She finished <en>third</en>.", "en"))
+        self.assertFalse(has_foreign_lang_span("plain text", "en"))
+
+    def test_other_language_span_is_mixed(self):
+        self.assertTrue(has_foreign_lang_span("שלום <en>world</en>", "he"))
+        self.assertTrue(has_foreign_lang_span("Hello <es>mundo</es>", "en"))
+
+    def test_language_aliases(self):
+        self.assertFalse(has_foreign_lang_span("Hallo <de>Welt</de>", "ge"))
 
 
 class TestChunkText(unittest.TestCase):

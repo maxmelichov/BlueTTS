@@ -304,7 +304,9 @@ class BlueTRT:
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
     ) -> Tuple[np.ndarray, int]:
-        has_inline = _INLINE_LANG_PAIR.search(phonemes) is not None
+        # G2P wraps every segment in its language's tags, single-language text
+        # included, so only a second language makes the text mixed.
+        has_inline = len({m.group(1) for m in _INLINE_LANG_PAIR.finditer(phonemes)}) > 1
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None

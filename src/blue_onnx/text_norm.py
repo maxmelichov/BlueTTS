@@ -4,14 +4,21 @@ The acoustic model only ever sees phonemes, so anything a phonemizer cannot read
 aloud — digits, dates, clock times, prices, ticket codes, brackets, markdown
 headers, Hebrew abbreviation gershayim — has to become words first.
 :func:`prepare_text_for_synthesis` runs the whole chain in a fixed order (the
-order matters: clock times must be expanded before ratios so ``08:15`` is not
-read as "eight to fifteen", and generic numbers must go last).
+order matters: prices and ordinals are claimed before the code speller would
+spell ``3rd`` or ``$5`` letter by letter, clock times are expanded before ratios
+so ``08:15`` is not read as "eight to fifteen", and generic numbers go last).
 
-Spelled codes, phone numbers, dates and times are wrapped in
-``【…】`` *slow markers*. They are not spoken: :meth:`TextToSpeech.__call__`
-splits on them and synthesizes those spans with :data:`SLOW_SPEED_SCALE` /
-:data:`SLOW_PACE_BLEND` so digit groups stay intelligible. Callers that do not
-want the markers pass ``mark_slow=False``.
+Prices, ordinals, dates and clock times are read *inline*, as part of the
+sentence. Only phone numbers and spelled codes are wrapped in ``【…】`` *slow
+markers*: :meth:`TextToSpeech.__call__` splits on them and synthesizes those
+spans with :data:`SLOW_SPEED_SCALE` / :data:`SLOW_PACE_BLEND`, where a slightly
+slower digit-by-digit reading helps the listener write them down. Callers that do
+not want the markers pass ``mark_slow=False``.
+
+Hebrew numbers go through `hebrew-num2words <https://pypi.org/project/hebrew-num2words/>`_
+when it is installed (``pip install "blue-onnx[hebrew]"``): it agrees the number
+with the counted noun's gender (שלושה ילדים / שלוש בנות), which a plain
+cardinal table cannot. Without it a built-in fallback reads the bare cardinals.
 
 This module is standalone: it imports nothing from the rest of the package, so
 the normalizer can be used (and tested) without ONNX Runtime or a model.
@@ -20,6 +27,7 @@ the normalizer can be used (and tested) without ONNX Runtime or a model.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Optional, Union
 
 from num2words import num2words
@@ -29,7 +37,7 @@ LANG_CODE_ALIASES: dict[str, str] = {"ge": "de", "en-us": "en"}
 # ── slow segments ────────────────────────────────────────────────────────────
 SLOW_MARK_OPEN = "【"
 SLOW_MARK_CLOSE = "】"
-# Slightly slower, clearer delivery for spelled IDs and expanded numbers. Kept
+# Slightly slower, clearer delivery for phone numbers and spelled codes. Kept
 # moderate on purpose: heavier slow-downs over-stretch the span and the model's
 # energy collapses at the tail, dropping the last digit group.
 SLOW_SPEED_SCALE = 0.90
@@ -44,6 +52,8 @@ _PROTECTED_SPAN_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _INLINE_EN_BLOCK_RE = re.compile(r"(<en>.*?</en>)", re.IGNORECASE | re.DOTALL)
+_INLINE_LANG_PAIR_RE = re.compile(r"<(\w+)>(.*?)</\1>", re.DOTALL)
+_TERMINAL_PUNCT_RE = re.compile(r"[.!?,;:…]$")
 
 # Pictographs, dingbats and flags. Stripped *before* G2P: espeak happily reads
 # them aloud ("Nice 🎉 party" → "nice party popper party"), so filtering them at
@@ -64,26 +74,39 @@ EMOJI_RE = re.compile(
     flags=re.UNICODE,
 )
 
+_HEB = "֐-׿"
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 # Latin letter+digit tokens (TKT-90254, IL4829, GPT-4, …) — spelled for TTS.
 _ALNUM_MIX_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9])[A-Za-z0-9]+(?:[-_/][A-Za-z0-9]+)*(?![A-Za-z0-9])"
 )
-_DATE_RE = re.compile(r"(?<!\d)([0-3]?\d)[/.]([01]?\d)[/.](\d{2}|\d{4})(?!\d)")
-_TIME_RE = re.compile(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)")
-# Thousands groups first, so "1,500" is 1500 and not 1.5 (see expand_numbers).
-_GROUPED_INT_COMMA_RE = re.compile(r"(?<![\w.,])\d{1,3}(?:,\d{3})+(?![\w.,])")
-_GROUPED_INT_DOT_RE = re.compile(r"(?<![\w.,])\d{1,3}(?:\.\d{3})+(?![\w.,])")
-_PLAIN_NUMBER_RE = re.compile(r"(?<![\w])\d+(?:[.,]\d+)?(?![\w])")
+# A digit may follow a Hebrew prefix letter directly (ב14:30, ו2) once
+# _glue_hebrew_prefixes has dropped the hyphen, so only Latin letters and digits
+# block a match on the left.
+_NUM_LEFT = r"(?<![A-Za-z0-9_])"
+_DATE_RE = re.compile(_NUM_LEFT + r"([0-3]?\d)([/.\-])([01]?\d)\2(\d{4}|\d{2})(?![\d.,]\d)(?!\d)")
+_ISO_DATE_RE = re.compile(_NUM_LEFT + r"(\d{4})-([01]\d)-([0-3]\d)(?!\d)")
+_TIME_RE = re.compile(_NUM_LEFT + r"([01]?\d|2[0-3]):([0-5]\d)(?!\d)")
+# German writes "14:30 Uhr"; the expansion already says Uhr, so it is consumed.
+_DE_TIME_RE = re.compile(_TIME_RE.pattern + r"(?:\s*Uhr\b)?")
+_NUMBER_RE = re.compile(_NUM_LEFT + r"(?<![.,]\d)(?<![.,])\d+(?:[.,]\d+)*(?![\w])")
+_LIST_MARKER_RE = re.compile(
+    rf"(?:^|(?<=\n)|(?<=[:;.!?] ))(\d{{1,2}})\.\s+(?=[{_HEB}A-Za-z\"'(<])", re.MULTILINE
+)
 # Locales that write "1.500" for one thousand five hundred and "3,5" for three
 # and a half — the mirror image of the en/he convention.
 _COMMA_DECIMAL_LANGS = {"de", "es", "it"}
-_LIST_MARKER_RE = re.compile(r"(?<![\d/])(\d{1,2})\.\s+(?=[֐-׿A-Za-z\"'(<])")
+# A Spanish word that is not a preposition or conjunction: "21 libros" → veintiún.
+_ES_NOUN_FOLLOWS_RE = re.compile(r"\s+(?!(?:de|del|y|o|a|al|en|por|con|que)\b)[a-záéíóúñ]")
 
 _HEBREW_MONTH_ORDINALS = {
     1: "לראשון", 2: "לשני", 3: "לשלישי", 4: "לרביעי", 5: "לחמישי", 6: "לשישי",
     7: "לשביעי", 8: "לשמיני", 9: "לתשיעי", 10: "לעשירי", 11: "לאחד עשר",
     12: "לשנים עשר",
+}
+_HEBREW_ORDINALS_MASC = {
+    1: "ראשון", 2: "שני", 3: "שלישי", 4: "רביעי", 5: "חמישי", 6: "שישי",
+    7: "שביעי", 8: "שמיני", 9: "תשיעי", 10: "עשירי",
 }
 _MONTH_NAMES: dict[str, list[str]] = {
     "en": ["January", "February", "March", "April", "May", "June", "July",
@@ -95,11 +118,18 @@ _MONTH_NAMES: dict[str, list[str]] = {
     "it": ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio",
            "agosto", "settembre", "ottobre", "novembre", "dicembre"],
 }
-_DATE_DAY_MONTH_GLUE = {"en": " of ", "es": " de ", "de": " ", "it": " "}
 _PERCENT_WORDS = {"he": "אחוז", "en": "percent", "es": "por ciento",
                   "de": "Prozent", "it": "per cento"}
 _RATIO_WORDS = {"he": "ל", "en": "to", "es": "a", "de": "zu", "it": "a"}
 _PLUS_WORDS = {"he": "פלוס", "en": "plus", "es": "más", "de": "plus", "it": "più"}
+_MINUS_WORDS = {"he": "מינוס", "en": "minus", "es": "menos", "de": "minus", "it": "meno"}
+_RANGE_WORDS = {"en": "to", "es": "a", "de": "bis", "it": "a"}
+_DECIMAL_WORDS = {"en": "point", "de": "Komma", "es": "coma", "it": "virgola"}
+# German ordinals take -n after these (am dritten Mai, den 2. → den zweiten).
+_DE_DATIVE_WORDS = {"am", "vom", "zum", "zur", "seit", "bis", "ab", "dem", "den",
+                    "des", "nach", "vor", "im", "beim", "einem", "einer", "ihrem",
+                    "seinem", "unserem"}
+_DE_ORDINAL_ARTICLES = _DE_DATIVE_WORDS | {"der", "die", "das", "eine", "jede", "jeder"}
 # Spoken list counters (1. item, 2. item, …); Hebrew counting uses the feminine
 # forms, which num2words does not produce.
 _HEBREW_LIST_CARDINALS: dict[int, str] = {
@@ -113,10 +143,62 @@ _HEBREW_DIGIT_WORDS: dict[str, str] = {
     "5": "חמש", "6": "שש", "7": "שבע", "8": "שמונה", "9": "תשע",
 }
 
+# ── currency ─────────────────────────────────────────────────────────────────
+# (one, many, minor one, minor many, feminine) per language and symbol. A
+# Hebrew-quoted ש"ח is a currency sign too; it has to be claimed here, before
+# strip_hebrew_abbreviation_quotes turns it into the word "שח".
+_CURRENCY_UNITS: dict[str, dict[str, tuple[str, str, str, str, bool]]] = {
+    "en": {"$": ("dollar", "dollars", "cent", "cents", False),
+           "€": ("euro", "euros", "cent", "cents", False),
+           "£": ("pound", "pounds", "penny", "pence", False),
+           "¥": ("yen", "yen", "", "", False),
+           "₪": ("shekel", "shekels", "agora", "agorot", False)},
+    "de": {"$": ("Dollar", "Dollar", "Cent", "Cent", False),
+           "€": ("Euro", "Euro", "Cent", "Cent", False),
+           "£": ("Pfund", "Pfund", "Penny", "Pence", False),
+           "¥": ("Yen", "Yen", "", "", False),
+           "₪": ("Schekel", "Schekel", "Agora", "Agorot", False)},
+    "es": {"$": ("dólar", "dólares", "centavo", "centavos", False),
+           "€": ("euro", "euros", "céntimo", "céntimos", False),
+           "£": ("libra", "libras", "penique", "peniques", True),
+           "¥": ("yen", "yenes", "", "", False),
+           "₪": ("séquel", "séqueles", "agorá", "agorot", False)},
+    "it": {"$": ("dollaro", "dollari", "centesimo", "centesimi", False),
+           "€": ("euro", "euro", "centesimo", "centesimi", False),
+           "£": ("sterlina", "sterline", "penny", "pence", True),
+           "¥": ("yen", "yen", "", "", False),
+           "₪": ("shekel", "shekel", "agorà", "agorot", False)},
+    "he": {"$": ("דולר", "דולר", "סנט", "סנט", False),
+           "€": ("יורו", "יורו", "סנט", "סנט", False),
+           "£": ("פאונד", "פאונד", "פני", "פני", False),
+           "¥": ("ין", "ין", "", "", False),
+           "₪": ("שקל", "שקלים", "אגורה", "אגורות", False)},
+}
+_CURRENCY_ALIASES = {'ש"ח': "₪", "ש״ח": "₪"}
+_AMOUNT = r"\d{1,3}(?:[.,\u00a0\u202f]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
+_CURRENCY_SIGN = r"[$€£¥₪]|ש[\"״]ח"
+_CURRENCY_BEFORE_RE = re.compile(
+    rf"(?<![\w$€£¥₪])({_CURRENCY_SIGN})\s?({_AMOUNT})(?![\d])(?![.,]\d)"
+)
+_CURRENCY_AFTER_RE = re.compile(
+    _NUM_LEFT + rf"(?<![.,]\d)({_AMOUNT})\s?({_CURRENCY_SIGN})(?![\w])"
+)
+
 
 def canonical_lang(lang: str) -> str:
     """Map language aliases (``ge``, ``en-us``) onto the model's codes."""
     return LANG_CODE_ALIASES.get(lang.lower(), lang.lower())
+
+
+def has_foreign_lang_span(text: str, lang: str) -> bool:
+    """True when ``text`` holds an inline ``<xx>…</xx>`` span in a language other than ``lang``.
+
+    Only those make the text mixed-language. A span in the base language
+    (``<en>`` inside English text) is routed to the same G2P, so counting it
+    switched on the mixed-text pace blend for a plain English sentence.
+    """
+    base = canonical_lang(lang)
+    return any(canonical_lang(m.group(1)) != base for m in _INLINE_LANG_PAIR_RE.finditer(text))
 
 
 def strip_emoji(text: str) -> str:
@@ -143,24 +225,65 @@ def _map_en_spans(text: str, lang: str, fn) -> str:
     return "".join(out)
 
 
-def _maybe_slow(inner: str, inside_en: bool) -> str:
-    """Wrap in slow markers unless inside an ``<en>`` span, which they'd split."""
-    return inner if inside_en else mark_slow_segment(inner)
+@lru_cache(maxsize=1)
+def _hebrew_num2words():
+    """The optional ``hebrew_num2words`` module, or ``None`` when not installed."""
+    try:
+        import hebrew_num2words
+    except ImportError:
+        return None
+    return hebrew_num2words
 
 
 def _spoken_number(value: Union[int, float], lang: str) -> Optional[str]:
-    """``num2words`` with a ``None`` fallback for unsupported language/value pairs."""
+    """``num2words`` with a ``None`` fallback for unsupported language/value pairs.
+
+    English drops num2words' commas, "and" and hyphens: "one thousand, two
+    hundred and fifty" puts two pauses inside one number, polyg2p — the G2P the
+    current models were trained with — says "one thousand two hundred fifty",
+    and it reads a hyphenated "twenty-one" as one unknown compound
+    ("twentiwon").
+    """
     try:
-        return num2words(value, lang=lang)
+        words = num2words(value, lang=lang)
     except Exception:
         return None
+    return _tidy_english(words) if lang == "en" else words
 
 
-def _spoken_ordinal(value: int, lang: str) -> Optional[str]:
+def _tidy_english(words: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r",|-|\band\b", " ", words)).strip()
+
+
+def _spoken_ordinal(value: int, lang: str, feminine: bool = False) -> Optional[str]:
     try:
-        return num2words(value, to="ordinal", lang=lang)
+        words = num2words(value, to="ordinal", lang=lang)
     except Exception:
         return _spoken_number(value, lang)
+    if lang == "en":
+        return _tidy_english(words)
+    if feminine and lang in ("es", "it"):
+        # num2words only has the masculine: tercero → tercera, terzo → terza.
+        words = re.sub(r"o\b", "a", words)
+    return words
+
+
+def _spoken_year(value: int, lang: str) -> Optional[str]:
+    """Years the way they are said: nineteen ninety-nine, neunzehnhundertneunundachtzig.
+
+    English pairs the digits for 1100–1999 and 2010–2099 (2005 stays "two
+    thousand five"); German does so for 1100–1999. Everything else is a plain
+    cardinal, which is also how Spanish and Italian read years.
+    """
+    pairs = {"en": (1100 <= value <= 1999 or 2010 <= value <= 2099),
+             "de": 1100 <= value <= 1999}.get(lang, False)
+    if pairs:
+        try:
+            words = num2words(value, to="year", lang=lang)
+        except Exception:
+            return _spoken_number(value, lang)
+        return _tidy_english(words) if lang == "en" else words
+    return _spoken_number(value, lang)
 
 
 def _spoken_digits(digits: str, lang: str) -> str:
@@ -169,6 +292,57 @@ def _spoken_digits(digits: str, lang: str) -> str:
         return " ".join(_HEBREW_DIGIT_WORDS[d] for d in digits if d.isdigit())
     words = [_spoken_number(int(d), lang) for d in digits if d.isdigit()]
     return " ".join(w for w in words if w)
+
+
+def _parse_number(raw: str, lang: str) -> Optional[tuple[int, Optional[str]]]:
+    """Split ``raw`` into (integer, fractional digits) for ``lang``'s separators.
+
+    ``en``/``he`` group thousands with ``,`` and use ``.`` as the decimal point;
+    ``de``/``es``/``it`` the reverse. A grouping mark is only a thousands
+    separator when every group after it has exactly three digits, so ``3,5`` is
+    still three and a half in English and ``3.5`` in German. A (
+    narrow) no-break space between three-digit groups also groups thousands.
+    """
+    thou, dec = (".", ",") if lang in _COMMA_DECIMAL_LANGS else (",", ".")
+    body, frac = raw, None
+    if dec in body:
+        body, _, frac = body.rpartition(dec)
+        if not frac.isdigit() or dec in body:
+            return None
+    groups = re.split(rf"[{re.escape(thou)}\u00a0\u202f]", body)
+    if len(groups) > 1:
+        if not all(len(g) == 3 for g in groups[1:]) or not 1 <= len(groups[0]) <= 3:
+            if frac is None and len(groups) == 2:
+                # "3.5" in German text: a decimal written English-style.
+                body, frac = groups
+                groups = [body]
+            else:
+                return None
+    digits = "".join(groups)
+    if not digits.isdigit():
+        return None
+    return int(digits), frac
+
+
+def _spoken_decimal(integer: int, frac: str, lang: str) -> Optional[str]:
+    """3.14 → three point one four, 2,5 → zwei Komma fünf, 0,75 → cero coma setenta y cinco.
+
+    English reads the fraction digit by digit. German, Spanish and Italian read
+    a short fraction without a leading zero as a number, the way polyg2p does.
+    """
+    head = _spoken_number(integer, lang)
+    if head is None:
+        return None
+    if lang == "he":
+        return f"{head} נקודה {_spoken_digits(frac, 'he')}"
+    word = _DECIMAL_WORDS.get(lang)
+    if word is None:
+        return None
+    if lang != "en" and len(frac) <= 2 and not frac.startswith("0"):
+        tail = _spoken_number(int(frac), lang)
+    else:
+        tail = _spoken_digits(frac, lang)
+    return f"{head} {word} {tail}" if tail else None
 
 
 def mark_slow_segment(inner: str) -> str:
@@ -182,7 +356,14 @@ def strip_slow_markers(text: str) -> str:
 
 
 def split_slow_segments(text: str) -> list[tuple[str, bool]]:
-    """Split prepared text into ``(segment, is_slow)`` pairs."""
+    """Split prepared text into ``(segment, is_slow)`` pairs.
+
+    Each segment is synthesized as its own utterance, and the tokenizer ends any
+    utterance without final punctuation with a full stop — which the model reads
+    as the end of a sentence. Every segment but the last therefore ends in a
+    comma instead, so a phone number in the middle of a sentence gets a short
+    pause on each side, not a sentence break.
+    """
     if SLOW_MARK_OPEN not in text:
         return [(text, False)]
 
@@ -202,24 +383,30 @@ def split_slow_segments(text: str) -> list[tuple[str, bool]]:
         if tail:
             parts.append((tail, False))
 
-    # A trailing "." after a slow span would otherwise be synthesized on its own,
-    # which the model tends to vocalize as a stray vowel. Keep punctuation-only
-    # fragments with the segment they belong to.
+    # A trailing "." after a slow span would otherwise be synthesized on its own
+    # (or open the next segment), which the model tends to vocalize as a stray
+    # vowel. Punctuation that follows a span belongs to the span.
     merged: list[tuple[str, bool]] = []
     for chunk, is_slow in parts:
-        if merged and re.fullmatch(r"[.!?,;:…]+", chunk):
+        lead = re.match(r"[.!?,;:…]+", chunk)
+        if merged and lead:
             previous, previous_is_slow = merged[-1]
-            merged[-1] = (f"{previous}{chunk}", previous_is_slow)
-        else:
-            merged.append((chunk, is_slow))
+            merged[-1] = (f"{previous}{lead.group(0)}", previous_is_slow)
+            chunk = chunk[lead.end():].strip()
+            if not chunk:
+                continue
+        merged.append((chunk, is_slow))
+    for i, (chunk, is_slow) in enumerate(merged[:-1]):
+        if not _TERMINAL_PUNCT_RE.search(chunk):
+            merged[i] = (f"{chunk},", is_slow)
     return merged or [(text, False)]
 
 
 # ── punctuation / markup ─────────────────────────────────────────────────────
 def strip_silent_separator_tokens(text: str) -> str:
     """Drop separators that are punctuation for the eye but noise for the ear."""
-    text = re.sub(r"(?<=[֐-׿])[-–—‑]+(?=[A-Za-z0-9])", " ", text)
-    text = re.sub(r"(?<=[A-Za-z0-9])[-–—‑]+(?=[֐-׿])", " ", text)
+    text = re.sub(rf"(?<=[{_HEB}])[-–—‑]+(?=[A-Za-z0-9])", " ", text)
+    text = re.sub(rf"(?<=[A-Za-z0-9])[-–—‑]+(?=[{_HEB}])", " ", text)
     text = re.sub(r"(?<![A-Za-z])\s*[-–—‑]+\s*(?![A-Za-z])", " ", text)
     text = re.sub(r"(?<!\d)\s*:+\s*(?!\d)", " ", text)
     return re.sub(r"\s+", " ", text).strip()
@@ -281,18 +468,18 @@ def strip_hebrew_abbreviation_quotes(text: str, lang: str = "he") -> str:
     """
     if canonical_lang(lang) != "he":
         return text
-    return re.sub(r"(?<=[֐-׿])[\"״](?=[֐-׿])", "", text)
+    return re.sub(rf"(?<=[{_HEB}])[\"״](?=[{_HEB}])", "", text)
 
 
 def normalize_phonetic_geresh(text: str, lang: str = "he") -> str:
     """Use the Hebrew geresh for phonetic apostrophes after ג/צ/ז."""
     if canonical_lang(lang) != "he":
         return text
-    return re.sub(r"(?<=[גצז])'(?=[֐-׿])", "׳", text)
+    return re.sub(rf"(?<=[גצז])'(?=[{_HEB}])", "׳", text)
 
 
 _GERESH_LOANWORD_RE = re.compile(
-    r"(?<![֐-׿])(?:ג['׳]מיני|מנג['׳]ר)(?![֐-׿])"
+    rf"(?<![{_HEB}])(?:ג['׳]מיני|מנג['׳]ר)(?![{_HEB}])"
 )
 _GERESH_LOANWORD_EN = {
     "ג'מיני": "Gemini", "ג׳מיני": "Gemini",
@@ -319,14 +506,23 @@ def strip_hebrew_inword_hyphens(text: str, lang: str = "he") -> str:
     """Join hyphenated Hebrew compounds: באז-וורד → באזוורד."""
     if canonical_lang(lang) != "he":
         return text
-    return re.sub(r"(?<=[֐-׿])[-–—‑]+(?=[֐-׿])", "", text)
+    return re.sub(rf"(?<=[{_HEB}])[-–—‑]+(?=[{_HEB}])", "", text)
 
 
 def expand_hebrew_lamed_before_latin(text: str, lang: str = "he") -> str:
     """Avoid one-letter Hebrew fragments in mixed text: ל-GPU → אל GPU."""
     if canonical_lang(lang) != "he":
         return text
-    return re.sub(r"(?<![֐-׿])ל\s*[-–—‑]?\s*(?=[A-Za-z0-9])", "אל ", text)
+    return re.sub(rf"(?<![{_HEB}])ל\s*[-–—‑]?\s*(?=[A-Za-z])", "אל ", text)
+
+
+def _glue_hebrew_prefixes(text: str) -> str:
+    """ב-14:30 → ב14:30, so the expanded number keeps its prefix: בארבע עשרה.
+
+    Without this the hyphen is later dropped as a separator and the prefix is
+    left as a one-letter word, which the G2P reads as a letter name.
+    """
+    return re.sub(rf"(?<![{_HEB}])([ובכלמשה]{{1,3}})[-–‑](?=\d)", r"\1", text)
 
 
 # ── codes, emails, numbers ───────────────────────────────────────────────────
@@ -348,22 +544,33 @@ def expand_emails(text: str, lang: str = "he") -> str:
     """Route addresses through English G2P as spoken words.
 
     Runs before :func:`expand_alphanumeric_codes`, which would otherwise spell
-    the letter+digit parts of an address one character at a time.
+    the letter+digit parts of an address one character at a time. English text
+    gets the words without an ``<en>`` span: a span there is a no-op for G2P but
+    would switch on the mixed-language pace blend for the whole utterance.
     """
+    lang = canonical_lang(lang)
+
     def repl(m: re.Match[str]) -> str:
-        return f"<en>{email_to_spoken_english(m.group(0))}</en>"
+        spoken = email_to_spoken_english(m.group(0))
+        return spoken if lang == "en" else f"<en>{spoken}</en>"
 
     def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
         return segment if inside_en else _EMAIL_RE.sub(repl, segment)
 
-    return _map_en_spans(text, canonical_lang(lang), expand)
+    return _map_en_spans(text, lang, expand)
 
 
 def should_spell_alphanumeric_token(token: str) -> bool:
-    """True when a token mixes Latin letters and digits and should be spelled."""
+    """True when a token mixes Latin letters and digits and should be spelled.
+
+    Ordinals (``3rd``) and decades (``1990s``) mix letters and digits too, but
+    they are words: the ordinal expander and the G2P read them.
+    """
     if not token or "@" in token:
         return False
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9\-_/]*", token):
+        return False
+    if re.fullmatch(r"\d+(?:st|nd|rd|th|s)", token, re.IGNORECASE):
         return False
     letters = [c for c in token if c.isascii() and c.isalpha()]
     digits = [c for c in token if c.isdigit()]
@@ -377,35 +584,33 @@ def should_spell_alphanumeric_token(token: str) -> bool:
 def spell_alphanumeric_code(code: str, lang: str = "he") -> str:
     """Spell a letter+digit code (ticket, tracking, model number) as one slow span.
 
-    Letters are read in English via an ``<en>`` span; each separator-delimited
-    digit group is read digit by digit in ``lang``, groups joined by a short
-    comma pause (a full stop makes the model stretch one pause and rush the
-    next, so the digit tempo sounds uneven).
+    Letters are spelled in ``lang`` — except in Hebrew text, where they go to
+    English G2P via an ``<en>`` span because the Hebrew G2P has no Latin letter
+    names. Digits are read one by one in ``lang``, and separator-delimited
+    groups are joined by a short comma pause (a full stop makes the model
+    stretch one pause and rush the next, so the digit tempo sounds uneven).
     """
     lang = canonical_lang(lang)
-    letters: list[str] = []
-    digit_groups: list[str] = []
-
+    groups: list[str] = []
+    prev_seg = ""
     for seg in re.split(r"[-_/]+", code):
-        if not seg:
+        # Letter and digit runs keep their order: X7K9 is "X seven K nine".
+        runs = []
+        for run in re.findall(r"[A-Za-z]+|\d+", seg):
+            if run.isdigit():
+                runs.append(_spoken_digits(run, lang))
+            else:
+                spelled = " ".join(run.upper())
+                runs.append(f"<en>{spelled}</en>" if lang == "he" else spelled)
+        if not runs:
             continue
-        seg_letters = [c.upper() for c in seg if c.isascii() and c.isalpha()]
-        seg_digits = "".join(c for c in seg if c.isdigit())
-        if seg_letters:
-            letters.extend(seg_letters)
-        if seg_digits:
-            digit_groups.append(seg_digits)
-
-    digit_parts = [w for w in (_spoken_digits(g, lang) for g in digit_groups) if w]
-    if not letters and not digit_parts:
-        return ""
-
-    letters_block = f"<en>{' '.join(letters)}</en>" if letters else ""
-    digits_block = " , ".join(digit_parts)
-    if digits_block:
-        digits_block += " ."  # guard the last group against the vocoder end-crop
-    inner = " ".join(part for part in (letters_block, digits_block) if part)
-    return mark_slow_segment(inner)
+        if groups and not any(c.isdigit() for c in prev_seg):
+            # A letters-only prefix (IL-4829, GPT-4) is read with what follows it.
+            groups[-1] = f"{groups[-1]} {' '.join(runs)}"
+        else:
+            groups.append(" ".join(runs))
+        prev_seg = seg
+    return mark_slow_segment(", ".join(groups)) if groups else ""
 
 
 def expand_alphanumeric_codes(text: str, lang: str = "he") -> str:
@@ -433,7 +638,12 @@ def expand_alphanumeric_codes(text: str, lang: str = "he") -> str:
 
 
 def expand_list_markers(text: str, lang: str = "he") -> str:
-    """Turn ``1. item`` list markers into spoken counters (אחד / one, …)."""
+    """Turn ``1. item`` list markers into spoken counters (אחד / one, …).
+
+    Only at the start of a line or after a sentence/colon break: mid-sentence,
+    ``am 3. Mai`` is a German ordinal date, not a list item, and reading it as
+    a counter put a full stop inside the sentence.
+    """
     def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
         if inside_en:
             return segment
@@ -464,90 +674,359 @@ def expand_plus_sign(text: str, lang: str = "he") -> str:
     return _map_en_spans(text, canonical_lang(lang), expand)
 
 
-def expand_phone_numbers(text: str, lang: str = "he") -> str:
-    """Read phone and service numbers digit by digit rather than as cardinals.
+def _currency_words(sign: str, amount: str, lang: str) -> Optional[str]:
+    """$1,250.50 → one thousand two hundred fifty dollars and fifty cents.
 
-    ``03-5551234`` → אפס שלוש חמש חמש חמש אחת שתיים שלוש ארבע, ``*6700`` →
-    כוכבית שש שבע אפס אפס. Hebrew only: number formats and the "star" prefix are
-    local conventions.
+    Hebrew keeps the digits and only spells the unit (20 ₪ → 20 שקלים): the
+    number itself is left to the Hebrew number pass, which agrees it with the
+    noun's gender.
     """
-    if canonical_lang(lang) != "he":
-        return text
+    units = _CURRENCY_UNITS.get(lang, {}).get(_CURRENCY_ALIASES.get(sign, sign))
+    parsed = _parse_number(amount, lang)
+    if units is None or parsed is None:
+        return None
+    one, many, minor_one, minor_many, feminine = units
+    major, frac = parsed
+    minor = int((frac + "0")[:2]) if frac else 0
+    if minor and not minor_many:
+        return None  # ¥12.50: no minor unit to read, leave it to the number pass
+    if lang == "he":
+        major_part = f"{one} אחד" if major == 1 else f"{major} {many}"
+        if not minor:
+            return major_part
+        minor_part = f"{minor_one} אחת" if minor == 1 else f"{minor} {minor_many}"
+        return f"{major_part} ו{minor_part}" if major else minor_part
+
+    def count(n: int, singular: str, plural: str, fem: bool) -> Optional[str]:
+        words = _spoken_number(n, lang)
+        if words is None:
+            return None
+        if lang in ("es", "it") and words.endswith("uno"):
+            # Before a noun "uno" shortens: un euro, veintiún dólares, una libra.
+            short = "una" if fem else ("ún" if words.endswith("iuno") else "un")
+            words = words[:-3] + short
+        elif lang == "de":
+            words = re.sub(r"eins$", "ein", words)
+        return f"{words} {singular if n == 1 else plural}"
+
+    major_part = count(major, one, many, feminine)
+    if major_part is None:
+        return None
+    if not minor:
+        return major_part
+    if lang == "de":
+        minor_words = _spoken_number(minor, lang)
+        return f"{major_part} {minor_words}" if major else count(minor, minor_one, minor_many, False)
+    minor_part = count(minor, minor_one, minor_many, False)
+    if minor_part is None:
+        return None
+    if not major:
+        return minor_part
+    glue = {"en": "and", "es": "con", "it": "e"}[lang]
+    return f"{major_part} {glue} {minor_part}"
+
+
+def expand_currency(text: str, lang: str = "he") -> str:
+    """Read prices with their unit after the amount: ``$5`` → five dollars, ``20 €`` → zwanzig Euro.
+
+    Runs before the code speller, the abbreviation-quote stripper and the
+    number pass: left alone, ``$1,250.50`` reached the number pass with the sign
+    still attached and the G2P read "dollars one point two five".
+    """
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        def repl_before(m: re.Match[str]) -> str:
+            return _currency_words(m.group(1), m.group(2), seg_lang) or m.group(0)
+
+        def repl_after(m: re.Match[str]) -> str:
+            return _currency_words(m.group(2), m.group(1), seg_lang) or m.group(0)
+
+        segment = _CURRENCY_BEFORE_RE.sub(repl_before, segment)
+        return _CURRENCY_AFTER_RE.sub(repl_after, segment)
+
+    return _map_en_spans(text, canonical_lang(lang), expand)
+
+
+def expand_ordinals(text: str, lang: str = "he") -> str:
+    """Read written ordinals: 3rd → third, 3º → tercero/terzo, am 3. Mai → am dritten Mai.
+
+    English also gets its decades (1990s → nineteen nineties) and the day in
+    "March 3" (→ March third) here.
+
+    Runs before the code speller, which used to spell ``3rd`` as "R D three",
+    and before the list-marker pass, which read German ``3.`` as a counter.
+    Hebrew ``ה-3`` → השלישי is left to the Hebrew number pass.
+    """
+    lang = canonical_lang(lang)
+
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        if seg_lang == "en":
+            segment = re.sub(
+                _NUM_LEFT + r"(\d+)(st|nd|rd|th)\b",
+                lambda m: _spoken_ordinal(int(m.group(1)), "en") or m.group(0),
+                segment,
+                flags=re.IGNORECASE,
+            )
+            segment = re.sub(_NUM_LEFT + r"(\d{3}0)s\b", _english_decade, segment)
+            months = "|".join(_MONTH_NAMES["en"])
+            return re.sub(
+                rf"\b({months})\s+(\d{{1,2}})\b(?![:.,]?\d)",
+                lambda m: f"{m.group(1)} {_spoken_ordinal(int(m.group(2)), 'en')}"
+                if 1 <= int(m.group(2)) <= 31 else m.group(0),
+                segment,
+            )
+        if seg_lang in ("es", "it"):
+            return re.sub(
+                _NUM_LEFT + r"(\d+)\.?([ºª])",
+                lambda m: _spoken_ordinal(int(m.group(1)), seg_lang, m.group(2) == "ª")
+                or m.group(0),
+                segment,
+            )
+        if seg_lang == "de":
+            return _expand_german_ordinals(segment)
+        return segment
+
+    return _map_en_spans(text, lang, expand)
+
+
+def _english_decade(m: re.Match[str]) -> str:
+    """1990s → nineteen nineties."""
+    words = _spoken_year(int(m.group(1)), "en")
+    if not words:
+        return m.group(0)
+    return re.sub(r"y$", "ies", words) if words.endswith("y") else f"{words}s"
+
+
+def _german_ordinal(n: int, prev_word: str) -> Optional[str]:
+    word = _spoken_ordinal(n, "de")
+    if word is None:
+        return None
+    return f"{word}n" if prev_word.lower() in _DE_DATIVE_WORDS else word
+
+
+def _expand_german_ordinals(segment: str) -> str:
+    """``am 3. Mai`` → am dritten Mai, ``der 2. Versuch`` → der zweite Versuch.
+
+    A number with a period is an ordinal when a month name follows, or when an
+    article or preposition precedes it and a word follows; otherwise the period
+    may just end a sentence ("Ich habe 3. Dann …").
+    """
+    months = "|".join(_MONTH_NAMES["de"])
+
+    def repl_month(m: re.Match[str]) -> str:
+        prev = re.findall(r"(\w+)\s*$", segment[:m.start()])
+        word = _german_ordinal(int(m.group(1)), prev[0] if prev else "")
+        return f"{word} " if word else m.group(0)
+
+    segment = re.sub(
+        rf"(?<![\d.])\b(\d{{1,2}})\.\s+(?=(?:{months})\b)", repl_month, segment
+    )
+
+    def repl_article(m: re.Match[str]) -> str:
+        word = _german_ordinal(int(m.group(2)), m.group(1))
+        return f"{m.group(1)} {word} " if word else m.group(0)
+
+    articles = "|".join(sorted(_DE_ORDINAL_ARTICLES, key=len, reverse=True))
+    return re.sub(
+        rf"\b({articles})\s+(?<![\d.])(\d{{1,3}})\.\s+(?=[A-Za-zÄÖÜäöüß])",
+        repl_article,
+        segment,
+        flags=re.IGNORECASE,
+    )
+
+
+_PHONE_RE = re.compile(
+    r"(?<![\w.,+])(\+\s?\d{1,3}[\s-]?)?\d{2,4}(?:[\s-]\d{2,8}){1,4}(?![\w])(?![.,]\d)"
+)
+
+
+def _looks_like_phone(match: str) -> bool:
+    """Separate digit groups that make a phone number rather than several numbers.
+
+    A leading ``+`` or ``0`` always does. Hyphenated groups do once they add up
+    to seven digits, unless they are a year range (1990-1995) or a date.
+    Space-separated groups need three or more groups and nine digits — "1 500
+    000" style thousands keep their single-digit first group, so they never
+    match.
+    """
+    groups = re.findall(r"\d+", match)
+    digits = sum(len(g) for g in groups)
+    if not 7 <= digits <= 15:
+        return False
+    if match.lstrip().startswith(("+", "0")):
+        return True
+    if "-" in match:
+        if len(groups) == 2 and all(len(g) == 4 and g[0] in "12" for g in groups):
+            return False
+        return not re.fullmatch(r"\d{1,2}-\d{1,2}-\d{2,4}|\d{4}-\d{2}-\d{2}", match)
+    return len(groups) >= 3 and digits >= 9 and len(groups[0]) >= 3
+
+
+def expand_phone_numbers(text: str, lang: str = "he") -> str:
+    """Read phone and service numbers digit by digit, group by group, as one slow span.
+
+    ``03-5551234`` → אפס שלוש, חמש חמש חמש אחת שתיים שלוש ארבע; ``555-123-4567``
+    → five five five, one two three, four five six seven. ``*6700`` (Hebrew
+    star-service numbers) → כוכבית שש שבע אפס אפס.
+    """
+    lang = canonical_lang(lang)
 
     def repl_star(m: re.Match[str]) -> str:
         return mark_slow_segment("כוכבית " + _spoken_digits(m.group(1), "he"))
 
-    def repl_phone(m: re.Match[str]) -> str:
-        return mark_slow_segment(_spoken_digits(m.group(0).replace("-", ""), "he"))
-
     def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
         if inside_en:
             return segment
-        segment = re.sub(r"\*(\d{2,})", repl_star, segment)
-        return re.sub(r"(?<!\d)0\d{0,2}-\d{6,8}(?!\d)", repl_phone, segment)
 
-    return _map_en_spans(text, canonical_lang(lang), expand)
+        def repl_phone(m: re.Match[str]) -> str:
+            raw = m.group(0)
+            if not _looks_like_phone(raw):
+                return raw
+            groups = re.findall(r"\d+", raw)
+            spoken = [_spoken_digits(g, seg_lang) for g in groups]
+            if raw.lstrip().startswith("+"):
+                spoken[0] = f"{_PLUS_WORDS.get(seg_lang, 'plus')} {spoken[0]}"
+            return mark_slow_segment(", ".join(spoken))
+
+        if seg_lang == "he":
+            segment = re.sub(r"\*(\d{2,})", repl_star, segment)
+        return _PHONE_RE.sub(repl_phone, segment)
+
+    return _map_en_spans(text, lang, expand)
 
 
 def expand_times(text: str, lang: str = "he") -> str:
-    """Read ``HH:MM`` as a clock time (08:15 → שמונה וחמש עשרה / eight fifteen).
+    """Read ``HH:MM`` as a clock time, inline: 14:30 → fourteen thirty / vierzehn Uhr dreißig.
 
     Runs before :func:`expand_ratios`, which would otherwise read the colon as
-    "eight to fifteen".
+    "eight to fifteen". Hebrew is left to hebrew-num2words when it is installed
+    (14:30 → שתיים וחצי).
     """
+    lang = canonical_lang(lang)
+    if lang == "he" and _hebrew_num2words() is not None:
+        return _map_en_spans(text, lang, lambda s, sl, inside: expand_times(s, "en") if inside else s)
+
     def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
         def repl(m: re.Match[str]) -> str:
             hour, minute = int(m.group(1)), int(m.group(2))
+            after = segment[m.end():]
             hour_word = _spoken_number(hour, seg_lang)
-            if hour_word is None:
+            minute_word = _spoken_number(minute, seg_lang) if minute else ""
+            if hour_word is None or minute_word is None:
                 return m.group(0)
-            if minute == 0:
-                return _maybe_slow(hour_word, inside_en)
-            minute_word = _spoken_number(minute, seg_lang)
-            if minute_word is None:
-                return m.group(0)
-            joined = (
-                f"{hour_word} ו{minute_word}"
-                if seg_lang == "he"
-                else f"{hour_word} {minute_word}"
-            )
-            return _maybe_slow(joined, inside_en)
+            if seg_lang == "he":
+                return f"{hour_word} ו{minute_word}" if minute else hour_word
+            if seg_lang == "de":
+                return f"{hour_word} Uhr {minute_word}".strip()
+            if seg_lang == "en":
+                if not minute:
+                    if re.match(r"\s*[ap]\.?m\b", after, re.IGNORECASE):
+                        return hour_word
+                    return f"{hour_word} hundred" if hour > 12 else f"{hour_word} o'clock"
+                return f"{hour_word} oh {minute_word}" if minute < 10 else f"{hour_word} {minute_word}"
+            glue = {"es": " y ", "it": " e "}.get(seg_lang, " ")
+            return f"{hour_word}{glue}{minute_word}" if minute else hour_word
 
-        return _TIME_RE.sub(repl, segment)
+        return (_DE_TIME_RE if seg_lang == "de" else _TIME_RE).sub(repl, segment)
 
-    return _map_en_spans(text, canonical_lang(lang), expand)
+    return _map_en_spans(text, lang, expand)
+
+
+def _hebrew_date_fallback(day: int, month: int, year: int) -> Optional[str]:
+    day_word = _spoken_number(day, "he")
+    year_word = _spoken_number(year, "he")
+    if day_word is None or year_word is None:
+        return None
+    return f"{day_word} {_HEBREW_MONTH_ORDINALS[month]} {year_word}"
+
+
+def _spoken_date(day: int, month: int, year: int, lang: str, prev_word: str) -> Optional[str]:
+    """Words for a date in ``lang``'s own pattern.
+
+    en: December twenty-fifth twenty twenty-four; de: (am) zwölften Mai
+    zweitausendvierundzwanzig; es: doce de mayo de dos mil veinticuatro (but
+    primero for the 1st); it: dodici maggio duemilaventiquattro (primo).
+    """
+    if lang == "he":
+        return _hebrew_date_fallback(day, month, year)
+    months = _MONTH_NAMES.get(lang)
+    year_word = _spoken_year(year, lang)
+    if months is None or year_word is None:
+        return None
+    month_word = months[month - 1]
+    if lang == "en":
+        day_word = _spoken_ordinal(day, "en")
+        return f"{month_word} {day_word} {year_word}" if day_word else None
+    if lang == "de":
+        day_word = _german_ordinal(day, prev_word)
+        return f"{day_word} {month_word} {year_word}" if day_word else None
+    if lang == "es":
+        day_word = "primero" if day == 1 else _spoken_number(day, "es")
+        return f"{day_word} de {month_word} de {year_word}" if day_word else None
+    if lang == "it":
+        day_word = "primo" if day == 1 else _spoken_number(day, "it")
+        return f"{day_word} {month_word} {year_word}" if day_word else None
+    return None
 
 
 def expand_dates(text: str, lang: str = "he") -> str:
-    """Expand day-first numeric dates (``12/05/2024``, ``12.5.24``) into words."""
+    """Expand numeric dates (``12/05/2024``, ``12.5.24``, ``12-05-2024``, ``2024-05-12``) into words, inline.
+
+    Day first, as written in every language here except American English; when
+    the second number cannot be a month (``12/25/2024``) the two are swapped.
+    Hebrew goes to hebrew-num2words when installed (שנים עשר במאי אלפיים עשרים
+    וארבע); it only reads dotted dates, so slashes become dots for it.
+    """
+    lang = canonical_lang(lang)
+    he_n2w = lang == "he" and _hebrew_num2words() is not None
+
     def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
-        def repl(m: re.Match[str]) -> str:
-            day, month, raw_year = int(m.group(1)), int(m.group(2)), m.group(3)
+        def words_for(day: int, month: int, year: int, start: int) -> Optional[str]:
+            if month > 12 >= day:
+                day, month = month, day
             if not (1 <= day <= 31 and 1 <= month <= 12):
-                return m.group(0)
+                return None
+            prev = re.findall(r"(\w+)\s*$", segment[:start])
+            return _spoken_date(day, month, year, seg_lang, prev[0] if prev else "")
+
+        def repl(m: re.Match[str]) -> str:
+            day, month, raw_year = int(m.group(1)), int(m.group(3)), m.group(4)
             year = int(raw_year)
             if len(raw_year) == 2:
                 year += 2000 if year < 70 else 1900
-            year_word = _spoken_number(year, seg_lang)
-            if year_word is None:
-                return m.group(0)
-            if seg_lang == "he":
-                day_word = _spoken_number(day, "he")
-                if day_word is None:
-                    return m.group(0)
-                return _maybe_slow(
-                    f"{day_word} {_HEBREW_MONTH_ORDINALS[month]} {year_word}", inside_en
-                )
-            months = _MONTH_NAMES.get(seg_lang)
-            day_word = _spoken_ordinal(day, seg_lang)
-            if months is None or day_word is None:
-                return m.group(0)
-            glue = _DATE_DAY_MONTH_GLUE.get(seg_lang, " ")
-            return _maybe_slow(
-                f"{day_word}{glue}{months[month - 1]} {year_word}", inside_en
-            )
+            if seg_lang == "he" and he_n2w:
+                return f"{day}.{month}.{year}" if 1 <= month <= 12 and 1 <= day <= 31 else m.group(0)
+            return words_for(day, month, year, m.start()) or m.group(0)
 
+        def repl_iso(m: re.Match[str]) -> str:
+            year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if seg_lang == "he" and he_n2w:
+                return f"{day}.{month}.{year}"
+            return words_for(day, month, year, m.start()) or m.group(0)
+
+        segment = _ISO_DATE_RE.sub(repl_iso, segment)
         return _DATE_RE.sub(repl, segment)
+
+    return _map_en_spans(text, lang, expand)
+
+
+def expand_ranges_and_signs(text: str, lang: str = "he") -> str:
+    """``10-20`` → 10 to 20, ``-5`` → minus 5.
+
+    Without this the hyphen survived between the two number words ("ten-twenty"),
+    which a G2P reads as one compound word, and a minus sign was dropped. Hebrew
+    ranges are left to the number pass: "עד" before a number reads as a clock
+    hour in hebrew-num2words.
+    """
+    def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
+        if inside_en:
+            return segment
+        word = _RANGE_WORDS.get(seg_lang)
+        if word:
+            segment = re.sub(
+                r"(?<![\w.,\-–])(\d+)\s?[-–]\s?(\d+)(?![\w\-–]|[.,]\d)", rf"\1 {word} \2", segment
+            )
+        minus = _MINUS_WORDS.get(seg_lang, _MINUS_WORDS["en"])
+        return re.sub(r"(?:(?<=\s)|^)[-−–](?=\d)", f"{minus} ", segment)
 
     return _map_en_spans(text, canonical_lang(lang), expand)
 
@@ -563,12 +1042,27 @@ def expand_percent_symbols(text: str, lang: str = "he") -> str:
 
 
 def expand_ratios(text: str, lang: str = "he") -> str:
-    """Read ``2:3`` as a ratio. Clock times are already gone by this point."""
+    """Read ``2:3`` as a ratio. Anything that is a valid clock time is left alone."""
     def expand(segment: str, seg_lang: str, inside_en: bool) -> str:
         word = _RATIO_WORDS.get(seg_lang, _RATIO_WORDS["en"])
-        return re.sub(r"(?<!\d)(\d+)\s*:\s*(\d+)(?!\d)", rf"\1 {word} \2", segment)
+
+        def repl(m: re.Match[str]) -> str:
+            if _TIME_RE.fullmatch(f"{m.group(1)}:{m.group(2)}"):
+                return m.group(0)
+            return f"{m.group(1)} {word} {m.group(2)}"
+
+        return re.sub(r"(?<!\d)(\d+)\s*:\s*(\d+)(?!\d)", repl, segment)
 
     return _map_en_spans(text, canonical_lang(lang), expand)
+
+
+def _hebrew_ordinal_fallback(text: str) -> str:
+    """ה3 → השלישי (masculine: without a lexicon the noun's gender is unknown)."""
+    def repl(m: re.Match[str]) -> str:
+        word = _HEBREW_ORDINALS_MASC.get(int(m.group(2)))
+        return f"{m.group(1)}{word}" if word else m.group(0)
+
+    return re.sub(rf"(?<![{_HEB}])([ובכלמש]{{0,2}}ה)(\d{{1,2}})(?!\d|[.,:/]\d)", repl, text)
 
 
 def expand_numbers(text: str, lang: str = "he") -> str:
@@ -579,32 +1073,48 @@ def expand_numbers(text: str, lang: str = "he") -> str:
     is the decimal point follows the language: ``en``/``he`` group with ``,``,
     while ``de``/``es``/``it`` group with ``.`` (so German ``1.500`` is a
     thousand and ``3,5`` is three and a half). A separator that does not form
-    3-digit groups is read as a decimal point either way. Digits inside ``<en>``
-    spans or slow markers are left for those paths to handle.
+    3-digit groups is read as a decimal point either way. Four-digit numbers
+    read as years where the language pairs year digits (``1999`` → nineteen
+    ninety-nine). Digits inside ``<en>`` spans or slow markers are left for those
+    paths to handle.
+
+    Hebrew goes through hebrew-num2words when installed, so the number agrees
+    with the noun it counts (3 ילדים → שלושה ילדים, 2 בנות → שתי בנות).
     """
     lang = canonical_lang(lang)
-    comma_decimal = lang in _COMMA_DECIMAL_LANGS
-    group_re = _GROUPED_INT_DOT_RE if comma_decimal else _GROUPED_INT_COMMA_RE
-    group_mark = "." if comma_decimal else ","
+    he_n2w = _hebrew_num2words() if lang == "he" else None
 
-    def repl_grouped(m: re.Match[str]) -> str:
-        word = _spoken_number(int(m.group(0).replace(group_mark, "")), lang)
-        return word if word else m.group(0)
-
-    def repl_plain(m: re.Match[str]) -> str:
+    def repl(m: re.Match[str]) -> str:
         raw = m.group(0)
-        try:
-            value: Union[int, float] = (
-                float(raw.replace(",", ".")) if ("." in raw or "," in raw) else int(raw)
-            )
-        except ValueError:
+        parsed = _parse_number(raw, lang)
+        if parsed is None:
             return raw
-        word = _spoken_number(value, lang)
-        return word if word else raw
+        integer, frac = parsed
+        if frac:
+            return _spoken_decimal(integer, frac, lang) or raw
+        if raw.isdigit() and len(raw) > 1 and raw.startswith("0"):
+            return _spoken_digits(raw, lang)  # 0800, 007: a code, not a quantity
+        if lang == "en" and raw in ("911", "411", "311", "999"):
+            return _spoken_digits(raw, lang)  # service numbers are said digit by digit
+        if raw.isdigit() and len(raw) == 4:
+            return _spoken_year(integer, lang) or raw
+        words = _spoken_number(integer, lang) or raw
+        if lang == "es" and words.endswith("uno") and _ES_NOUN_FOLLOWS_RE.match(m.string, m.end()):
+            # Before a noun: veintiún libros, un gato.
+            words = words[:-3] + ("ún" if words.endswith("iuno") else "un")
+        return words
 
     def expand_segment(segment: str) -> str:
-        segment = group_re.sub(repl_grouped, segment)
-        return _PLAIN_NUMBER_RE.sub(repl_plain, segment)
+        if he_n2w is not None:
+            # hebrew-num2words re-joins tokens with single spaces; keep the
+            # segment's own edges so it still abuts the protected spans around it.
+            lead = segment[: len(segment) - len(segment.lstrip())]
+            trail = segment[len(segment.rstrip()):]
+            body = segment.strip()
+            return f"{lead}{he_n2w.normalize_numbers(body)}{trail}" if body else segment
+        if lang == "he":
+            segment = _hebrew_ordinal_fallback(segment)
+        return _NUMBER_RE.sub(repl, segment)
 
     parts = _PROTECTED_SPAN_RE.split(text)
     return "".join(
@@ -617,15 +1127,19 @@ def prepare_text_for_synthesis(
 ) -> str:
     """Run the full normalization chain and return synthesis-ready text.
 
-    Order is deliberate: emoji and structural cleanup, then Hebrew spelling quirks, then
+    Order is deliberate: emoji and structural cleanup, then prices (whose ש"ח
+    the Hebrew quote stripper would mangle), Hebrew spelling quirks, ordinals and
     codes (which claim letter+digit tokens before the number expanders see
-    them), then times → dates → percent → ratios → bare numbers.
+    them), then phone numbers → times → dates → ranges → percent → ratios → bare
+    numbers.
 
     With ``mark_slow=False`` the ``【…】`` slow markers are removed from the
     result, leaving plain text for callers that synthesize in one pass.
     """
+    lang = canonical_lang(lang)
     text = strip_emoji(text)
     text = normalize_common_text(text)
+    text = expand_currency(text, lang=lang)
     text = strip_hebrew_abbreviation_quotes(text, lang)
     text = normalize_phonetic_geresh(text, lang)
     text = expand_geresh_loanwords(text, lang)
@@ -633,12 +1147,16 @@ def prepare_text_for_synthesis(
     text = strip_hebrew_inword_hyphens(text, lang)
     text = expand_hebrew_lamed_before_latin(text, lang)
     text = expand_emails(text, lang=lang)
+    text = expand_ordinals(text, lang=lang)
     text = expand_alphanumeric_codes(text, lang=lang)
     text = expand_list_markers(text, lang=lang)
     text = expand_plus_sign(text, lang=lang)
     text = expand_phone_numbers(text, lang=lang)
+    if lang == "he" and _hebrew_num2words() is None:
+        text = _glue_hebrew_prefixes(text)
     text = expand_times(text, lang=lang)
     text = expand_dates(text, lang=lang)
+    text = expand_ranges_and_signs(text, lang=lang)
     text = expand_percent_symbols(text, lang=lang)
     text = expand_ratios(text, lang=lang)
     text = expand_numbers(text, lang=lang)
