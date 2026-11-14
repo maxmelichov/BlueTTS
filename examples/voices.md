@@ -1,13 +1,27 @@
 # Voices
 
-Four style JSONs ship with the repo in [`voices/`](../voices/):
+Fifteen style JSONs ship with the repo in [`voices/`](../voices/), exported from the v3.0.0 model
+(checkpoint 701500; a voice file only works with the model it was exported from):
 
-| voice | file |
-|---|---|
-| `adam` | `voices/adam.json` |
-| `daniel` | `voices/daniel.json` |
-| `lily` | `voices/lily.json` |
-| `noa` | `voices/noa.json` (default) |
+| voice | | file |
+|---|---|---|
+| `maya` | female | `voices/maya.json` |
+| `noa` | female | `voices/noa.json` (default) |
+| `lily` | female | `voices/lily.json` |
+| `tamar` | female | `voices/tamar.json` |
+| `shira` | female | `voices/shira.json` |
+| `yael` | female | `voices/yael.json` |
+| `emma` | female | `voices/emma.json` |
+| `sara` | female | `voices/sara.json` |
+| `adam` | male | `voices/adam.json` |
+| `daniel` | male | `voices/daniel.json` |
+| `david` | male | `voices/david.json` |
+| `jonathan` | male | `voices/jonathan.json` |
+| `ethan` | male | `voices/ethan.json` |
+| `michael` | male | `voices/michael.json` |
+| `ariel` | male | `voices/ariel.json` |
+
+Reference clips: LibriTTS-R (Koizumi et al., 2023; CC BY 4.0), one utterance per voice (the `source` field).
 
 Each holds a `style_ttl` `[1, 50, 256]` and a `style_dp` `[1, 8, 16]` tensor extracted
 from a reference clip. A voice is language-independent — any of them can speak any of

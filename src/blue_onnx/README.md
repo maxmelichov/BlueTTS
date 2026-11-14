@@ -8,7 +8,7 @@ The inference package. Three entry points, in increasing order of control.
 import soundfile as sf
 from blue_onnx import BlueTTS
 
-tts = BlueTTS(onnx_dir="onnx_models", style_json="voices/noa.json")
+tts = BlueTTS(onnx_dir="bluev3_onnx/onnx", style_json="voices/noa.json")
 samples, sr = tts.synthesize("שלום, זהו מודל דיבור בעברית.", lang="he")
 sf.write("out.wav", samples, sr)
 ```
@@ -18,19 +18,23 @@ Defaults suited to arbitrary user text: `normalize_text=True` and peak limiting 
 
 | argument | default | notes |
 |---|---|---|
-| `lang` | `"he"` | one of `he`, `en`, `es`, `de`, `it` |
+| `lang` | `"he"` | one of `he`, `en`, `es`, `de`, `it`; release bundles also `ru`, `yi` |
 | `total_step` | `8` | Euler steps; more is slower and slightly cleaner |
 | `cfg_scale` | `4.0` | classifier-free guidance |
+| `silence_duration` | `0.0` | seconds of silence between sentence chunks |
 | `speed` | `1.0` | duration is divided by this |
 | `normalize_text` | `True` | see [Text normalization](#text-normalization) |
 | `peak_limit` | `0.95` | `None` for raw vocoder output |
+
+A release bundle whose `tts.json` has a `blue_release` section (v3.0.0 on) sets its own
+defaults for `total_step`, `cfg_scale` and `silence_duration`; see [Release bundles](#release-bundles).
 
 ## `load_text_to_speech` — per-call style, chunking, phonemes
 
 ```python
 from blue_onnx import load_text_to_speech, load_voice_style, limit_peak
 
-tts = load_text_to_speech("onnx_models")
+tts = load_text_to_speech("bluev3_onnx/onnx")
 style = load_voice_style(["voices/noa.json"])
 wav, dur = tts("Hello world.", lang="en", style=style, total_step=8,
                normalize_text=True, silence_duration=0.15)
@@ -128,3 +132,33 @@ CPU thread count is `min(8, cpu_count)`, overridable with `ORT_NUM_THREADS`.
 - Output is **not** seeded: `blue_onnx` draws its initial latent from the global NumPy
   RNG, so two identical calls differ. Seed `numpy.random` yourself if you need
   reproducibility.
+
+## Release bundles
+
+A bundle with a `blue_release` section in `onnx/tts.json` (v3.0.0 on) ships its own text
+front end next to `onnx/`, and `blue_onnx` switches to it:
+
+- **G2P.** English, German, Spanish, Italian and Russian go through `polyg2p` (the wheel in the
+  bundle's `frontend/`, data files from `frontend/polyg2p_data` or `POLYG2P_DATA`).
+  Hebrew uses RenikudPlus with the bundle's `frontend/renikud/model.onnx`.
+  `BLUE_G2P_NOLEX=1` switches German / Italian to rules only (`frontend/polyg2p_data_nolex`);
+  `BLUE_ES_VARIANT=es-419` selects Latin American Spanish for the G2P.
+- **Russian, Yiddish.** `ru` goes through polyg2p too (its stress tables are in `frontend/polyg2p_data`);
+  `yi` uses the Yiddish G2P and its context model in the bundle's `frontend/yi`.
+- **Ids.** The phonemes get the model's normalization (`ipa_text.py`) and every chunk is
+  wrapped in `<lang>` … `</lang>` ids, as the model was trained.
+- **Defaults.** In `BlueTTS.synthesize`, `total_step`, `cfg_scale` and `silence_duration` come from
+  `blue_release.inference` (`load_text_to_speech` callers pass them, e.g. 8 steps, CFG 4.0); the fixed
+  edge trim is skipped when `trim_edges` is false.
+- **ONNX only.** `blue_trt` and `blue_pt` do not read `blue_release` yet; use `blue_onnx` for these bundles.
+
+```bash
+uv pip install release/frontend/polyg2p-*.whl    # Linux x86-64, glibc >= 2.34
+```
+
+```python
+tts = BlueTTS(onnx_dir="release/onnx", style_json="release/voices/maya.json")
+samples, sr = tts.synthesize("Hello there.", lang="en")
+```
+
+Bundles without the section load exactly as before.
