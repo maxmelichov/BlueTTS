@@ -20,7 +20,7 @@ from src.blue_onnx import (
     strip_lang_tags_from_phoneme_string,
 )
 from src.blue_onnx import _strip_tags_keep_spans as strip_tags_keep_spans
-from src.blue_onnx.ipa_text import encode_tagged, tagged_len
+from src.blue_onnx.ipa_text import encode_tagged, normalize_ipa_spans, strip_outer_lang_tags, tagged_len
 
 # Shipped config/tts.json: ae.sample_rate, ae.base_chunk_size, ttl.chunk_compress_factor.
 SR, BASE_CHUNK, CCF = 44100, 512, 6
@@ -112,6 +112,52 @@ class TestChunkText(unittest.TestCase):
         chunks = chunk_text(text, max_len=20, in_span=in_span)
         self.assertTrue(all(len(c) <= 20 for c in chunks), chunks)
         self.assertEqual(" ".join(chunks), text)
+
+    def test_kept_spans_are_the_release_string(self):
+        # release bundles keep other-language tags (flagged as inside their span) for encode_tagged
+        ipa = "<he>ʔanˈi ɡˈaʁ,</he> <en>tˈaɪmz skwˈɛɹ</en> <he>!</he>"
+        text, in_span = strip_tags_keep_spans(ipa, "he", keep=True)
+        self.assertEqual(text, strip_outer_lang_tags(ipa, "he"))
+        self.assertEqual(len(in_span), len(text))
+        self.assertEqual("".join(c for c, f in zip(text, in_span) if f), "<en>tˈaɪmz skwˈɛɹ</en>")
+
+    def test_kept_span_not_cut_and_stays_tagged(self):
+        ipa = "<he>ʔanˈi ɡˈaʁ lejˈad</he> <en>tˈaɪmz skwˈɛɹ ænd sˈɛntɹəl pˈɑːɹk</en> <he>kvˈaʁ ʃanˈim ʁabˈot</he>"
+        text, in_span = strip_tags_keep_spans(ipa, "he", keep=True)
+        self.assertEqual(chunk_text(text, max_len=50, in_span=in_span),
+                         ["ʔanˈi ɡˈaʁ lejˈad", "<en>tˈaɪmz skwˈɛɹ ænd sˈɛntɹəl pˈɑːɹk</en> kvˈaʁ ʃanˈim", "ʁabˈot"])
+
+    def test_kept_span_longer_than_a_chunk_closed_and_reopened(self):
+        ipa = "<he>ʃalˈom</he> <en>wˈʌn tˈuː θɹˈiː fˈɔːɹ fˈaɪv sˈɪks</en> <he>toda</he>"
+        text, in_span = strip_tags_keep_spans(ipa, "he", keep=True)
+        plain, plain_span = strip_tags_keep_spans(ipa, "he")
+        chunks = chunk_text(text, max_len=20, in_span=in_span)
+        # the same cuts as without the tags, each English piece in its own <en> pair
+        self.assertEqual([_untag(c) for c in chunks], chunk_text(plain, max_len=20, in_span=plain_span))
+        self.assertEqual(chunks[0], "ʃalˈom")
+        self.assertTrue(all(c.count("<en>") == c.count("</en>") for c in chunks), chunks)
+        self.assertTrue(all(c.startswith("<en>") and c.endswith("</en>") for c in chunks[1:-1]), chunks)
+
+    def test_ids_counted_with_each_span_normalised_as_its_language(self):
+        # English 'ʦ' stays one id inside a Hebrew chunk; the Hebrew rules would spell it 'ts'
+        s = "ʔanˈi ʁaʔˈiti <en>kˈæʦ</en> belˈondon"
+        n = tagged_len(s, "he")
+        self.assertEqual(n, len(encode_tagged(s, "he", {c: 1 for c in "<>/he" + normalize_ipa_spans(s, "he")})))
+        self.assertEqual(n, tagged_len(_untag(s), "he") - 1)
+        text, in_span = strip_tags_keep_spans(f"<he>{s.replace('<en>', '</he> <en>').replace('</en>', '</en> <he>')}</he>",
+                                              "he", keep=True)
+        self.assertEqual(text, s)
+        self.assertEqual(chunk_text(text, max_len=300, fits=lambda c: tagged_len(c, "he") <= n, in_span=in_span), [s])
+
+    def test_hard_cut_never_splits_a_tag(self):
+        text = "<en>" + "a" * 30 + "</en>"
+        chunks = chunk_text(text, max_len=12, in_span=[True] * len(text))
+        self.assertEqual("".join(_untag(c) for c in chunks), "a" * 30)
+        self.assertTrue(all(re.fullmatch(r"<en>a+</en>", c) for c in chunks), chunks)
+
+
+def _untag(s: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"</?\w+>", " ", s)).strip()
 
 
 def _sentence(rng: random.Random, n: int) -> str:

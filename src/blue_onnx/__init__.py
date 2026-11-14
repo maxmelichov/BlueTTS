@@ -13,6 +13,7 @@ from unicodedata import normalize
 import numpy as np
 import onnxruntime as ort
 
+from .ipa_text import strip_outer_lang_tags, tag_latin_runs
 from .text_norm import (  # noqa: F401  (re-exported as the package's public API)
     EMOJI_RE,
     SLOW_MARK_OPEN,
@@ -521,6 +522,13 @@ class TextToSpeech:
         from .ipa_text import tagged_len
         return lambda s: tagged_len(s, lang) <= int(limit)
 
+    def _flatten_tags(self, phonemes: str, lang: str) -> str:
+        """Release bundles keep other-language spans for :func:`encode_tagged` (their own IPA normalisation);
+        older bundles drop every tag, as their tokenizer does."""
+        if self.text_processor.release:
+            return strip_outer_lang_tags(phonemes, lang)
+        return strip_lang_tags_from_phoneme_string(phonemes)
+
     def _infer(
         self,
         text_list: list[str],
@@ -666,6 +674,12 @@ class TextToSpeech:
                 ]
             else:
                 text = prepare_text_for_synthesis(text, lang=lang)
+        if phonemize and self.text_processor.release:
+            if isinstance(text, list):
+                langs = lang if isinstance(lang, list) else [lang] * len(text)
+                text = [tag_latin_runs(t, lg) for t, lg in zip(text, langs)]
+            else:
+                text = tag_latin_runs(text, lang)
         # Computed after normalization: it can introduce <en> spans (emails,
         # spelled codes, loanwords) that should count as mixed-language text.
         if isinstance(text, list):
@@ -686,7 +700,7 @@ class TextToSpeech:
                     self.g2p.phonemize(t, lang=lang_code)
                     for t, lang_code in zip(text, lang)
                 ]
-            text = [strip_lang_tags_from_phoneme_string(t) for t in text]
+            text = [self._flatten_tags(t, lg) for t, lg in zip(text, lang)]
             return self._infer(
                 text,
                 lang,
@@ -715,7 +729,7 @@ class TextToSpeech:
             seg_pace_dpt = SLOW_PACE_DPT_REF if is_slow else pace_dpt_ref
             if phonemize and self.g2p is not None:
                 seg_text = self.g2p.phonemize(seg_text, lang=lang)
-            seg_text, in_span = _strip_tags_keep_spans(seg_text, lang)
+            seg_text, in_span = _strip_tags_keep_spans(seg_text, lang, keep=self.text_processor.release)
             for chunk in chunk_text(seg_text, max_len=max_len, fits=self._chunk_fits(lang), in_span=in_span):
                 wav, dur_onnx = self._infer(
                     [chunk],
@@ -781,19 +795,21 @@ class TextToSpeech:
                 prepare_text_for_synthesis(t, lang=lang_code, mark_slow=False)
                 for t, lang_code in zip(text_list, lang_list)
             ]
+        phonemize = not text_is_phonemes
+        if phonemize and self.text_processor.release:
+            text_list = [tag_latin_runs(t, lg) for t, lg in zip(text_list, lang_list)]
         has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text_list)
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
             else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
         )
-        phonemize = not text_is_phonemes
         if phonemize and self.g2p is not None:
             text_list = [
                 self.g2p.phonemize(t, lang=lang_code)
                 for t, lang_code in zip(text_list, lang_list)
             ]
-        text_list = [strip_lang_tags_from_phoneme_string(t) for t in text_list]
+        text_list = [self._flatten_tags(t, lg) for t, lg in zip(text_list, lang_list)]
         return self._infer(
             text_list,
             lang_list,
@@ -1173,7 +1189,10 @@ def chunk_text(
         max_len: Maximum length of each chunk in characters (default: 300)
         fits: Optional further limit on a chunk (release bundles: its ids against ``max_chunk_tokens``)
         in_span: Per character of ``text``, whether it is inside an inline ``<lang>`` span
-            (see :func:`_strip_tags_keep_spans`); a long sentence is cut there only as a last resort
+            (see :func:`_strip_tags_keep_spans`); a long sentence is cut there only as a last resort.
+            Release bundles keep other-language spans' tags in ``text`` (flagged as inside): they are
+            not counted as characters, a chunk is checked against ``fits`` with its spans closed, and
+            a span cut by a chunk boundary is closed and reopened (see :func:`_close_spans`).
 
     Returns:
         List of text chunks
@@ -1184,7 +1203,7 @@ def chunk_text(
     420-character sentence became one 18 s chunk, far past the lengths the model was trained on.
     """
     def ok(s: str) -> bool:
-        return len(s) <= max_len and (fits is None or fits(s))
+        return _untagged_len(s) <= max_len and (fits is None or fits(_balance_spans(s)))
 
     chunks = []
     for p0, p1 in _stripped_parts(text, 0, len(text), _PARAGRAPH_RE):
@@ -1207,7 +1226,7 @@ def chunk_text(
         if current_chunk:
             chunks.append(current_chunk.strip())
 
-    return chunks
+    return _close_spans(chunks)
 
 
 def _stripped_parts(text: str, start: int, end: int, sep: re.Pattern) -> list[tuple[int, int]]:
@@ -1243,7 +1262,7 @@ def _cut_sentence(s: str, ok: Callable[[str], bool], in_span: Optional[list[bool
         cut = next((c for t in tries if (c := _last_cut(s, flags, ok, *t))), 0)
         if not cut:
             cut = len(s) - 1
-            while cut > 1 and not ok(s[:cut]):
+            while cut > 1 and (not ok(s[:cut]) or _inside_tag(s, cut)):
                 cut -= 1
         piece = s[:cut].strip()
         if piece:
@@ -1267,15 +1286,24 @@ def _last_cut(s: str, flags: list[bool], ok: Callable[[str], bool], marks: str, 
     return 0
 
 
-def _strip_tags_keep_spans(phonemes: str, lang: str) -> tuple[str, list[bool]]:
-    """:func:`strip_lang_tags_from_phoneme_string`, plus which characters were inside an other-language span."""
+def _strip_tags_keep_spans(phonemes: str, lang: str, keep: bool = False) -> tuple[str, list[bool]]:
+    """:func:`strip_lang_tags_from_phoneme_string`, plus which characters were inside an other-language span.
+
+    ``keep`` (release bundles): other-language tags stay in the text, flagged as inside their span, so the
+    string is :func:`ipa_text.strip_outer_lang_tags`'s and :func:`encode_tagged` normalises each span as its
+    own language."""
     chars, flags, inside = [], [], None
     for tok in re.split(r"(</?\w+>)", phonemes):
         if _LANG_TAG_RE.fullmatch(tok):
             name = tok.strip("</>")
-            inside = None if tok.startswith("</") else (name if name != lang else None)
-            chars.append(" ")
-            flags.append(False)
+            other = name != lang
+            if keep and other:
+                chars.extend(tok)
+                flags.extend([True] * len(tok))
+            else:
+                chars.append(" ")
+                flags.append(False)
+            inside = None if tok.startswith("</") else (name if other else None)
         else:
             chars.extend(tok)
             flags.extend([inside is not None] * len(tok))
@@ -1293,3 +1321,41 @@ def _strip_tags_keep_spans(phonemes: str, lang: str) -> tuple[str, list[bool]]:
     lead = len(text) - len(text.lstrip())
     text_s = text.strip()
     return text_s, out_flags[lead:lead + len(text_s)]
+
+
+def _untagged_len(s: str) -> int:
+    # Inline tags (kept for release bundles) carry no ids: length as before they were kept.
+    return len(_LANG_TAG_RE.sub("", s))
+
+
+def _balance_spans(s: str) -> str:
+    """``s`` as :func:`_close_spans` would send it on its own: a leading ``</xx>`` gets its ``<xx>``, a span
+    still open at the end is closed. (A piece wholly inside a long span carries no tag and is measured with the
+    outer language's rules, which never give fewer ids than English's.)"""
+    tags = _LANG_TAG_RE.findall(s)
+    if not tags:
+        return s
+    if tags[0].startswith("</"):
+        s = "<" + tags[0][2:] + s
+    last = tags[-1]
+    return s if last.startswith("</") else f"{s}</{last[1:]}"
+
+
+def _inside_tag(s: str, cut: int) -> bool:
+    """Whether a cut at ``cut`` would split an inline tag."""
+    k = s.rfind("<", 0, cut)
+    return k >= 0 and s.find(">", k) >= cut and _LANG_TAG_RE.match(s, k) is not None
+
+
+def _close_spans(chunks: list[str]) -> list[str]:
+    """A ``<xx>`` span cut by a sentence break is closed at the chunk's end and reopened in the next chunk."""
+    out, carry = [], None
+    for c in chunks:
+        if carry:
+            c = f"<{carry}>{c}"
+        carry = None
+        for m in _LANG_TAG_RE.finditer(c):
+            t = m.group(0)
+            carry = None if t.startswith("</") else t[1:-1]
+        out.append(f"{c}</{carry}>" if carry else c)
+    return out
