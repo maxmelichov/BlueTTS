@@ -8,6 +8,7 @@ The dataset should be a CSV file with the following expected columns (or similar
 - `text`: Transcription text
 - `speaker_id`: Speaker identifier
 - `lang`: Language code
+- `sample_weight` (optional): per-row draw weight; rows are drawn with replacement by it, split across DDP ranks.
 
 Expected sample rate for training is typically 44.1kHz.
 
@@ -35,6 +36,20 @@ The `configs/tts.json` has several settings:
 - `text_encoder`, `vector_field`: Architectural dimensions and layers.
 - `flow_matching.sig_min`: The minimum noise scale for Flow Matching.
 - `batch_expander.n_batch_expand`: The $K_e$ factor. 
+- `train.weight_decay` (optional, default `0.01`): AdamW weight decay (RobustSpeechFlow, arXiv 2605.22083, uses `0.0`).
+- `train.lr_milestones` (optional, default `[300000, 600000]`): steps at which the learning rate is halved; a resume uses these, not the checkpoint's.
+- `train.ema_decay` (optional, default `0` = off): EMA of the text encoder, vector field and reference encoder, warm-up `min(ema_decay, (1 + n) / (10 + n))`. Checkpoints store it under `ema`; `<out>/ema/ckpt_step_N.pt` holds the EMA weights as an ordinary checkpoint.
+- `rsf`: RobustSpeechFlow contrastive loss (arXiv 2605.22083), off by default; from `start_step` it subtracts L1 distances to an in-batch negative (`lambda_rand`) and a repeat/skip corruption of the target (`lambda_aug`). See `training/t2l/rsf.py`.
+
+`config/tts_st3.json` is the 64M (Supertonic-3) layout; pass it with `--config` to train or export
+that model. `config/tts.json` stays the 33M model.
+`layer_scale_init` sets the initial ConvNeXt gamma of the TE, reference encoder and VF (default 1e-6;
+`tts_st3.json` uses 0.1, and on the DP sentence encoder only via `dp.sentence_encoder.layer_scale_init`).
+`edge_fill` (in `ttl` and `dp`) fills each row's padding with its last valid column inside every ConvNeXt,
+so a padded training row computes what it computes alone at inference.
+`speech_prompted_text_encoder.style_key_mode: "projected"` computes the TE style keys as
+`tanh(W_key(style_key))`, where `style_key` is shared with the VF `tile`; `uncond_masker.style_key_uncond`
+adds `u_key`, the style keys of every style-dropped row.
 
 ## Healthy Loss Curve
 A healthy Flow Matching training loss curve will start high and exponentially decay, flattening out over time. If using SPFM, you will see it drop further when fine-tuning kicks in.

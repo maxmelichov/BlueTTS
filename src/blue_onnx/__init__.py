@@ -12,6 +12,7 @@ import numpy as np
 import onnxruntime as ort
 
 from .text_norm import (  # noqa: F401  (re-exported as the package's public API)
+    EMOJI_RE,
     SLOW_MARK_OPEN,
     SLOW_PACE_BLEND,
     SLOW_PACE_DPT_REF,
@@ -71,6 +72,13 @@ _TEXT_TO_INDICES_PROCESSOR: Optional["UnicodeProcessor"] = None
 
 _INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)</\1>", re.DOTALL)
 _LANG_TAG_RE = re.compile(r"</?\w+>")
+# Affricates -> ligatures (word-final 'ts' only), for models trained with tts.json "affricate_ligatures".
+_AFFRICATE_LIGATURES = (
+    (re.compile(r"t͡s|ts(?=[^\w]|$)", re.I), "ʦ"),
+    (re.compile(r"t͡ʃ|tʃ", re.I), "ʧ"),
+    (re.compile(r"d͡ʒ|dʒ", re.I), "ʤ"),
+    (re.compile(r"d͡z|dz", re.I), "ʣ"),
+)
 
 
 def strip_lang_tags_from_phoneme_string(s: str) -> str:
@@ -81,7 +89,7 @@ def strip_lang_tags_from_phoneme_string(s: str) -> str:
     sentence splits from tearing tag pairs apart (orphan ``<en>`` / ``</he>``),
     which could confuse preprocessing or leave odd artifacts at boundaries.
     """
-    t = _LANG_TAG_RE.sub("", s)
+    t = _LANG_TAG_RE.sub(" ", s)
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -217,7 +225,8 @@ class UnicodeProcessor:
       - a path to a ``vocab.json`` with ``{pad_id, char_to_id, ...}`` (this repo), or
       - a path to a legacy unicode codepoint ``indexer.json`` (``{codepoint: id}``).
 
-    Unknown characters and stripped ``<lang>`` tags map to ``pad_id``.
+    Unknown characters map to ``pad_id``. Inline ``<lang>`` tags are dropped unless
+    ``lang_tags=True``, which encodes ``<lang>`` + text + ``</lang>`` as tokens.
     """
 
     def __init__(self, indexer_path: str):
@@ -234,18 +243,16 @@ class UnicodeProcessor:
                 if all(isinstance(k, str) and k.isdigit() for k in raw.keys()) \
                 else {int(k): int(v) for k, v in raw.items()}
 
-    def _preprocess_text(self, text: str, lang: str) -> str:
-        # Drop inline <lang>…</lang> spans first: they are routing metadata, never
-        # speech, and the "/" -> " " replacement below would mangle a closing tag
-        # into "< he>", which then survives as literal "he" characters plus pad
-        # ids in the encoded sequence.
-        text = strip_lang_tags_from_phoneme_string(text)
-        # TODO: Need advanced normalizer for better performance
-        text = normalize("NFKD", text)
+    def _preprocess_text(self, text: str, lang: str, affricate_ligatures: bool = False) -> str:
+        # Same steps and order as training's normalize_text (text_vocab.py), so the ids match.
+        if _LANG_TAG_RE.search(text):
+            text = strip_lang_tags_from_phoneme_string(text)
+        # NFD, not NFKD: NFKD folds modifier letters (ʰ -> h); training does not.
+        text = normalize("NFD", text.strip())
 
         # Last-resort net: G2P already strips these, but ``text_is_phonemes=True``
         # skips that path entirely.
-        text = strip_emoji(text)
+        text = EMOJI_RE.sub("", text)
 
         # Replace various dashes and symbols
         replacements = {
@@ -262,25 +269,18 @@ class UnicodeProcessor:
             "[": " ",
             "]": " ",
             "|": " ",
+            "^": " ",  # BOS/EOS slots
+            "$": " ",
             "/": " ",
+            "\\": " ",
             "#": " ",
-            "→": " ",
-            "←": " ",
+            "…": "...",
         }
         for k, v in replacements.items():
             text = text.replace(k, v)
 
         # Remove special symbols
-        text = re.sub(r"[♥☆♡©\\]", "", text)
-
-        # Replace known expressions
-        expr_replacements = {
-            "@": " at ",
-            "e.g.,": "for example, ",
-            "i.e.,": "that is, ",
-        }
-        for k, v in expr_replacements.items():
-            text = text.replace(k, v)
+        text = re.sub(r"[♥☆♡©]", "", text)
 
         # Fix spacing around punctuation
         text = re.sub(r" ,", ",", text)
@@ -299,6 +299,12 @@ class UnicodeProcessor:
         while "``" in text:
             text = text.replace("``", "`")
 
+        if affricate_ligatures:
+            for pattern, lig in _AFFRICATE_LIGATURES:
+                text = pattern.sub(lig, text)
+            if lang == "he":  # as training: Hebrew spells /ts/ as 't', 's'
+                text = text.replace("ʦ", "ts")
+
         # Remove extra spaces
         text = re.sub(r"\s+", " ", text).strip()
 
@@ -315,9 +321,9 @@ class UnicodeProcessor:
         text_mask = length_to_mask(text_ids_lengths)
         return text_mask
 
-    def _encode(self, text: str) -> np.ndarray:
-        # Strip any remaining language tags before encoding.
-        text = _LANG_TAG_RE.sub("", text)
+    def _encode(self, text: str, keep_tags: bool = False) -> np.ndarray:
+        if not keep_tags:
+            text = _LANG_TAG_RE.sub("", text)
         if self._char_to_id is not None:
             pad = self.pad_id
             ids = [self._char_to_id.get(ch, pad) for ch in text]
@@ -328,12 +334,13 @@ class UnicodeProcessor:
         return np.array(ids, dtype=np.int64)
 
     def __call__(
-        self, text_list: list[str], lang_list: list[str]
+        self, text_list: list[str], lang_list: list[str], affricate_ligatures: bool = False, lang_tags: bool = False
     ) -> tuple[np.ndarray, np.ndarray]:
         text_list = [
-            self._preprocess_text(t, lang) for t, lang in zip(text_list, lang_list)
+            self._preprocess_text(t, lang, affricate_ligatures)
+            for t, lang in zip(text_list, lang_list)
         ]
-        encoded = [self._encode(t) for t in text_list]
+        encoded = [self._encode(t, keep_tags=lang_tags) for t in text_list]
         text_ids_lengths = np.array([len(e) for e in encoded], dtype=np.int64)
         text_ids = np.full(
             (len(encoded), int(text_ids_lengths.max())), self.pad_id, dtype=np.int64
@@ -375,6 +382,8 @@ class TextToSpeech:
         self.base_chunk_size = cfgs["ae"]["base_chunk_size"]
         self.chunk_compress_factor = cfgs["ttl"]["chunk_compress_factor"]
         self.ldim = cfgs["ttl"]["latent_dim"]
+        self.affricate_ligatures = bool(cfgs.get("affricate_ligatures", False))
+        self.lang_tags = bool(cfgs.get("lang_tags", False))
         self._u_text = u_text
         self._u_ref = u_ref
         self._vf_inputs = {i.name for i in vector_est_ort.get_inputs()}
@@ -436,7 +445,7 @@ class TextToSpeech:
         lang_list: list[str],
         style: Style,
         total_step: int,
-        speed: float = 1.05,
+        speed: float = 1.0,
         cfg_scale: float = DEFAULT_CFG_SCALE,
         pace_blend: float = 0.0,
         pace_dpt_ref: Optional[float] = None,
@@ -445,7 +454,7 @@ class TextToSpeech:
             len(text_list) == style.ttl.shape[0]
         ), "Number of texts must match number of style vectors"
         bsz = len(text_list)
-        text_ids, text_mask = self.text_processor(text_list, lang_list)
+        text_ids, text_mask = self.text_processor(text_list, lang_list, self.affricate_ligatures, self.lang_tags)
         dur_onnx, *_ = self.dp_ort.run(
             None, {"text_ids": text_ids, "style_dp": style.dp, "text_mask": text_mask}
         )
@@ -656,7 +665,7 @@ class TextToSpeech:
         lang_list: list[str],
         style: Style,
         total_step: int,
-        speed: float = 1.05,
+        speed: float = 1.0,
         cfg_scale: float = DEFAULT_CFG_SCALE,
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
@@ -821,12 +830,12 @@ def load_text_processor(onnx_dir: str = "") -> UnicodeProcessor:
     return UnicodeProcessor(os.path.join(os.path.dirname(__file__), "vocab.json"))
 
 
-def text_to_indices(text: str, lang: str = "he") -> list[int]:
+def text_to_indices(text: str, lang: str = "he", affricate_ligatures: bool = False, lang_tags: bool = False) -> list[int]:
     """Compatibility helper used by TRT: encode phoneme text with the bundled vocab."""
     global _TEXT_TO_INDICES_PROCESSOR
     if _TEXT_TO_INDICES_PROCESSOR is None:
         _TEXT_TO_INDICES_PROCESSOR = load_text_processor()
-    text_ids, _ = _TEXT_TO_INDICES_PROCESSOR([text], [lang])
+    text_ids, _ = _TEXT_TO_INDICES_PROCESSOR([text], [lang], affricate_ligatures, lang_tags)
     return text_ids[0].astype(np.int64).tolist()
 
 
@@ -984,7 +993,7 @@ class BlueTTS:
         self,
         text: str,
         lang: str = "he",
-        total_step: int = 5,
+        total_step: int = 8,
         cfg_scale: float = DEFAULT_CFG_SCALE,
         speed: float = 1.0,
         silence_duration: float = 0.0,

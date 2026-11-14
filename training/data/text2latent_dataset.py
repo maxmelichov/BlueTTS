@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import string
 
 # Ensure these local modules exist in your project structure
-from data.text_vocab import text_to_indices, VOCAB_LIST, normalize_text
+from data.text_vocab import text_to_indices, VOCAB_LIST, normalize_text, wrap_lang_tags
 from data.audio_utils import ensure_sr
 
 # espeak language codes for non-Hebrew languages
@@ -38,12 +38,15 @@ class Text2LatentDataset(Dataset):
         max_wav_len: int | None = None,      # e.g., 44100 * 20
         max_text_len: int | None = None,
         default_lang: str = "he",         # Fallback language if CSV has no 'lang' column
+        affricate_ligatures: bool = False,  # fold t͡s/tʃ/dʒ/dz into ʦ/ʧ/ʤ/ʣ (config key)
+        lang_tags: bool = False,          # '<lang>' + ids + '</lang>' (config key)
     ):
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.max_wav_len = max_wav_len
         self.max_text_len = max_text_len
         self.default_lang = default_lang
+        self.lang_tags = lang_tags
 
         # --- 1. Load Metadata ---
         if not os.path.exists(metadata_path):
@@ -95,7 +98,7 @@ class Text2LatentDataset(Dataset):
         he_mask = self.df["lang"] == "he"
         if he_mask.any():
             self.df.loc[he_mask, "text"] = self.df[he_mask].apply(
-                lambda row: normalize_text(row["text"], apply_hebrew_fixes=True), axis=1
+                lambda row: normalize_text(row["text"], apply_hebrew_fixes=True, affricate_ligatures=affricate_ligatures), axis=1
             )
 
         # Non-Hebrew: phonemize only rows not already pre-computed by combine_datasets.py
@@ -108,18 +111,18 @@ class Text2LatentDataset(Dataset):
         if needs_phonemization.any():
             # Normalize raw text before phonemization to clean up emojis, punctuation, etc.
             self.df.loc[needs_phonemization, "text"] = self.df[needs_phonemization].apply(
-                lambda row: normalize_text(row["text"], apply_hebrew_fixes=False), axis=1
+                lambda row: normalize_text(row["text"], apply_hebrew_fixes=False, affricate_ligatures=affricate_ligatures), axis=1
             )
             self._phonemize_with_espeak(needs_phonemization)
             # Re-normalize to catch any post-phonemization spacing issues
             self.df.loc[needs_phonemization, "text"] = self.df[needs_phonemization].apply(
-                lambda row: normalize_text(row["text"], apply_hebrew_fixes=False), axis=1
+                lambda row: normalize_text(row["text"], apply_hebrew_fixes=False, affricate_ligatures=affricate_ligatures), axis=1
             )
         elif non_he_mask.any():
             print(f"[Dataset] Skipping espeak — {non_he_mask.sum()} non-Hebrew rows already phonemized.")
             # Still apply normalization to already phonemized text
             self.df.loc[non_he_mask, "text"] = self.df[non_he_mask].apply(
-                lambda row: normalize_text(row["text"], apply_hebrew_fixes=False), axis=1
+                lambda row: normalize_text(row["text"], apply_hebrew_fixes=False, affricate_ligatures=affricate_ligatures), axis=1
             )
 
         # Check vocab coverage for Hebrew only
@@ -277,11 +280,6 @@ class Text2LatentDataset(Dataset):
         # Pad to at least one hop_length (prevents issues in latent encoding)
         if wav.numel() < self.hop_length:
             wav = F.pad(wav, (0, self.hop_length - wav.numel()))
-        else:
-            # Trim to nearest hop
-            valid_len = (wav.numel() // self.hop_length) * self.hop_length
-            wav = wav[:valid_len]
-            
         return wav
 
     def __getitem__(self, idx):
@@ -323,7 +321,10 @@ class Text2LatentDataset(Dataset):
         ref_speaker_id = speaker_id
 
         # 3. Text to Indices
-        text_ids = torch.tensor(text_to_indices(text, lang=lang), dtype=torch.long)
+        ids = text_to_indices(text, lang=lang)
+        if self.lang_tags:
+            ids = wrap_lang_tags(ids, lang)
+        text_ids = torch.tensor(ids, dtype=torch.long)
         
         return wav, text_ids, speaker_id, ref_wav, is_self_ref, ref_speaker_id
 
