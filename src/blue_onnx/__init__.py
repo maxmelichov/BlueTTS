@@ -13,6 +13,7 @@ from unicodedata import normalize
 import numpy as np
 import onnxruntime as ort
 
+from .ipa_text import strip_outer_lang_tags, tag_latin_runs
 from .text_norm import (  # noqa: F401  (re-exported as the package's public API)
     EMOJI_RE,
     SLOW_MARK_OPEN,
@@ -512,6 +513,13 @@ class TextToSpeech:
         noisy_latent = noisy_latent * latent_mask
         return noisy_latent, latent_mask
 
+    def _flatten_tags(self, phonemes: str, lang: str) -> str:
+        """Release bundles keep other-language spans for :func:`encode_tagged` (their own IPA normalisation);
+        older bundles drop every tag, as their tokenizer does."""
+        if self.text_processor.release:
+            return strip_outer_lang_tags(phonemes, lang)
+        return strip_lang_tags_from_phoneme_string(phonemes)
+
     def _infer(
         self,
         text_list: list[str],
@@ -657,6 +665,12 @@ class TextToSpeech:
                 ]
             else:
                 text = prepare_text_for_synthesis(text, lang=lang)
+        if phonemize and self.text_processor.release:
+            if isinstance(text, list):
+                langs = lang if isinstance(lang, list) else [lang] * len(text)
+                text = [tag_latin_runs(t, lg) for t, lg in zip(text, langs)]
+            else:
+                text = tag_latin_runs(text, lang)
         # Computed after normalization: it can introduce <en> spans (emails,
         # spelled codes, loanwords) that should count as mixed-language text.
         if isinstance(text, list):
@@ -677,7 +691,7 @@ class TextToSpeech:
                     self.g2p.phonemize(t, lang=lang_code)
                     for t, lang_code in zip(text, lang)
                 ]
-            text = [strip_lang_tags_from_phoneme_string(t) for t in text]
+            text = [self._flatten_tags(t, lg) for t, lg in zip(text, lang)]
             return self._infer(
                 text,
                 lang,
@@ -706,7 +720,7 @@ class TextToSpeech:
             seg_pace_dpt = SLOW_PACE_DPT_REF if is_slow else pace_dpt_ref
             if phonemize and self.g2p is not None:
                 seg_text = self.g2p.phonemize(seg_text, lang=lang)
-            seg_text = strip_lang_tags_from_phoneme_string(seg_text)
+            seg_text = self._flatten_tags(seg_text, lang)
             for chunk in chunk_text(seg_text, max_len=max_len):
                 wav, dur_onnx = self._infer(
                     [chunk],
@@ -772,19 +786,21 @@ class TextToSpeech:
                 prepare_text_for_synthesis(t, lang=lang_code, mark_slow=False)
                 for t, lang_code in zip(text_list, lang_list)
             ]
+        phonemize = not text_is_phonemes
+        if phonemize and self.text_processor.release:
+            text_list = [tag_latin_runs(t, lg) for t, lg in zip(text_list, lang_list)]
         has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text_list)
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
             else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang else 0.0)
         )
-        phonemize = not text_is_phonemes
         if phonemize and self.g2p is not None:
             text_list = [
                 self.g2p.phonemize(t, lang=lang_code)
                 for t, lang_code in zip(text_list, lang_list)
             ]
-        text_list = [strip_lang_tags_from_phoneme_string(t) for t in text_list]
+        text_list = [self._flatten_tags(t, lg) for t, lg in zip(text_list, lang_list)]
         return self._infer(
             text_list,
             lang_list,
@@ -1169,7 +1185,7 @@ def chunk_text(text: str, max_len: int = 300) -> list[str]:
         current_chunk = ""
 
         for sentence in sentences:
-            if len(current_chunk) + len(sentence) + 1 <= max_len:
+            if _untagged_len(current_chunk) + _untagged_len(sentence) + 1 <= max_len:
                 current_chunk += (" " if current_chunk else "") + sentence
             else:
                 if current_chunk:
@@ -1179,4 +1195,23 @@ def chunk_text(text: str, max_len: int = 300) -> list[str]:
         if current_chunk:
             chunks.append(current_chunk.strip())
 
-    return chunks
+    return _close_spans(chunks)
+
+
+def _untagged_len(s: str) -> int:
+    # Inline tags (kept for release bundles) carry no ids: length as before they were kept.
+    return len(_LANG_TAG_RE.sub("", s))
+
+
+def _close_spans(chunks: list[str]) -> list[str]:
+    """A ``<xx>`` span cut by a sentence break is closed at the chunk's end and reopened in the next chunk."""
+    out, carry = [], None
+    for c in chunks:
+        if carry:
+            c = f"<{carry}>{c}"
+        carry = None
+        for m in _LANG_TAG_RE.finditer(c):
+            t = m.group(0)
+            carry = None if t.startswith("</") else t[1:-1]
+        out.append(f"{c}</{carry}>" if carry else c)
+    return out
