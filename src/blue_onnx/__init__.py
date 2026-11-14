@@ -22,6 +22,7 @@ from .text_norm import (  # noqa: F401  (re-exported as the package's public API
     SLOW_SILENCE,
     SLOW_SPEED_SCALE,
     canonical_lang,
+    has_foreign_lang_span,
     prepare_text_for_synthesis,
     split_slow_segments,
     strip_emoji,
@@ -726,9 +727,11 @@ class TextToSpeech:
         # Computed after normalization: it can introduce <en> spans (emails,
         # spelled codes, loanwords) that should count as mixed-language text.
         if isinstance(text, list):
-            has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text)
+            langs = lang if isinstance(lang, list) else [lang] * len(text)
+            has_inline_lang = any(has_foreign_lang_span(t, lg) for t, lg in zip(text, langs))
         else:
-            has_inline_lang = _INLINE_LANG_PAIR.search(text) is not None
+            assert isinstance(lang, str), "Single-text mode requires `lang` to be a str."
+            has_inline_lang = has_foreign_lang_span(text, lang)
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
@@ -859,7 +862,9 @@ class TextToSpeech:
         phonemize = not text_is_phonemes
         if phonemize and self.text_processor.release:
             text_list = [tag_latin_runs(t, lg) for t, lg in zip(text_list, lang_list)]
-        has_inline_lang = any(_INLINE_LANG_PAIR.search(t) is not None for t in text_list)
+        has_inline_lang = any(
+            has_foreign_lang_span(t, lg) for t, lg in zip(text_list, lang_list)
+        )
         pace_blend_eff = (
             float(pace_blend)
             if pace_blend is not None
