@@ -124,13 +124,16 @@ Voices: female `maya`, `noa`, `lily`, `tamar`, `shira`, `yael`, `emma`, `sara`; 
 
 ## Models
 
-**Current — BlueV3 `v3.0.0`** (checkpoint `701500`): the text-to-latent EMA at 700k plus 1,500 iterations
-of FlowTTS-GRPO reinforcement learning ([arXiv 2606.23190](https://arxiv.org/abs/2606.23190)).
+**Current — BlueV3 `v3.0.1`** (checkpoint `702000`): the text-to-latent EMA at 700k plus 1,500 iterations
+of FlowTTS-GRPO reinforcement learning ([arXiv 2606.23190](https://arxiv.org/abs/2606.23190)) and 500 more with a
+pause reward, a new duration model (Hebrew paced closer to read speech), and calibrated speed: `speed=1.0` is natural
+read-speech pace for every voice and language (`speed_scale` in each voice JSON). v3.0.0 (checkpoint `701500`) stays
+on HF under the git tag `v3.0.0`.
 
 | | |
 |---|---|
 | [notmax123/BlueV3-onnx](https://huggingface.co/notmax123/BlueV3-onnx) | ONNX bundle: `onnx/` (the `blue_onnx` layout + `reference_encoder`), `voices/`, `frontend/` |
-| [notmax123/BlueV3](https://huggingface.co/notmax123/BlueV3) | PyTorch checkpoints (text-to-latent `ckpt_step_701500.pt`, duration predictor), latent stats, config, voices |
+| [notmax123/BlueV3](https://huggingface.co/notmax123/BlueV3) | PyTorch checkpoints (text-to-latent `ckpt_step_702000.pt`, duration predictor), latent stats, config, voices |
 | [notmax123/blue-codec](https://huggingface.co/notmax123/blue-codec) | the audio autoencoder, folder `bluev3_codec/` |
 
 Languages: Hebrew, English, German, Spanish, Italian, Russian, Yiddish. Operating point: 8 Euler steps,
@@ -147,21 +150,22 @@ samples, sr = tts.synthesize("גוט מאָרגן, ווי גייט עס?", lang=
 `michael`, `ariel`. A voice JSON is valid only for the checkpoint it was exported from; voices of earlier
 releases do not work with BlueV3.
 
-**Scores** (unseen test set and unseen voices, 8 steps, CFG 4; before RL = the 700k model):
+**Scores** (unseen test set and unseen voices, 8 steps, CFG 4, both with the v3.0.1 duration model):
 
-| | before RL | v3.0.0 |
+| | v3.0.0 | v3.0.1 |
 |---|---|---|
-| Hebrew phone error rate | 1.85 % | **1.53 %** |
-| Hebrew speaker similarity | 0.650 | **0.660** |
-| Hebrew DNSMOS OVRL | 3.39 | **3.41** |
-| English word error rate | 1.82 % | 1.88 % (no change) |
-| English speaker similarity | 0.660 | **0.671** |
+| Hebrew phone error rate | 1.81 % | 1.80 % (no change) |
+| Hebrew speaker similarity | 0.664 | **0.670** |
+| Hebrew DNSMOS OVRL | 3.41 | **3.43** |
+| English word error rate | 1.81 % | 1.95 % (no change) |
+| English speaker similarity | 0.676 | **0.679** |
+| Pause share, he / en / de (read speech 11.4 / 11.0 / 13.4 %) | 8.9 / 8.7 / 8.9 % | 9.6 / 9.6 / 10.0 % |
 
 **Previous — [notmax123/BlueTTS2.5-onnx](https://huggingface.co/notmax123/BlueTTS2.5-onnx)** and
 [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2) still load (no `blue_release` section in
 their `tts.json`), with the previous voices in [`voices/v2/`](voices/v2/), e.g.
 `BlueTTS(onnx_dir="onnx_models", style_json="voices/v2/noa.json")`. The BlueV3 voices in `voices/` carry
-`"model": "bluev3-701500"`, and `blue_onnx` refuses them with an older bundle. blue-onnx-v2 is the only bundle with the zero-shot
+`"model": "bluev3-702000"`, and `blue_onnx` refuses them with an older bundle. blue-onnx-v2 is the only bundle with the zero-shot
 voice-conversion graphs that `examples/zero_shot.py` and `blue_onnx.style` need.
 
 ## Citations
