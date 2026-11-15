@@ -19,6 +19,8 @@ from ..blue_onnx import (
     blend_duration_pace,
     chunk_text,
     latent_frames_for_duration,
+    parse_speed_scale,
+    speed_scale_for,
     strip_lang_tags_from_phoneme_string,
     text_to_indices,
 )
@@ -109,6 +111,8 @@ class Style:
     dp: Optional[Any] = None
     keys: Optional[Any] = None
     z_ref: Optional[Any] = None
+    # Per batch row: the voice's ``speed_scale`` dict or None (= 1.0); see blue_onnx.Style.
+    speed_scale: Optional[list] = None
 
 
 # ─── Module-level loaders ─────────────────────────────────────────────────────
@@ -185,15 +189,18 @@ def load_voice_style(style_paths: List[str], device: str = "cuda") -> Style:
     keys = _alloc("style_keys")
     z_ref = _alloc("z_ref")
 
+    speed_scales = []
     for i, path in enumerate(style_paths):
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
+        speed_scales.append(parse_speed_scale(d.get("speed_scale"), path))
         for tgt, key in ((ttl, "style_ttl"), (dp, "style_dp"), (keys, "style_keys"), (z_ref, "z_ref")):
             if tgt is not None and key in d:
                 dims = d[key]["dims"]
                 tgt[i] = torch.tensor(d[key]["data"], dtype=torch.float32).view(dims[1], dims[2])
 
-    return Style(ttl=ttl, dp=dp, keys=keys, z_ref=z_ref)
+    return Style(ttl=ttl, dp=dp, keys=keys, z_ref=z_ref,
+                 speed_scale=speed_scales if any(speed_scales) else None)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -440,6 +447,7 @@ class BlueTRT:
             style_dp,
             pace_blend=pace_blend,
             pace_dpt_ref=pace_dpt_ref,
+            lang=lang,
         )
 
         # Flow matching with optional CFG.
@@ -454,6 +462,7 @@ class BlueTRT:
         text_mask: torch.Tensor,
         pace_blend: float,
         pace_dpt_ref: Optional[float],
+        lang: str = "he",
     ) -> int:
         """Duration-predictor seconds → latent frames, as ``blue_onnx`` does it.
 
@@ -463,6 +472,9 @@ class BlueTRT:
         mean anything, and the frame conversion is
         ``ceil(seconds * sample_rate / (base_chunk_size * chunk_compress_factor))``
         — the same arithmetic as :meth:`blue_onnx.TextToSpeech.sample_noisy_latent`.
+
+        The seconds are divided by ``speed * speed_scale[lang]`` (the voice's
+        calibration, 1.0 when its JSON has none), as in ``blue_onnx``.
         """
         ref = float(pace_dpt_ref) if pace_dpt_ref is not None else DURATION_PACE_DPT_REF
         blended = float(
@@ -474,9 +486,13 @@ class BlueTRT:
             )[0]
         )
         return latent_frames_for_duration(
-            blended / max(self.speed, 1e-6), self.sample_rate,
+            blended / max(self.speed * self._speed_scale(lang), 1e-6), self.sample_rate,
             self.base_chunk_size, self.chunk_compress_factor,
         )
+
+    def _speed_scale(self, lang: str) -> float:
+        """The loaded voice's calibration for ``lang`` (1.0 without ``speed_scale``)."""
+        return speed_scale_for(getattr(self._style, "speed_scale", None), 0, lang)
 
     def _predict_duration(
         self,
@@ -486,6 +502,7 @@ class BlueTRT:
         style_dp: Optional[torch.Tensor],
         pace_blend: float = 0.0,
         pace_dpt_ref: Optional[float] = None,
+        lang: str = "he",
     ) -> int:
         T_lat: Optional[int] = None
 
@@ -496,7 +513,7 @@ class BlueTRT:
             val = float(out["duration"].sum())
             if np.isfinite(val):
                 T_lat = self._seconds_to_latent_frames(
-                    val, text_mask, pace_blend, pace_dpt_ref
+                    val, text_mask, pace_blend, pace_dpt_ref, lang=lang
                 )
 
         if T_lat is None and z_ref_norm is not None and self._dp is not None:
@@ -505,7 +522,7 @@ class BlueTRT:
             val = float(out["duration"].sum())
             if np.isfinite(val):
                 T_lat = self._seconds_to_latent_frames(
-                    val, text_mask, pace_blend, pace_dpt_ref
+                    val, text_mask, pace_blend, pace_dpt_ref, lang=lang
                 )
 
         if T_lat is None:

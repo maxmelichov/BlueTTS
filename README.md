@@ -37,6 +37,9 @@ samples, sr = tts.synthesize("Hello, this is BlueTTS.", lang="en")
 ```
 
 The bundle sets the operating point itself (8 steps, CFG 4.0, speed 1.0, language tags on).
+Speed 1.0 is each voice's calibrated natural reading pace in each language: a voice JSON can carry
+`"speed_scale": {"he": 1.077, "en": 1.03, ...}`, and the duration is divided by `speed * speed_scale[lang]`.
+Older voice files without `speed_scale` (or a language it does not list) use 1.0, exactly as before.
 Numbers, dates, prices and codes are spoken as words automatically (Yiddish: spell numbers out). Mix languages
 inline with `<en>…</en>`:
 
@@ -72,6 +75,52 @@ uv sync
 Optional extras are documented per use case: [accelerators](src/blue_onnx/README.md#accelerators)
 (OpenVINO, CUDA), [`--extra export`](exports/README.md) for voice/ONNX export, and
 [`--extra tensorrt`](exports/README.md#build-tensorrt-engines).
+
+## OpenAI-compatible server
+
+[`examples/openai_server.py`](examples/openai_server.py) serves BlueTTS behind the OpenAI speech API
+(`POST /v1/audio/speech`), so OpenAI clients, Open WebUI and plain curl can use it unchanged. Based on the
+server shared by [@MaximS](https://github.com/MaximS) in [#22](https://github.com/maxmelichov/BlueTTS/issues/22).
+
+```bash
+uv sync --extra server              # fastapi + uvicorn; mp3 / opus / aac also need ffmpeg on PATH
+uv run hf download notmax123/BlueV3-onnx --include "onnx/*" "voices/*" "frontend/*" --local-dir ./bluev3_onnx
+uv run python examples/openai_server.py --bundle bluev3_onnx --host 0.0.0.0 --port 8000
+```
+
+```bash
+curl http://localhost:8000/v1/audio/speech -H "Content-Type: application/json" \
+  -d '{"model": "bluev3", "input": "שלום, מה שלומך?", "voice": "noa", "response_format": "wav"}' -o speech.wav
+```
+
+One engine is loaded at startup (CPU by default; `--providers CUDAExecutionProvider,CPUExecutionProvider` for a
+GPU build of ONNX Runtime) and requests are served one synthesis at a time. `--bundle` also reads `BLUE_BUNDLE`;
+`--api-key` (or `BLUE_API_KEY`) makes the server require `Authorization: Bearer <key>`, otherwise any key is accepted.
+
+| field | |
+|---|---|
+| `input` | text, up to 4096 characters |
+| `voice` | one of the 15 voices below; OpenAI's names map to fixed voices: `alloy`→`maya`, `echo`→`adam`, `fable`→`daniel`, `onyx`→`david`, `nova`→`noa`, `shimmer`→`lily` |
+| `response_format` | `mp3` (default), `wav`, `pcm`, `flac`, `opus`, `aac`. `wav` and `pcm` always work; the others need ffmpeg or a libsndfile that writes them, else 400. `pcm` is 16-bit mono at 24 kHz like OpenAI's (`--pcm-sample-rate 0` for the model's 44.1 kHz) |
+| `speed` | 0.25–4.0 |
+| `model` | accepted and ignored (`GET /v1/models` lists `bluev3`) |
+| `language` | extension: `he`, `en`, `de`, `es`, `it`, `ru`, `yi`. Default: `he` when the text has Hebrew letters, else `en` (Yiddish needs `yi` explicitly) |
+| `stream_format` | `audio` (or `"stream": true`) streams `wav` / `pcm` sentence by sentence as chunked transfer; `sse` sends the same bytes as `speech.audio.delta` events. Other formats come back whole |
+
+**Voice markers** (extension): `[name]` in the input switches voice from that point on, e.g.
+`"Hello there. [adam] And hello from me. [lily] שלום!"`. Only names of available voices (or the OpenAI
+aliases) count as markers; text without markers is read in the request's `voice`, and each segment gets its own
+language detection. Inline `<en>…</en>` spans work as in `synthesize`.
+
+Other endpoints: `GET /v1/audio/voices` (voice list), `GET /v1/models`, `GET /health`.
+
+**Open WebUI**: Admin Panel → Settings → Audio → Text-to-Speech engine **OpenAI**, API base URL
+`http://<host>:8000/v1` (from a Docker container on the same machine: `http://host.docker.internal:8000/v1`),
+any API key (or the `--api-key` value), TTS voice e.g. `noa`, model `bluev3`.
+
+Voices: female `maya`, `noa`, `lily`, `tamar`, `shira`, `yael`, `emma`, `sara`; male `adam`, `daniel`, `david`,
+`jonathan`, `ethan`, `michael`, `ariel`. The server reads the bundle's `voices/` and then the repo's `voices/`
+(`--voices-dir` to use another directory).
 
 ## Models
 
