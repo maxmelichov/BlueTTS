@@ -10,7 +10,7 @@ import numpy as np
 import onnxruntime as ort
 import soundfile as sf
 
-from . import Style
+from . import Style, parse_speed_scale
 
 
 def _stats(a: np.ndarray) -> dict[str, float]:
@@ -26,7 +26,8 @@ def style_from_payload(payload: dict[str, Any]) -> Style:
     """Convert a voice JSON payload into a runtime :class:`blue_onnx.Style`."""
     ttl = np.asarray(payload["style_ttl"]["data"], dtype=np.float32).reshape(payload["style_ttl"]["dims"])
     dp = np.asarray(payload["style_dp"]["data"], dtype=np.float32).reshape(payload["style_dp"]["dims"])
-    return Style(ttl, dp)
+    scale = parse_speed_scale(payload.get("speed_scale"))
+    return Style(ttl, dp, speed_scale=[scale] if scale else None)
 
 
 def payload_from_style(style: Style, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
