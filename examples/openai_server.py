@@ -150,10 +150,10 @@ class BlueEngine:
         self._tts = BlueTTS(onnx_dir=str(onnx_dir), style_json=str(first), providers=providers)
         self._styles = {}
         for name, path in paths.items():
-            style = load_voice_style([str(path)])
             try:
+                style = load_voice_style([str(path)])  # carries the voice's speed_scale, if any
                 self._tts.tts.check_style(style)
-            except ValueError as e:  # a voice of another model: skip it, keep serving the rest
+            except ValueError as e:  # a voice of another model (or a bad speed_scale): skip it, keep serving the rest
                 log.warning("skipping voice %s: %s", path, e)
                 continue
             self._styles[name] = style

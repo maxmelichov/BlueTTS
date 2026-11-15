@@ -30,6 +30,8 @@ from ..blue_onnx import (
     chunk_text,
     latent_frames_for_duration,
     load_text_processor as _load_text_processor_onnx,
+    parse_speed_scale,
+    speed_divisor,
     strip_lang_tags_from_phoneme_string,
 )
 
@@ -44,9 +46,16 @@ _INLINE_LANG_PAIR = re.compile(r"<(\w+)>(.*?)(?:</\1>|<\1>)", re.DOTALL)
 
 
 class Style:
-    def __init__(self, style_ttl: torch.Tensor, style_dp: Optional[torch.Tensor]):
+    def __init__(
+        self,
+        style_ttl: torch.Tensor,
+        style_dp: Optional[torch.Tensor],
+        speed_scale: Optional[list] = None,
+    ):
         self.ttl = style_ttl
         self.dp = style_dp
+        # Per batch row: the voice's ``speed_scale`` dict or None (= 1.0); see blue_onnx.Style.
+        self.speed_scale = speed_scale
 
 
 class TextToSpeech:
@@ -147,7 +156,11 @@ class TextToSpeech:
         tm_np = text_mask.detach().cpu().numpy()
         ref = float(pace_dpt_ref) if pace_dpt_ref is not None else DURATION_PACE_DPT_REF
         dur_np = blend_duration_pace(dur_np, tm_np, pace_blend, ref)
-        dur = torch.from_numpy(dur_np).to(dur.device) / max(float(speed), 1e-6)
+        # Per-voice, per-language calibration: speed 1.0 is the voice's natural pace.
+        div = speed_divisor(speed, getattr(style, "speed_scale", None), lang_list)
+        if isinstance(div, np.ndarray):
+            div = torch.from_numpy(div).to(dur.device)
+        dur = torch.from_numpy(dur_np).to(dur.device) / div
 
         # Text encoding.
         h_text = self.text_encoder(text_ids, style.ttl, text_mask=text_mask)
@@ -438,9 +451,11 @@ def load_voice_style(voice_style_paths: list[str], device: str = "cpu", verbose:
     ttl = np.zeros([bsz, ttl_dims[1], ttl_dims[2]], dtype=np.float32)
     dp = np.zeros([bsz, dp_dims[1], dp_dims[2]], dtype=np.float32) if dp_dims else None
 
+    speed_scales = []
     for i, path in enumerate(voice_style_paths):
         with open(path, "r", encoding="utf-8") as f:
             d = json.load(f)
+        speed_scales.append(parse_speed_scale(d.get("speed_scale"), path))
         ttl[i] = np.array(d["style_ttl"]["data"], dtype=np.float32).reshape(ttl_dims[1], ttl_dims[2])
         if dp is not None and "style_dp" in d:
             dd = d["style_dp"]["dims"]
@@ -450,7 +465,7 @@ def load_voice_style(voice_style_paths: list[str], device: str = "cpu", verbose:
         print(f"Loaded {bsz} voice styles")
     ttl_t = torch.from_numpy(ttl).to(device)
     dp_t = torch.from_numpy(dp).to(device) if dp is not None else None
-    return Style(ttl_t, dp_t)
+    return Style(ttl_t, dp_t, speed_scale=speed_scales if any(speed_scales) else None)
 
 
 def load_pt_models(

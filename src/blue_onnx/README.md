@@ -22,7 +22,7 @@ Defaults suited to arbitrary user text: `normalize_text=True` and peak limiting 
 | `total_step` | `8` | Euler steps; more is slower and slightly cleaner |
 | `cfg_scale` | `4.0` | classifier-free guidance |
 | `silence_duration` | `0.0` | seconds of silence between sentence chunks |
-| `speed` | `1.0` | duration is divided by this |
+| `speed` | `1.0` | duration is divided by `speed * speed_scale[lang]` (see below) |
 | `normalize_text` | `True` | see [Text normalization](#text-normalization) |
 | `peak_limit` | `0.95` | `None` for raw vocoder output |
 
@@ -130,6 +130,15 @@ lower-case letter is read as an acronym ("BlueTTS" as "Blue TTS"), and accents a
 for the English G2P ("café" as "cafe"). Spans have no ids of their own: each chunk is still
 wrapped once in the request's `<lang>` tags. A span's phonemes get their own language's view
 (Hebrew rules on Hebrew spans only), then the chunk is normalised once in the request's language.
+
+## Voice speed calibration
+
+`speed=1.0` means the voice's calibrated natural reading pace in the requested language. A voice
+JSON may carry an optional `speed_scale` object, e.g. `{"he": 1.077, "en": 1.03, "de": 0.996}`;
+the predicted duration is then divided by `speed * speed_scale[lang]`. Voice files without the key,
+and languages the key does not list, use 1.0, so older voices behave exactly as before. When
+`style_json` averages several voices, each language's factor is the mean over those voices (a voice
+that does not list the language counts as 1.0). Slowed spans multiply on top.
 
 ## Pace blending
 

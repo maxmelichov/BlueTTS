@@ -37,6 +37,9 @@ samples, sr = tts.synthesize("Hello, this is BlueTTS.", lang="en")
 ```
 
 The bundle sets the operating point itself (8 steps, CFG 4.0, speed 1.0, language tags on).
+Speed 1.0 is each voice's calibrated natural reading pace in each language: a voice JSON can carry
+`"speed_scale": {"he": 1.077, "en": 1.03, ...}`, and the duration is divided by `speed * speed_scale[lang]`.
+Older voice files without `speed_scale` (or a language it does not list) use 1.0, exactly as before.
 Numbers, dates, prices and codes are spoken as words automatically (Yiddish: spell numbers out). Mix languages
 inline with `<en>…</en>`:
 
