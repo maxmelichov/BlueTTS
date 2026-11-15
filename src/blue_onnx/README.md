@@ -196,7 +196,7 @@ front end next to `onnx/`, and `blue_onnx` switches to it:
 - **Defaults.** In `BlueTTS.synthesize`, `total_step`, `cfg_scale` and `silence_duration` come from
   `blue_release.inference` (`load_text_to_speech` callers pass them, e.g. 8 steps, CFG 4.0); the fixed
   edge trim is skipped when `trim_edges` is false.
-- **Voices.** The BlueV3 voices (`voices/*.json`) carry `"model": "bluev3-701500"`; a tagged voice is refused by a
+- **Voices.** The BlueV3 voices (`voices/*.json`) carry `"model": "bluev3-702000"`; a tagged voice is refused by a
   bundle of another model (bundles without `blue_release` count as the previous model, whose voices are in
   `voices/v2/`). Untagged voice JSONs, e.g. your own exports, are not checked.
 - **ONNX only.** `blue_trt` and `blue_pt` do not read `blue_release` yet; use `blue_onnx` for these bundles.

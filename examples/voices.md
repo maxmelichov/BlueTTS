@@ -1,9 +1,10 @@
 # Voices
 
-## BlueV3 v3.0.0 voices
+## BlueV3 v3.0.1 voices
 
-Fifteen style JSONs in [`voices/`](../voices/), exported from the v3.0.0 model (HF `notmax123/BlueV3-onnx`,
-checkpoint 701500). A voice file only works with the model it was exported from; these carry `"model": "bluev3-701500"`.
+Fifteen style JSONs in [`voices/`](../voices/), exported from the v3.0.1 model (HF `notmax123/BlueV3-onnx`,
+checkpoint 702000). A voice file only works with the model it was exported from; these carry `"model": "bluev3-702000"`
+and a per-language `speed_scale` (speed 1.0 = natural read-speech pace for that voice).
 
 | voice | | file |
 |---|---|---|
