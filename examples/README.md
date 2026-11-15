@@ -10,7 +10,11 @@ uv run python examples/mixed.py       # inline <en>…</en> language spans
 uv run python examples/normalize.py   # numbers, dates, times, codes, emails
 uv run python examples/zero_shot.py   # voice conversion from a reference clip
 uv run python examples/app.py --lang en --text "Hello world."
+uv run --extra server python examples/openai_server.py   # OpenAI-compatible HTTP server on :8000
 ```
+
+The server is documented in the main README under
+[OpenAI-compatible server](../README.md#openai-compatible-server).
 
 Output goes to `examples/out/`; `app.py` defaults to `examples/out/app_output.wav`.
 

@@ -471,11 +471,82 @@ class UnicodeProcessor:
         return text_ids, text_mask
 
 
+SpeedScale = Optional[dict]  # one voice's {"he": 1.077, "en": 1.03, ...}; None = 1.0 everywhere
+
+
+def parse_speed_scale(value, source: str = "voice JSON") -> SpeedScale:
+    """Validate a voice JSON's optional ``speed_scale`` entry.
+
+    ``speed_scale`` maps a language code to a positive factor that makes
+    ``speed=1.0`` the voice's natural read-speech pace in that language. A missing
+    entry (``None``) means 1.0 for every language.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{source}: speed_scale must be an object of language -> number, got {type(value).__name__}")
+    out = {}
+    for lang, factor in value.items():
+        try:
+            f = float(factor)
+        except (TypeError, ValueError):
+            raise ValueError(f"{source}: speed_scale[{lang!r}] is not a number: {factor!r}") from None
+        if not (np.isfinite(f) and f > 0):
+            raise ValueError(f"{source}: speed_scale[{lang!r}] must be a positive finite number, got {factor!r}")
+        out[str(lang)] = f
+    return out
+
+
+def speed_scale_for(scales: Optional[list], row: int, lang: str) -> float:
+    """The calibration factor of batch row ``row`` for ``lang``; 1.0 when the voice
+    carries no ``speed_scale`` or does not list that language."""
+    if not scales or row >= len(scales) or not scales[row]:
+        return 1.0
+    factor = scales[row].get(lang)
+    if factor is None and isinstance(lang, str):
+        factor = scales[row].get(canonical_lang(lang))  # "en-us" -> "en", "ge" -> "de"
+    return 1.0 if factor is None else float(factor)
+
+
+def mean_speed_scale(scales: Optional[list]) -> Optional[list]:
+    """``speed_scale`` of an averaged voice: per language, the mean of the voices'
+    factors (a voice that does not list the language counts as 1.0). Returns a
+    one-row list, or ``None`` when no voice carries a ``speed_scale``."""
+    if not scales or not any(scales):
+        return None
+    langs = sorted({lang for s in scales if s for lang in s})
+    return [{lang: float(np.mean([speed_scale_for(scales, i, lang) for i in range(len(scales))])) for lang in langs}]
+
+
+def speed_divisor(speed: float, scales: Optional[list], lang_list: list[str]):
+    """What the duration predictor's seconds are divided by: per row,
+    ``max(speed * speed_scale[lang], 1e-6)``.
+
+    When every row resolves to the same value (always the case for voices without
+    ``speed_scale``) this returns a Python float, so the division is exactly the
+    pre-calibration ``dur / max(speed, 1e-6)``; otherwise a float32 array with one
+    entry per row.
+    """
+    divs = [max(float(speed) * speed_scale_for(scales, i, lg), 1e-6) for i, lg in enumerate(lang_list)]
+    if all(d == divs[0] for d in divs):
+        return divs[0] if divs else max(float(speed), 1e-6)
+    return np.asarray(divs, dtype=np.float32)
+
+
 class Style:
-    def __init__(self, style_ttl_onnx: np.ndarray, style_dp_onnx: np.ndarray, model: Optional[str] = None):
+    def __init__(
+        self,
+        style_ttl_onnx: np.ndarray,
+        style_dp_onnx: np.ndarray,
+        model: Optional[str] = None,
+        speed_scale: Optional[list] = None,
+    ):
         self.ttl = style_ttl_onnx
         self.dp = style_dp_onnx
         self.model = model   # the voice JSONs' "model" tag (e.g. "bluev3-701500"), None when untagged
+        # One entry per batch row: that voice's ``speed_scale`` dict, or None (= 1.0 for every language).
+        # ``speed=1.0`` then means the voice's calibrated natural pace: internal speed = speed * speed_scale[lang].
+        self.speed_scale = speed_scale
 
 
 class TextToSpeech:
@@ -592,7 +663,8 @@ class TextToSpeech:
         dur_onnx = np.asarray(dur_onnx, dtype=np.float32).reshape(-1)
         ref = float(pace_dpt_ref) if pace_dpt_ref is not None else DURATION_PACE_DPT_REF
         dur_onnx = blend_duration_pace(dur_onnx, text_mask, pace_blend, ref)
-        dur_onnx = dur_onnx / max(float(speed), 1e-6)
+        # Per-voice, per-language calibration: speed 1.0 is the voice's natural pace.
+        dur_onnx = dur_onnx / speed_divisor(speed, getattr(style, "speed_scale", None), lang_list)
         text_emb_onnx, *_ = self.text_enc_ort.run(
             None,
             {"text_ids": text_ids, "style_ttl": style.ttl, "text_mask": text_mask},
@@ -1043,7 +1115,10 @@ def load_latent_stats(
 def load_text_to_speech(
     onnx_dir: str, use_gpu: bool = False, config_path: str = "config/tts.json",
     renikud_path: Optional[str] = None,
+    providers: Optional[list[str]] = None,
 ) -> TextToSpeech:
+    """Load a bundle's graphs. ``providers`` is passed to every ONNX Runtime session
+    (e.g. ``["CUDAExecutionProvider", "CPUExecutionProvider"]``); the default is CPU."""
     opts = ort.SessionOptions()
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -1052,7 +1127,10 @@ def load_text_to_speech(
     n_threads = int(os.environ.get("ORT_NUM_THREADS", min(8, os.cpu_count() or 1)))
     opts.intra_op_num_threads = n_threads
     opts.inter_op_num_threads = 1
-    if use_gpu:
+    if providers:
+        providers = list(providers)
+        print(f"Using ONNX Runtime providers {providers} (intra_op_threads={n_threads})")
+    elif use_gpu:
         raise NotImplementedError("GPU mode is not fully tested")
     else:
         providers = ["CPUExecutionProvider"]
@@ -1097,10 +1175,12 @@ def load_voice_style(voice_style_paths: list[str], verbose: bool = False) -> Sty
 
     # Fill in the data
     tags = set()
+    speed_scales = []
     for i, voice_style_path in enumerate(voice_style_paths):
         with open(voice_style_path, "r", encoding="utf-8") as f:
             voice_style = json.load(f)
         tags.add(voice_style.get("model"))
+        speed_scales.append(parse_speed_scale(voice_style.get("speed_scale"), voice_style_path))
 
         ttl_data = np.array(
             voice_style["style_ttl"]["data"], dtype=np.float32
@@ -1114,7 +1194,10 @@ def load_voice_style(voice_style_paths: list[str], verbose: bool = False) -> Sty
         print(f"Loaded {bsz} voice styles")
     if len(tags) > 1:
         raise ValueError(f"voice JSONs of different models in one style: {sorted(map(str, tags))}")
-    return Style(ttl_style, dp_style, model=tags.pop() if tags else None)
+    return Style(
+        ttl_style, dp_style, model=tags.pop() if tags else None,
+        speed_scale=speed_scales if any(speed_scales) else None,
+    )
 
 
 def limit_peak(audio: np.ndarray, peak_limit: float = 0.95) -> np.ndarray:
@@ -1150,9 +1233,10 @@ class BlueTTS:
         style_json: Union[str, list[str]] = "voices/noa.json",
         renikud_path: Optional[str] = None,
         config_path: str = "config/tts.json",
+        providers: Optional[list[str]] = None,
     ):
         self.tts = load_text_to_speech(
-            onnx_dir, config_path=config_path, renikud_path=renikud_path
+            onnx_dir, config_path=config_path, renikud_path=renikud_path, providers=providers
         )
         paths = [style_json] if isinstance(style_json, str) else list(style_json)
         style = load_voice_style(paths)
@@ -1162,6 +1246,7 @@ class BlueTTS:
                 style.ttl.mean(axis=0, keepdims=True),
                 style.dp.mean(axis=0, keepdims=True),
                 model=style.model,
+                speed_scale=mean_speed_scale(style.speed_scale),
             )
         self.style = style
 
@@ -1182,8 +1267,13 @@ class BlueTTS:
         pace_dpt_ref: Optional[float] = None,
         peak_limit: Optional[float] = 0.95,
         normalize_text: bool = True,
+        style: Optional[Style] = None,
     ) -> tuple[np.ndarray, int]:
         """Synthesize ``text`` and return mono float32 samples plus the sample rate.
+
+        ``style`` overrides the voice loaded at construction for this call (a
+        :class:`Style` from :func:`load_voice_style`), so one instance can serve
+        several voices.
 
         Accepts inline ``<lang>…</lang>`` spans and splits long input into chunks
         joined by ``silence_duration`` seconds of silence, as
@@ -1205,7 +1295,7 @@ class BlueTTS:
         audio, _ = self.tts(
             text,
             lang=lang,
-            style=self.style,
+            style=self.style if style is None else style,
             total_step=total_step,
             speed=speed,
             cfg_scale=cfg_scale,
