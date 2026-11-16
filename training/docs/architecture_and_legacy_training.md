@@ -377,9 +377,9 @@ Autoencoder training may live in **bluecodec** (see root README / HF weights).
 
 ---
 
-## Dataset scale (reference)
+## Dataset format
 
-Large Hebrew runs may use on the order of **~5.9M** utterances / **~10k** hours; CSV with paths, phonemes/text, `speaker_id`. Exact paths are project-specific.
+A CSV with paths, phonemes/text and `speaker_id`. Exact paths are project-specific.
 
 ---
 
