@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/logo.png" alt="BlueTTS" width="280">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo.svg" alt="BlueTTS: Text To Speech, by Maxim Melichov" width="280">
+  </picture>
 </p>
 
 <p align="center">
