@@ -127,7 +127,8 @@ Voices: female `maya`, `noa`, `lily`, `tamar`, `shira`, `yael`, `emma`, `sara`; 
 
 ## Models
 
-**Current — BlueV3 `v3.0.1`** (checkpoint `702000`): the text-to-latent EMA at 700k plus 1,500 iterations
+**Current — BlueV3 `v3.0.1`** (checkpoint `702000`): the text-to-latent EMA at 700k, trained with the RobustSpeechFlow
+contrastive loss ([arXiv 2605.22083](https://arxiv.org/abs/2605.22083)), plus 1,500 iterations
 of FlowTTS-GRPO reinforcement learning ([arXiv 2606.23190](https://arxiv.org/abs/2606.23190)) and 500 more with a
 pause reward, a new duration model (Hebrew paced closer to read speech), and calibrated speed: `speed=1.0` is natural
 read-speech pace for every voice and language (`speed_scale` in each voice JSON). v3.0.0 (checkpoint `701500`) stays
@@ -195,6 +196,15 @@ voice-conversion graphs that `examples/zero_shot.py` and `blue_onnx.style` need.
       archivePrefix={arXiv},
       primaryClass={cs.SD},
       url={https://arxiv.org/abs/2512.17293},
+}
+@misc{yang2026robustspeechflow,
+      title={RobustSpeechFlow: Learning Robust Text-to-Speech Trajectories via Augmentation-based Contrastive Flow Matching},
+      author={Jinhyeok Yang and Hyeongju Kim and Yechan Yu and Joon Byun and Frederik Bous and Juheon Lee},
+      year={2026},
+      eprint={2605.22083},
+      archivePrefix={arXiv},
+      primaryClass={cs.SD},
+      url={https://arxiv.org/abs/2605.22083},
 }
 @misc{wang2026flowttsgrpo,
       title={FlowTTS-GRPO: Online Reinforcement Learning with Multi-Objective Reward Optimization for Flow-Matching Based Text-to-Speech},
