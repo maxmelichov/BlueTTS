@@ -25,7 +25,7 @@ data/sample/wavs/3.wav,"מזג אוויר יפה היום",spk1,he
 From the **main repository root**, with a venv that includes the training stack (Python deps for `training/`, e.g. PyTorch and pandas, per your `uv` setup):
 
 ```bash
-uv run python -m training.t2l.cli --config config/tts.json --data generated_audio/combined_dataset_cleaned_real_data.csv --out runs/exp1
+uv run python -m training.t2l.cli --config config/tts.json --data generated_audio/combined_dataset_cleaned.csv --out runs/exp1
 ```
 
 Adjust config and paths to your layout. The `blue-onnx` PyPI package is inference-only and does not install this CLI; use a full clone for training.

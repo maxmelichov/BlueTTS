@@ -111,7 +111,7 @@ def build_periodic_eval_phrases(affricate_ligatures: bool) -> list[tuple[str, st
 
 
 def train(
-    metadata_path="generated_audio/combined_dataset_cleaned_real_data.csv",
+    metadata_path="generated_audio/combined_dataset_cleaned.csv",
     checkpoint_dir="checkpoints/text2latent",
     ae_checkpoint="checkpoints/ae/ae_latest.pt",
     stats_path="stats_multilingual.pt",

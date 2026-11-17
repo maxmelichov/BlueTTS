@@ -92,7 +92,7 @@ def _build_dp_models(
     return mel_spec, ae_encoder, model
 
 def train_duration_predictor(
-    metadata_path: str = "generated_audio/combined_dataset_cleaned_real_data.csv",
+    metadata_path: str = "generated_audio/combined_dataset_cleaned.csv",
     checkpoint_dir: str = "checkpoints/duration_predictor",
     ae_checkpoint: str = "checkpoints/ae/blue_codec.safetensors",
     stats_path: str = "stats_multilingual.pt",

@@ -11,7 +11,7 @@ def main():
                         help="Finetune mode: lr=5e-4, SPFM starts after warm-up")
     parser.add_argument("--config", type=str, default="configs/tts.json",
                         help="Path to tts.json config file (default: configs/tts.json)")
-    parser.add_argument("--data", type=str, default="generated_audio/combined_dataset_cleaned_real_data.csv",
+    parser.add_argument("--data", type=str, default="generated_audio/combined_dataset_cleaned.csv",
                         help="Path to training metadata CSV")
     parser.add_argument("--out", type=str, default="checkpoints/text2latent",
                         help="Directory for ckpt_step_*.pt and logs (default: checkpoints/text2latent)")

@@ -5,8 +5,7 @@ architecture drift between generations is silent unless caught: the
 ``ConvNeXtStack`` width comes from the config's ``intermediate_dim``. A
 checkpoint loaded with the wrong config fails in
 :func:`_load_into` with a shape mismatch — that is the intended outcome, not a
-bug to work around. ``pt_models/checkpoints/text2latent/ckpt_step_767000.pt`` is
-one such stale checkpoint; use a current one that matches its config.
+bug to work around. Use a checkpoint that matches its config.
 """
 
 import json
@@ -422,7 +421,7 @@ def load_cfgs(weights_dir: str, config_path: str = "tts.json") -> dict:
 def load_stats(
     weights_dir: str, device: str
 ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-    for name in ("stats_multilingual.pt", "stats.pt", "stats_real_data.pt", "stats_mixed.pt"):
+    for name in ("stats_multilingual.pt", "stats.pt", "stats_mixed.pt"):
         path = os.path.join(weights_dir, name)
         if not os.path.exists(path):
             continue
