@@ -63,7 +63,7 @@ read it yet. Details: [Release bundles](src/blue_onnx/README.md#release-bundles)
 
 ## Voice cloning
 
-Speak in the voice of a reference recording (3-10 s of clean speech, any sample rate). The bundle's
+Speak in the voice of a reference recording (about 10 s of clean speech, any sample rate). The bundle's
 `reference_encoder.onnx` does it; no PyTorch needed:
 
 ```python
@@ -77,6 +77,56 @@ Full script: [`examples/zero_shot.py`](examples/zero_shot.py). Any sample rate a
 is mixed to mono and resampled the way the model was trained); only about the first 9 s are read. A voice works
 only with the bundle it was made from: voices of `exports/export_new_voice.py` and of blue-onnx-v2 are the v2
 architecture and do not work with BlueV3.
+
+### Voice cloning tips
+
+From a small test (method at the end of this section). No listening test was done: the numbers come from
+speaker-verification models and pitch tracking.
+
+- **Length: 8-10 s.** Only the first ~9 s are read: a 10 s clip and a 30 s clip give identical voices, so longer
+  clips change nothing. Shorter clips are worse: speaker similarity (ECAPA, 4 studio speakers) was 0.53 / 0.59 /
+  0.60 / 0.60 from 2 / 4 / 6 / 10 s, and 0.45 / 0.48 / 0.49 / 0.53 for 4 audiobook readers. Clips under 1 s are
+  refused. Silence counts toward the 9 s; 4 s of leading silence or 2 s gaps between sentences did not hurt here.
+- **Clean, close and full band.** One clean 10 s clip, degraded:
+
+  | reference | similarity (ECAPA) | carried into the output? |
+  |---|---|---|
+  | clean, 48 kHz | 0.51 | |
+  | background music at 10 dB | 0.50 | no, output pauses stay silent |
+  | resampled to 16 kHz | 0.46 | |
+  | noise at 10 dB SNR | 0.34 | no, output pauses stay silent |
+  | clipped (18 dB over full scale) | 0.32 | output is brighter (+3 dB above 4 kHz) |
+  | room reverb (RT60 0.7 s) | 0.30 | no clear reverb in the output by our measure |
+  | phone band (300-3400 Hz) | 0.26 | yes: the output has no sound above 4 kHz either |
+
+  Noise and reverb don't end up in the output, but they cut similarity from 0.51 to 0.30-0.34 (a different
+  speaker scores about 0.13); a phone recording gives a phone-sounding voice. Use the original recording
+  (44.1 or 48 kHz), not a phone call or a re-encoded copy. MP3 and other codecs were not tested.
+- **What it copies: timbre and pitch level, not delivery.** The same speaker reading "happy" (206 Hz average pitch)
+  and "neutral" (130 Hz) gave clones at 200 Hz and 141 Hz. Speaking rate stayed about the same (4.4-5.1 syllables/s)
+  whatever the reference, and an expressive reference did not reliably add pitch movement (see
+  [Expressiveness](#expressiveness)). A clone from a sad or happy clip also scored lower against the speaker's
+  neutral speech (0.28-0.51 versus 0.53-0.60 from a neutral clip), so clone from the delivery you want.
+- **How close.** Taking a different speaker as 0 % and the same speaker's real speech as 100 %, the 10 s clones
+  reached 85 % on the studio speakers and 59 % on the audiobook readers (16 kHz references, held-out speech from
+  another chapter); resemblyzer gives about 100 % and 70 %. Recording quality matters more than length beyond 6 s.
+
+How this was measured: 8 English speakers, 4 from Expresso (studio, 48 kHz, CC BY-NC 4.0) and 4 from LibriSpeech
+dev-clean (16 kHz, CC BY 4.0); clones from the first 2-30 s of each speaker's speech, 3 sentences each, 8 steps,
+fixed seeds; speaker similarity is the cosine between each output and the centroid of 30 held-out real utterances
+of the same speaker, with two speaker-verification models (SpeechBrain ECAPA-TDNN and resemblyzer). Pitch is pYIN
+on voiced frames. The degraded clips and the reverb are synthetic (noise is pink noise, music is a generated
+chord pattern), and everything is English only.
+
+### Expressiveness
+
+There is no emotion or style control. Delivery comes from the voice (or the reference clip) and, a little, from
+punctuation. On one sentence with 5 seeds each, pitch movement did not change beyond seed-to-seed variation with
+`cfg_scale` 1-8 or 4-32 steps. `?` added some pitch movement for a stock voice but not for a cloned one; `!`
+measured the same as `.`; `...` is read as `,`; slower `speed` (0.8) added a little. ALL CAPS changes nothing (the
+phonemes are the same), except that a short all-caps word can be spelled out: `WON` is read "W O N". For a livelier
+read, pick a livelier stock voice or clone from a lively clip; its pitch level carries over, but how lively the
+result is was not consistent in our test.
 
 ## Streaming
 
@@ -92,26 +142,34 @@ The [OpenAI-compatible server](#openai-compatible-server) streams the same way (
 
 ## Speed
 
-Measure it on your machine; the hosted demo shares one server and adds queue and network time:
+"x real time" is seconds of audio produced per second of compute, after the model is loaded: at 20x a one-minute
+clip takes 3 seconds. The first-run model load and downloads are not included. Measure it on your machine; the
+hosted demo shares one server and adds queue and network time:
 
 ```bash
-uv run python examples/benchmark.py              # CPU; --threads N, --providers CUDAExecutionProvider
+uv run python examples/benchmark.py              # CPU; --threads N, --steps N, --ref-wav my_voice.wav, --providers CUDAExecutionProvider
 ```
 
-BlueV3, 8 steps unless noted (`blue_onnx`, float32 graphs):
+BlueV3 v3.0.1, float32 graphs, English (the `blue_onnx` rows include the text front end):
 
-| hardware | backend | threads | steps | x real time |
-|---|---|---|---|---|
-| Ryzen 9 7950X | ONNX Runtime CPU (`blue_onnx`), text front end included | 8 | 8 | 14-18x |
-| Ryzen 9 7950X | ONNX Runtime CPU (`blue_onnx`), text front end included | 4 | 8 | about 12x |
-| Ryzen 9 7950X | ONNX Runtime CPU (`blue_onnx`), text front end included | 1 | 8 | about 4x |
-| Apple M5 | ONNX Runtime CPU (`blue_onnx`), model time only | 4 | 8 | about 15x |
-| Apple M5 | ONNX Runtime CPU (`blue_onnx`), model time only | 4 | 4 | about 30x |
-| built-in GPU for the flow model | Rust engine (MamboTTS app), not `blue_onnx`; not re-measured | – | – | about 50x |
+| hardware | engine and backend | threads | steps | text | x real time | first audio |
+|---|---|---|---|---|---|---|
+| Ryzen 9 7950X | `blue_onnx`, ONNX Runtime CPU | 8 | 8 | | 14-18x | about 0.3 s |
+| Ryzen 9 7950X | `blue_onnx`, ONNX Runtime CPU | 4 | 8 | | about 12x | |
+| Ryzen 9 7950X | `blue_onnx`, ONNX Runtime CPU | 1 | 8 | | about 4x | |
+| Apple M5 | `blue_onnx`, ONNX Runtime 1.29 CPU | 8 (default) | 8 | 371 characters, 23 s of audio | 22-23x | 0.26-0.29 s |
+| Apple M5 | `blue_onnx`, ONNX Runtime 1.29 CPU | 4 | 8 | same | 23x | 0.24 s |
+| Apple M5 | `blue_onnx`, ONNX Runtime 1.29 CPU | 1 | 8 | same | 14x | 0.36 s |
+| Apple M5 | `blue_onnx`, ONNX Runtime 1.29 CPU | 8 (default) | 4 | same | 38x | 0.16 s |
+| Apple M5 | Rust engine of the MamboTTS app, flow model on the built-in GPU (Metal) | | 8 | 58 s of audio | 26.7x | 0.28 s |
+| Apple M5 | Rust engine of the MamboTTS app, ONNX Runtime 1.23.2 CPU | 8 | 8 | 58 s of audio | 10.2x | |
+| Apple M5 | browser, WebGPU | | | | 29-46x | |
 
-First audio with `stream()` arrives after about 0.3 s on the Ryzen. More threads is not always faster: `blue_onnx`
-uses `min(8, cpu_count)` by default; set `ORT_NUM_THREADS` to try fewer. Fewer steps (`total_step=4`) is about
-twice as fast, with slightly lower quality.
+The M5 `blue_onnx` rows are the best of 5 runs of `examples/benchmark.py` with the system load average at 3-6 (other
+work running on the 10 cores). A cloned voice synthesizes at the same speed (22x in the same run); cloning itself
+is a one-off pass of about 0.14 s for a 10 s clip (0.3 s for a 30 s clip, which is resampled whole). More threads
+is not always faster: `blue_onnx` uses `min(8, cpu_count)` by default; set `ORT_NUM_THREADS` to try fewer. Fewer
+steps (`total_step=4`) is about 1.7 times as fast on the M5, with slightly lower quality.
 
 ## Documentation
 

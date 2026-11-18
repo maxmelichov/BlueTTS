@@ -87,7 +87,7 @@ style = style_from_wav("ref.wav", onnx_dir="bluev3_onnx/onnx")         # or a St
 
 With a BlueV3 bundle, `onnx/reference_encoder.onnx` takes the clip (mixed to mono, resampled to
 44.1 kHz with the resampler the model was trained with, padded to whole latent frames) and returns
-`style_ttl` and `style_dp`. It reads only about the first 9 s; use 3-10 s of one clean speaker.
+`style_ttl` and `style_dp`. It reads only about the first 9 s; use 8-10 s of one clean speaker (see [Voice cloning tips](../../README.md#voice-cloning-tips)).
 Clips under 1 s raise `ValueError`. The result carries the bundle's model tag
 (`"model": "bluev3-702000"`). `BlueTTS(ref_wav=...)` and `BlueTTS.voice_from_wav(...)` wrap this.
 

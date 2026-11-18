@@ -11,6 +11,7 @@ import numpy as np
 
 from src.blue_onnx import (
     AVAILABLE_LANGS,
+    Style,
     UnicodeProcessor,
     blend_duration_pace,
     chunk_text,
@@ -259,6 +260,27 @@ class TestLatentFrameMath(unittest.TestCase):
             wav_lengths = np.array([int(seconds * SR)], dtype=np.int64)
             mask = get_latent_mask(wav_lengths, BASE_CHUNK, CCF)
             self.assertEqual(mask.shape[2], self.frames(seconds), seconds)
+
+
+class TestStylePayload(unittest.TestCase):
+    """Voice JSON payload <-> Style, as voice_from_wav uses it."""
+
+    def test_round_trip_keeps_model_tag(self):
+        from src.blue_onnx.style import payload_from_style, style_from_payload
+        ttl = np.arange(2 * 3 * 4, dtype=np.float32).reshape(1, 6, 4)
+        dp = np.ones((1, 8, 16), dtype=np.float32)
+        payload = payload_from_style(Style(ttl, dp))
+        payload["model"] = "bluev3-702000"   # export_voice_style adds the bundle's tag like this
+        style = style_from_payload(payload)
+        self.assertEqual(style.model, "bluev3-702000")
+        np.testing.assert_array_equal(style.ttl, ttl)
+        np.testing.assert_array_equal(style.dp, dp)
+
+    def test_untagged_payload_stays_untagged(self):
+        from src.blue_onnx.style import payload_from_style, style_from_payload
+        style = style_from_payload(payload_from_style(Style(np.zeros((1, 2, 2), np.float32),
+                                                            np.zeros((1, 2, 2), np.float32))))
+        self.assertIsNone(style.model)
 
 
 if __name__ == "__main__":
