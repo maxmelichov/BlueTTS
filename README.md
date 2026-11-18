@@ -25,13 +25,13 @@ git clone https://github.com/maxmelichov/BlueTTS.git
 cd BlueTTS
 uv sync
 uv run hf download notmax123/BlueV3-onnx --include "onnx/*" --include "voices/*" --include "frontend/*" --local-dir ./bluev3_onnx
-uv pip install ./bluev3_onnx/frontend/polyg2p-*.whl     # G2P for en / de / es / it / ru (Linux x86-64, glibc >= 2.34)
+uv pip install --no-index --find-links ./bluev3_onnx/frontend polyg2p==0.1.0   # G2P for en / de / es / it / ru
 ```
 
 Give `--include` once per pattern: with `--include "onnx/*" "voices/*" ...` current `hf` versions skip `onnx/`
-without an error. The polyg2p wheel in the bundle is for Linux x86-64 only; on macOS and Windows, Hebrew and
-Yiddish work, and English, German, Spanish, Italian and Russian raise
-`RuntimeError: This release bundle needs polyg2p` for now.
+without an error. The bundle has polyg2p wheels for Linux x86-64 (glibc >= 2.34) and macOS (Apple Silicon and Intel); the command
+above picks the one for your machine. There is no Windows wheel yet: there, Hebrew and Yiddish work, and English,
+German, Spanish, Italian and Russian raise `RuntimeError: This release bundle needs polyg2p`.
 
 ```python
 import soundfile as sf
@@ -57,7 +57,7 @@ samples, sr = tts.synthesize("שלום לכולם, <en>welcome to the presentati
 
 Hebrew grapheme-to-phoneme is [RenikudPlus](https://github.com/maxmelichov/RenikudPlus), with the
 weights shipped in the bundle (`frontend/renikud/model.onnx`); English, German, Spanish, Italian
-and Russian use polyg2p (its wheel in the bundle is for Linux x86-64); Yiddish uses the bundle's
+and Russian use polyg2p (wheels in the bundle: Linux x86-64 and macOS); Yiddish uses the bundle's
 `frontend/yi`. The bundle runs on `blue_onnx`; `blue_trt` does not
 read it yet. Details: [Release bundles](src/blue_onnx/README.md#release-bundles).
 

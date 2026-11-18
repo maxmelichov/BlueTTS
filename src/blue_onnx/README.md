@@ -237,7 +237,7 @@ front end next to `onnx/`, and `blue_onnx` switches to it:
 - **ONNX only.** `blue_trt` and `blue_pt` do not read `blue_release` yet; use `blue_onnx` for these bundles.
 
 ```bash
-uv pip install release/frontend/polyg2p-*.whl    # Linux x86-64, glibc >= 2.34
+uv pip install --no-index --find-links release/frontend polyg2p==0.1.0    # Linux x86-64 (glibc >= 2.34), macOS
 ```
 
 ```python
