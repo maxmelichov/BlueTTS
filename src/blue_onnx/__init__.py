@@ -240,7 +240,7 @@ class TextProcessor:
                 except ImportError as e:
                     raise RuntimeError(
                         "This release bundle needs polyg2p for en/de/es/it/ru: "
-                        "pip install <bundle>/frontend/polyg2p-*.whl"
+                        "pip install --no-index --find-links <bundle>/frontend polyg2p==0.1.0"
                     ) from e
                 self._poly = Phonemizer(data_dir=d)
             t = re.sub(r"\s*\[[^\]]*\]\s*", " ", content).strip()
