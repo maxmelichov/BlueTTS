@@ -107,6 +107,10 @@ speaker-verification models and pitch tracking.
   whatever the reference, and an expressive reference did not reliably add pitch movement (see
   [Expressiveness](#expressiveness)). A clone from a sad or happy clip also scored lower against the speaker's
   neutral speech (0.28-0.51 versus 0.53-0.60 from a neutral clip), so clone from the delivery you want.
+- **The words don't matter.** No transcript is needed, and what is said in the clip has no effect. Put the best
+  part of the recording first, since only the first ~9 s are read.
+- **Language.** Use a clip in the language you will synthesize when you can (not measured here; every test above
+  is English).
 - **How close.** Taking a different speaker as 0 % and the same speaker's real speech as 100 %, the 10 s clones
   reached 85 % on the studio speakers and 59 % on the audiobook readers (16 kHz references, held-out speech from
   another chapter); resemblyzer gives about 100 % and 70 %. Recording quality matters more than length beyond 6 s.
@@ -127,6 +131,8 @@ measured the same as `.`; `...` is read as `,`; slower `speed` (0.8) added a lit
 phonemes are the same), except that a short all-caps word can be spelled out: `WON` is read "W O N". For a livelier
 read, pick a livelier stock voice or clone from a lively clip; its pitch level carries over, but how lively the
 result is was not consistent in our test.
+
+Very long sentences can sound uneven. Split them with punctuation where a speaker would breathe.
 
 ## Streaming
 
