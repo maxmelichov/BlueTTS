@@ -1251,6 +1251,27 @@ def limit_peak(audio: np.ndarray, peak_limit: float = 0.95) -> np.ndarray:
     return (audio * (peak_limit / peak)).astype(np.float32)
 
 
+_SENT_END_RE = re.compile(r"(?<=[.!?…։。])[\"'”’)\]]*\s+|\n+")
+
+
+def _stream_sentences(text: str) -> list[str]:
+    """Split ``text`` at sentence ends for streaming; never inside an inline ``<lang>…</lang>`` span."""
+    out, start, depth = [], 0, 0
+    tags = [(m.start(), -1 if m.group(0).startswith("</") else 1) for m in re.finditer(r"</?[a-z]{2,3}(?:-[a-z]+)?>", text)]
+    for m in _SENT_END_RE.finditer(text):
+        depth = sum(d for pos, d in tags if pos < m.start())
+        if depth > 0:
+            continue
+        piece = text[start:m.start()].strip()
+        if piece:
+            out.append(piece)
+        start = m.end()
+    tail = text[start:].strip()
+    if tail:
+        out.append(tail)
+    return out or [text]
+
+
 class BlueTTS:
     """One-call TTS front end: graphs + voice style in, ``(samples, sample_rate)`` out.
 
@@ -1313,17 +1334,23 @@ class BlueTTS:
                normalize_text: bool = True):
         """Like :meth:`synthesize`, but yields the audio chunk by chunk (mono float32 arrays at
         ``sample_rate``) as each one is ready, so playback can start after the first sentence instead of after
-        the whole text. Joined, the chunks are the :meth:`synthesize` output (each chunk is peak-limited on its
-        own)."""
+        the whole text. Each sentence is rendered on its own (and peak-limited on its own), joined by the bundle's
+        silence; long sentences are cut further as in :meth:`synthesize`."""
         rel = (self.tts.release or {}).get("inference", {})
         total_step = total_step if total_step is not None else int(rel.get("steps", 8))
         cfg_scale = cfg_scale if cfg_scale is not None else float(rel.get("cfg_scale", DEFAULT_CFG_SCALE))
         silence_duration = silence_duration if silence_duration is not None else float(rel.get("join_silence_s", 0.0))
-        for wav, _ in self.tts(text, lang=lang, style=self.style if style is None else style, total_step=total_step,
-                               speed=speed, cfg_scale=cfg_scale, silence_duration=silence_duration,
-                               normalize_text=normalize_text, stream=True):
-            audio = np.asarray(wav, dtype=np.float32).reshape(-1)
-            yield limit_peak(audio, peak_limit) if peak_limit is not None else audio
+        gap = np.zeros(int(silence_duration * self.sample_rate), dtype=np.float32)
+        first = True
+        for sentence in _stream_sentences(text):   # one sentence per chunk: the lowest time to first audio
+            for wav, _ in self.tts(sentence, lang=lang, style=self.style if style is None else style,
+                                   total_step=total_step, speed=speed, cfg_scale=cfg_scale,
+                                   silence_duration=silence_duration, normalize_text=normalize_text, stream=True):
+                audio = np.asarray(wav, dtype=np.float32).reshape(-1)
+                if peak_limit is not None:
+                    audio = limit_peak(audio, peak_limit)
+                yield audio if first else np.concatenate([gap, audio])
+                first = False
 
     def synthesize(
         self,
