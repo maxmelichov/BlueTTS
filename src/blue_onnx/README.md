@@ -29,6 +29,21 @@ Defaults suited to arbitrary user text: `normalize_text=True` and peak limiting 
 A release bundle whose `tts.json` has a `blue_release` section (v3.0.0 on) sets its own
 defaults for `total_step`, `cfg_scale` and `silence_duration`; see [Release bundles](#release-bundles).
 
+### Streaming: `BlueTTS.stream`
+
+```python
+with sf.SoundFile("long.wav", "w", samplerate=tts.sample_rate, channels=1) as f:
+    for samples, sr in tts.stream(long_text, lang="he"):
+        f.write(samples)
+```
+
+Same arguments as `synthesize`. It yields `(samples, sample_rate)` for each chunk as soon as
+that chunk is synthesized. Chunks after the first start with their `silence_duration` of silence,
+so the pieces play back to back. `peak_limit` is applied per chunk. Normalization and G2P of the
+whole text run before the first chunk. `TextToSpeech.stream` is the same for
+`load_text_to_speech` callers: it yields `(wav, duration)`, and joining the `wav` arrays gives
+exactly what `__call__` returns for that text.
+
 ## `load_text_to_speech` — per-call style, chunking, phonemes
 
 ```python
@@ -60,6 +75,24 @@ returned waveform is as long as the longest item; use the returned durations to 
 > **Requires graphs exported with a dynamic batch axis.** The currently published
 > `notmax123/blue-onnx-v2` bundle is batch-1 and raises an ONNX Runtime shape error.
 > Re-export with [`exports/export_onnx.py`](../../exports/README.md) to use this.
+
+## Voice cloning — `blue_onnx.style`
+
+```python
+from blue_onnx.style import export_voice_style, style_from_wav
+
+payload = export_voice_style("ref.wav", onnx_dir="bluev3_onnx/onnx")   # voice JSON, save with json.dump
+style = style_from_wav("ref.wav", onnx_dir="bluev3_onnx/onnx")         # or a Style for synthesize(style=...)
+```
+
+With a BlueV3 bundle, `onnx/reference_encoder.onnx` takes the clip (mixed to mono, resampled to
+44.1 kHz, cut at 30 s, padded to whole latent frames) and returns `style_ttl` and `style_dp`. It
+reads only about the first 10 s; use 3-12 s of one clean speaker. Clips under 0.5 s raise
+`ValueError`. The result carries the bundle's model tag (`"model": "bluev3-702000"`).
+
+With `notmax123/blue-onnx-v2` (`onnx_dir="onnx_models"`), the v2 graphs `codec_encoder`,
+`style_encoder` and `duration_style_encoder` are used instead. `config` defaults to the bundle's
+own `tts.json`.
 
 ## Text normalization
 
@@ -160,7 +193,9 @@ uv sync --extra gpu      && uv pip uninstall onnxruntime   # NVIDIA CUDA
 ```
 
 Do not combine `openvino` and `gpu`. For TensorRT, see [`exports/`](../../exports/README.md).
-CPU thread count is `min(8, cpu_count)`, overridable with `ORT_NUM_THREADS`.
+CPU thread count is `min(8, cpu_count)`, overridable with `ORT_NUM_THREADS`. More is not always
+faster: on an Apple M5 (4 performance + 6 efficiency cores) 4 threads were faster than all 10 cores
+(see [Speed](../../README.md#speed)).
 
 ## Notes
 

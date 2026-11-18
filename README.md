@@ -24,9 +24,14 @@
 git clone https://github.com/maxmelichov/BlueTTS.git
 cd BlueTTS
 uv sync
-uv run hf download notmax123/BlueV3-onnx --include "onnx/*" "voices/*" "frontend/*" --local-dir ./bluev3_onnx
+uv run hf download notmax123/BlueV3-onnx --include "onnx/*" --include "voices/*" --include "frontend/*" --local-dir ./bluev3_onnx
 uv pip install ./bluev3_onnx/frontend/polyg2p-*.whl     # G2P for en / de / es / it / ru (Linux x86-64, glibc >= 2.34)
 ```
+
+Give `--include` once per pattern. With `--include "onnx/*" "voices/*" ...` current `hf` versions
+skip `onnx/` without an error. The polyg2p wheel in the bundle is for Linux x86-64 only. On macOS
+and Windows, Hebrew and Yiddish work; English, German, Spanish, Italian and Russian raise
+`RuntimeError: This release bundle needs polyg2p` for now.
 
 ```python
 import soundfile as sf
@@ -55,6 +60,78 @@ weights shipped in the bundle (`frontend/renikud/model.onnx`); English, German, 
 and Russian use polyg2p (its wheel in the bundle is for Linux x86-64); Yiddish uses the bundle's
 `frontend/yi`. The bundle runs on `blue_onnx`; `blue_trt` does not
 read it yet. Details: [Release bundles](src/blue_onnx/README.md#release-bundles).
+
+## Voice cloning
+
+Clone a voice from a short recording of one speaker. The BlueV3 bundle does this itself with
+`onnx/reference_encoder.onnx` (ONNX only, no PyTorch, no extra download):
+
+```bash
+wget https://github.com/thewh1teagle/phonikud-chatterbox/releases/download/asset-files-v1/male1.wav -O ref.wav
+```
+
+```python
+import json
+import soundfile as sf
+from blue_onnx import BlueTTS
+from blue_onnx.style import export_voice_style
+
+voice = export_voice_style("ref.wav", onnx_dir="bluev3_onnx/onnx")
+with open("my_voice.json", "w", encoding="utf-8") as f:
+    json.dump(voice, f)
+
+tts = BlueTTS(onnx_dir="bluev3_onnx/onnx", style_json="my_voice.json")
+samples, sr = tts.synthesize("שלום, זה הקול שלי.", lang="he")
+sf.write("cloned.wav", samples, sr)
+```
+
+- Any sample rate and channel count works: the clip is mixed to mono and resampled to 44.1 kHz.
+- Use 3 to 12 seconds of clean speech. The encoder reads only about the first 10 s; clips under 0.5 s are refused.
+- `my_voice.json` is tagged with the bundle's model (`bluev3-702000`) and works only with that model.
+- Use the BlueV3 bundle's `onnx/` folder. Voices from `exports/export_new_voice.py` and from
+  `notmax123/blue-onnx-v2` are the v2 architecture and do not work with BlueV3.
+- `style_from_wav("ref.wav", onnx_dir=...)` returns the voice directly, without a file
+  (`synthesize(..., style=...)`). [`examples/zero_shot.py`](examples/zero_shot.py) does both steps.
+
+## Streaming
+
+Long text is split into chunks (whole sentences, up to 300 model tokens each) and synthesized one
+chunk at a time. `tts.stream()` takes the same arguments as `synthesize()` and yields each chunk's
+audio as soon as it is ready, so playback can start after the first chunk:
+
+```python
+import soundfile as sf
+from blue_onnx import BlueTTS
+
+tts = BlueTTS(onnx_dir="bluev3_onnx/onnx", style_json="voices/noa.json")
+text = "זה המשפט הראשון. " * 40
+with sf.SoundFile("long.wav", "w", samplerate=tts.sample_rate, channels=1) as f:
+    for samples, sr in tts.stream(text, lang="he"):
+        f.write(samples)          # or hand `samples` to your audio player
+```
+
+Every chunk after the first starts with the pause that joins it to the previous one, so the pieces
+play back to back. Hebrew G2P for the whole text runs before the first chunk. On the Apple M5 below
+(4 threads), the first of five chunks of a 62 s Hebrew text was ready after about 1.4 s, and the
+whole text after about 4 s. The [OpenAI-compatible server](#openai-compatible-server) streams too.
+
+## Speed
+
+BlueV3, default 8 steps unless noted. The Apple M5 (4 performance + 6 efficiency cores) rows are
+model time only (no G2P). The last row is a different engine and was not re-measured.
+
+| hardware | backend | threads | steps | text | x real time |
+|---|---|---|---|---|---|
+| Apple M5 | ONNX Runtime CPU (`blue_onnx`) | 1 | 8 | – | about 12-13x |
+| Apple M5 | ONNX Runtime CPU (`blue_onnx`) | 4 | 8 | – | about 15x |
+| Apple M5 | ONNX Runtime CPU (`blue_onnx`) | 10 (all cores) | 8 | – | about 8-10x |
+| Apple M5 | ONNX Runtime CPU (`blue_onnx`) | 4 | 4 | – | about 30x |
+| built-in GPU for the flow model | Rust engine (MamboTTS app), not `blue_onnx` | – | – | about 1 min | about 50x |
+
+More threads is not always faster: on this chip 4 threads (one per performance core) beat all 10
+cores. `blue_onnx` uses `min(8, cpu_count)` threads by default (8 on the M5); set
+`ORT_NUM_THREADS=4` to try fewer. Fewer steps (`total_step=4`) is about twice as fast, with
+slightly lower quality.
 
 ## Documentation
 
@@ -87,7 +164,7 @@ server shared by [@MaximS](https://github.com/MaximS) in [#22](https://github.co
 
 ```bash
 uv sync --extra server              # fastapi + uvicorn; mp3 / opus / aac also need ffmpeg on PATH
-uv run hf download notmax123/BlueV3-onnx --include "onnx/*" "voices/*" "frontend/*" --local-dir ./bluev3_onnx
+uv run hf download notmax123/BlueV3-onnx --include "onnx/*" --include "voices/*" --include "frontend/*" --local-dir ./bluev3_onnx
 uv run python examples/openai_server.py --bundle bluev3_onnx --host 0.0.0.0 --port 8000
 ```
 
@@ -169,8 +246,9 @@ releases do not work with BlueV3.
 [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2) still load (no `blue_release` section in
 their `tts.json`), with the previous voices in [`voices/v2/`](voices/v2/), e.g.
 `BlueTTS(onnx_dir="onnx_models", style_json="voices/v2/noa.json")`. The BlueV3 voices in `voices/` carry
-`"model": "bluev3-702000"`, and `blue_onnx` refuses them with an older bundle. blue-onnx-v2 is the only bundle with the zero-shot
-voice-conversion graphs that `examples/zero_shot.py` and `blue_onnx.style` need.
+`"model": "bluev3-702000"`, and `blue_onnx` refuses them with an older bundle. `blue_onnx.style` and
+`examples/zero_shot.py` clone voices with either bundle (see [Voice cloning](#voice-cloning)); a voice
+cloned with blue-onnx-v2 works only with blue-onnx-v2.
 
 ## Citations
 

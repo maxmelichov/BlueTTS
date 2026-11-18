@@ -7,7 +7,7 @@ import time
 import unicodedata
 from contextlib import contextmanager
 from importlib import import_module
-from typing import Callable, Optional, Union
+from typing import Callable, Iterator, Optional, Union
 from unicodedata import normalize
 
 import numpy as np
@@ -771,6 +771,93 @@ class TextToSpeech:
         to :data:`DEFAULT_MIXED_PACE_BLEND`, while single-language defaults to 0.
         With a release bundle it defaults to 0 everywhere: the model's own durations.
         """
+        text, pace_blend_eff = self._prepare(text, lang, style, text_is_phonemes, pace_blend, normalize_text)
+        phonemize = not text_is_phonemes
+        if isinstance(text, list):
+            assert isinstance(lang, list) and len(text) == len(lang), (
+                "Batch mode requires `lang` to be a list of the same length as `text`."
+            )
+            if phonemize and self.g2p is not None:
+                text = [
+                    self.g2p.phonemize(t, lang=lang_code)
+                    for t, lang_code in zip(text, lang)
+                ]
+            text = [strip_lang_tags_from_phoneme_string(t) for t in text]
+            return self._infer(
+                text,
+                lang,
+                style,
+                total_step,
+                speed,
+                cfg_scale,
+                pace_blend=pace_blend_eff,
+                pace_dpt_ref=pace_dpt_ref,
+            )
+
+        wav_cat = None
+        dur_cat = None
+        for gap, wav, dur_onnx in self._chunks(
+            text, lang, style, total_step, speed, cfg_scale, silence_duration,
+            phonemize, pace_blend_eff, pace_dpt_ref,
+        ):
+            if wav_cat is None:
+                wav_cat = wav
+                dur_cat = dur_onnx
+            else:
+                silence = np.zeros((1, int(gap * self.sample_rate)), dtype=np.float32)
+                wav_cat = np.concatenate([wav_cat, silence, wav], axis=1)
+                dur_cat = dur_cat + dur_onnx + gap
+        if wav_cat is None:  # nothing speakable survived normalization
+            return np.zeros((1, 0), dtype=np.float32), np.zeros((1,), dtype=np.float32)
+        return wav_cat, dur_cat
+
+    def stream(
+        self,
+        text: str,
+        lang: str,
+        style: Style,
+        total_step: int,
+        speed: float = 1.0,
+        cfg_scale: float = DEFAULT_CFG_SCALE,
+        silence_duration: float = 0.0,
+        text_is_phonemes: bool = False,
+        pace_blend: Optional[float] = None,
+        pace_dpt_ref: Optional[float] = None,
+        normalize_text: bool = False,
+    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """Like ``__call__`` with a ``str``, but yield ``(wav, duration)`` for each chunk as soon as it
+        is synthesized, so playback can start after the first chunk instead of the whole text.
+
+        Every chunk after the first starts with the silence that joins it to the previous one, so
+        concatenating the yielded ``wav`` arrays on the last axis gives exactly what ``__call__``
+        returns. Nothing is yielded when no speakable text survives normalization.
+        """
+        if not isinstance(text, str):
+            raise TypeError("stream() takes one str; use __call__ or batch() for a list of texts")
+        text, pace_blend_eff = self._prepare(text, lang, style, text_is_phonemes, pace_blend, normalize_text)
+        first = True
+        for gap, wav, dur_onnx in self._chunks(
+            text, lang, style, total_step, speed, cfg_scale, silence_duration,
+            not text_is_phonemes, pace_blend_eff, pace_dpt_ref,
+        ):
+            if not first:
+                silence = np.zeros((1, int(gap * self.sample_rate)), dtype=np.float32)
+                wav = np.concatenate([silence, wav], axis=1)
+                dur_onnx = dur_onnx + gap
+            first = False
+            yield wav, dur_onnx
+
+    def _prepare(
+        self,
+        text: Union[str, list[str]],
+        lang: Union[str, list[str]],
+        style: Style,
+        text_is_phonemes: bool,
+        pace_blend: Optional[float],
+        normalize_text: bool,
+    ) -> tuple[Union[str, list[str]], float]:
+        """Shared front half of ``__call__`` / ``stream``: style check, normalization, Latin spans and
+        the effective ``pace_blend``."""
         self.check_style(style)
         phonemize = not text_is_phonemes
         if normalize_text:
@@ -809,27 +896,24 @@ class TextToSpeech:
             if pace_blend is not None
             else (DEFAULT_MIXED_PACE_BLEND if has_inline_lang and not self.release else 0.0)
         )
-        if isinstance(text, list):
-            assert isinstance(lang, list) and len(text) == len(lang), (
-                "Batch mode requires `lang` to be a list of the same length as `text`."
-            )
-            if phonemize and self.g2p is not None:
-                text = [
-                    self.g2p.phonemize(t, lang=lang_code)
-                    for t, lang_code in zip(text, lang)
-                ]
-            text = [strip_lang_tags_from_phoneme_string(t) for t in text]
-            return self._infer(
-                text,
-                lang,
-                style,
-                total_step,
-                speed,
-                cfg_scale,
-                pace_blend=pace_blend_eff,
-                pace_dpt_ref=pace_dpt_ref,
-            )
+        return text, pace_blend_eff
 
+    def _chunks(
+        self,
+        text: str,
+        lang: str,
+        style: Style,
+        total_step: int,
+        speed: float,
+        cfg_scale: float,
+        silence_duration: float,
+        phonemize: bool,
+        pace_blend_eff: float,
+        pace_dpt_ref: Optional[float],
+    ) -> Iterator[tuple[float, np.ndarray, np.ndarray]]:
+        """Synthesize prepared single-speaker text one chunk at a time, yielding
+        ``(gap_before, wav, duration)``; ``gap_before`` is the silence that joins the chunk to the
+        previous one (ignored for the first)."""
         assert isinstance(lang, str), "Single-text mode requires `lang` to be a str."
         assert (
             style.ttl.shape[0] == 1
@@ -838,8 +922,6 @@ class TextToSpeech:
         # Without slow markers this is a single ``(text, False)`` segment, i.e. the
         # plain phonemize → chunk → synthesize path.
         segments = split_slow_segments(text)
-        wav_cat = None
-        dur_cat = None
         prev_is_slow = False
         for seg_text, is_slow in segments:
             seg_speed = speed * SLOW_SPEED_SCALE if is_slow else speed
@@ -860,20 +942,8 @@ class TextToSpeech:
                     pace_blend=seg_pace_blend,
                     pace_dpt_ref=seg_pace_dpt,
                 )
-                if wav_cat is None:
-                    wav_cat = wav
-                    dur_cat = dur_onnx
-                else:
-                    gap = SLOW_SILENCE if (is_slow or prev_is_slow) else silence_duration
-                    silence = np.zeros(
-                        (1, int(gap * self.sample_rate)), dtype=np.float32
-                    )
-                    wav_cat = np.concatenate([wav_cat, silence, wav], axis=1)
-                    dur_cat = dur_cat + dur_onnx + gap
+                yield (SLOW_SILENCE if (is_slow or prev_is_slow) else silence_duration), wav, dur_onnx
             prev_is_slow = is_slow
-        if wav_cat is None:  # nothing speakable survived normalization
-            return np.zeros((1, 0), dtype=np.float32), np.zeros((1,), dtype=np.float32)
-        return wav_cat, dur_cat
 
     def check_style(self, style: Style) -> None:
         """Refuse a voice exported for another model: a voice JSON is valid only with the model it came from.
@@ -1288,12 +1358,52 @@ class BlueTTS:
         straight to a PCM WAV never clips (see :func:`limit_peak`). Pass
         ``peak_limit=None`` for the raw vocoder output.
         """
+        audio, _ = self.tts(**self._call_args(
+            text, lang, total_step, cfg_scale, speed, silence_duration, text_is_phonemes,
+            pace_blend, pace_dpt_ref, normalize_text, style,
+        ))
+        return self._finish(audio, peak_limit), self.sample_rate
+
+    def stream(
+        self,
+        text: str,
+        lang: str = "he",
+        total_step: Optional[int] = None,
+        cfg_scale: Optional[float] = None,
+        speed: float = 1.0,
+        silence_duration: Optional[float] = None,
+        text_is_phonemes: bool = False,
+        pace_blend: Optional[float] = None,
+        pace_dpt_ref: Optional[float] = None,
+        peak_limit: Optional[float] = 0.95,
+        normalize_text: bool = True,
+        style: Optional[Style] = None,
+    ) -> Iterator[tuple[np.ndarray, int]]:
+        """Same arguments as :meth:`synthesize`, but yield ``(samples, sample_rate)`` for each chunk
+        as soon as it is synthesized, so playback can start before the whole text is done.
+
+        Chunks are the ones :meth:`synthesize` joins (sentences packed up to the model's chunk
+        size). Every chunk after the first starts with its ``silence_duration`` of silence, so the
+        pieces can be played or written back to back. ``peak_limit`` applies to each chunk on its
+        own, so a loud chunk is scaled down without touching the others.
+        """
+        for audio, _ in self.tts.stream(**self._call_args(
+            text, lang, total_step, cfg_scale, speed, silence_duration, text_is_phonemes,
+            pace_blend, pace_dpt_ref, normalize_text, style,
+        )):
+            yield self._finish(audio, peak_limit), self.sample_rate
+
+    def _call_args(
+        self, text, lang, total_step, cfg_scale, speed, silence_duration, text_is_phonemes,
+        pace_blend, pace_dpt_ref, normalize_text, style,
+    ) -> dict:
+        """Keyword arguments for ``TextToSpeech``; unset defaults come from the bundle's ``blue_release``."""
         rel = (self.tts.release or {}).get("inference", {})
         total_step = total_step if total_step is not None else int(rel.get("steps", 8))
         cfg_scale = cfg_scale if cfg_scale is not None else float(rel.get("cfg_scale", DEFAULT_CFG_SCALE))
         silence_duration = silence_duration if silence_duration is not None else float(rel.get("join_silence_s", 0.0))
-        audio, _ = self.tts(
-            text,
+        return dict(
+            text=text,
             lang=lang,
             style=self.style if style is None else style,
             total_step=total_step,
@@ -1305,12 +1415,15 @@ class BlueTTS:
             pace_dpt_ref=pace_dpt_ref,
             normalize_text=normalize_text and not text_is_phonemes,
         )
+
+    @staticmethod
+    def _finish(audio: np.ndarray, peak_limit: Optional[float]) -> np.ndarray:
         audio = np.asarray(audio, dtype=np.float32)
         if audio.ndim == 2:
             audio = audio[0]
         if peak_limit is not None:
             audio = limit_peak(audio, peak_limit)
-        return audio, self.sample_rate
+        return audio
 
 
 @contextmanager
