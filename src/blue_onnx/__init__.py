@@ -738,8 +738,12 @@ class TextToSpeech:
         pace_blend: Optional[float] = None,
         pace_dpt_ref: Optional[float] = None,
         normalize_text: bool = False,
+        stream: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Synthesize speech.
+
+        ``stream=True`` (single ``str`` text only) returns a generator of ``(wav [1, N], seconds)``, one per
+        chunk, instead of the joined audio: play each chunk as it arrives.
 
         - ``text`` as ``list[str]`` → batched inference (``lang`` and ``style`` must
           match batch size; no chunking).
@@ -838,6 +842,9 @@ class TextToSpeech:
         # Without slow markers this is a single ``(text, False)`` segment, i.e. the
         # plain phonemize → chunk → synthesize path.
         segments = split_slow_segments(text)
+        if stream:
+            return self._stream_chunks(segments, lang, style, total_step, speed, cfg_scale, silence_duration,
+                                       phonemize, pace_blend_eff, pace_dpt_ref, max_len)
         wav_cat = None
         dur_cat = None
         prev_is_slow = False
@@ -874,6 +881,32 @@ class TextToSpeech:
         if wav_cat is None:  # nothing speakable survived normalization
             return np.zeros((1, 0), dtype=np.float32), np.zeros((1,), dtype=np.float32)
         return wav_cat, dur_cat
+
+    def _stream_chunks(self, segments, lang, style, total_step, speed, cfg_scale, silence_duration,
+                       phonemize, pace_blend_eff, pace_dpt_ref, max_len):
+        """The single-text loop of :meth:`__call__` as a generator: one ``(wav [1, N], seconds)`` per chunk, in
+        order, each (after the first) starting with the silence that joins it to the previous chunk. The
+        concatenation of the yielded audio equals the non-streamed output."""
+        first = True
+        prev_is_slow = False
+        for seg_text, is_slow in segments:
+            seg_speed = speed * SLOW_SPEED_SCALE if is_slow else speed
+            seg_pace_blend = SLOW_PACE_BLEND if is_slow and not self.release else pace_blend_eff
+            seg_pace_dpt = SLOW_PACE_DPT_REF if is_slow else pace_dpt_ref
+            if phonemize and self.g2p is not None:
+                seg_text = self.g2p.phonemize(seg_text, lang=lang)
+            seg_text, in_span = _strip_tags_keep_spans(seg_text, lang)
+            for chunk in chunk_text(seg_text, max_len=max_len, fits=self._chunk_fits(lang), in_span=in_span):
+                wav, dur_onnx = self._infer([chunk], [lang], style, total_step, seg_speed, cfg_scale,
+                                            pace_blend=seg_pace_blend, pace_dpt_ref=seg_pace_dpt)
+                if not first:
+                    gap = SLOW_SILENCE if (is_slow or prev_is_slow) else silence_duration
+                    silence = np.zeros((1, int(gap * self.sample_rate)), dtype=np.float32)
+                    wav = np.concatenate([silence, wav], axis=1)
+                    dur_onnx = dur_onnx + gap
+                first = False
+                yield wav, dur_onnx
+            prev_is_slow = is_slow
 
     def check_style(self, style: Style) -> None:
         """Refuse a voice exported for another model: a voice JSON is valid only with the model it came from.
@@ -1234,10 +1267,16 @@ class BlueTTS:
         renikud_path: Optional[str] = None,
         config_path: str = "config/tts.json",
         providers: Optional[list[str]] = None,
+        ref_wav: Optional[str] = None,
     ):
+        self.onnx_dir = onnx_dir
+        self.providers = providers
         self.tts = load_text_to_speech(
             onnx_dir, config_path=config_path, renikud_path=renikud_path, providers=providers
         )
+        if ref_wav is not None:   # clone the voice of a reference clip instead of loading a voice JSON
+            self.style = self.voice_from_wav(ref_wav)
+            return
         paths = [style_json] if isinstance(style_json, str) else list(style_json)
         style = load_voice_style(paths)
         self.tts.check_style(style)
@@ -1253,6 +1292,38 @@ class BlueTTS:
     @property
     def sample_rate(self) -> int:
         return self.tts.sample_rate
+
+    def voice_from_wav(self, ref_wav: str, save_json: Optional[str] = None) -> Style:
+        """Clone a voice: the :class:`Style` of a reference recording (3-10 s of clean speech, any sample
+        rate), from the bundle's own graphs. Pass it as ``style=`` to :meth:`synthesize` / :meth:`stream`, or
+        ``save_json`` it and load it later as ``style_json``. A voice works only with the bundle it came from."""
+        from .style import payload_from_style, style_from_wav
+        style = style_from_wav(ref_wav, onnx_dir=self.onnx_dir, config=self.tts.cfgs, providers=self.providers)
+        if save_json:
+            payload = payload_from_style(style, metadata={"ref_wav": os.path.basename(ref_wav)})
+            if style.model:
+                payload["model"] = style.model
+            with open(save_json, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+        return style
+
+    def stream(self, text: str, lang: str = "he", speed: float = 1.0, style: Optional[Style] = None,
+               total_step: Optional[int] = None, cfg_scale: Optional[float] = None,
+               silence_duration: Optional[float] = None, peak_limit: Optional[float] = 0.95,
+               normalize_text: bool = True):
+        """Like :meth:`synthesize`, but yields the audio chunk by chunk (mono float32 arrays at
+        ``sample_rate``) as each one is ready, so playback can start after the first sentence instead of after
+        the whole text. Joined, the chunks are the :meth:`synthesize` output (each chunk is peak-limited on its
+        own)."""
+        rel = (self.tts.release or {}).get("inference", {})
+        total_step = total_step if total_step is not None else int(rel.get("steps", 8))
+        cfg_scale = cfg_scale if cfg_scale is not None else float(rel.get("cfg_scale", DEFAULT_CFG_SCALE))
+        silence_duration = silence_duration if silence_duration is not None else float(rel.get("join_silence_s", 0.0))
+        for wav, _ in self.tts(text, lang=lang, style=self.style if style is None else style, total_step=total_step,
+                               speed=speed, cfg_scale=cfg_scale, silence_duration=silence_duration,
+                               normalize_text=normalize_text, stream=True):
+            audio = np.asarray(wav, dtype=np.float32).reshape(-1)
+            yield limit_peak(audio, peak_limit) if peak_limit is not None else audio
 
     def synthesize(
         self,

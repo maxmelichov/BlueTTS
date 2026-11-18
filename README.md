@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://huggingface.co/spaces/notmax123/BlueV2"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Try%20Live%20Demo-FFD21E?style=for-the-badge" alt="Try Live Demo on Hugging Face"></a>
+  <a href="https://huggingface.co/spaces/notmax123/BlueV3"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Try%20Live%20Demo-FFD21E?style=for-the-badge" alt="Try Live Demo on Hugging Face"></a>
   &nbsp;
   <a href="https://bluetts.com/"><img src="https://img.shields.io/badge/%F0%9F%8C%90%20Website-bluetts.com-2563EB?style=for-the-badge" alt="bluetts.com"></a>
 </p>
@@ -55,6 +55,43 @@ weights shipped in the bundle (`frontend/renikud/model.onnx`); English, German, 
 and Russian use polyg2p (its wheel in the bundle is for Linux x86-64); Yiddish uses the bundle's
 `frontend/yi`. The bundle runs on `blue_onnx`; `blue_trt` does not
 read it yet. Details: [Release bundles](src/blue_onnx/README.md#release-bundles).
+
+## Voice cloning
+
+Speak in the voice of a reference recording (3-10 s of clean speech, any sample rate). The bundle's
+`reference_encoder.onnx` does it; no PyTorch needed:
+
+```python
+tts = BlueTTS(onnx_dir="bluev3_onnx/onnx", ref_wav="my_voice.wav")
+samples, sr = tts.synthesize("Hello, this is my cloned voice.", lang="en")
+
+tts.voice_from_wav("my_voice.wav", save_json="my_voice.json")   # keep it: BlueTTS(style_json="my_voice.json")
+```
+
+Full script: [`examples/clone.py`](examples/clone.py). A voice works only with the bundle it was made from.
+
+## Streaming
+
+`stream()` yields the audio chunk by chunk, so playback starts after the first chunk instead of after the
+whole text ([`examples/stream.py`](examples/stream.py)):
+
+```python
+for chunk in tts.stream(long_text, lang="en"):   # mono float32 arrays at tts.sample_rate
+    play(chunk)
+```
+
+The [OpenAI-compatible server](#openai-compatible-server) streams the same way (`stream_format: "audio"`).
+
+## Speed
+
+Measure it on your machine; the hosted demo shares one server and adds queue and network time:
+
+```bash
+uv run python examples/benchmark.py              # CPU; --threads N, --providers CUDAExecutionProvider
+```
+
+On a Ryzen 9 7950X with `blue_onnx` (8 steps, CFG 4, float32 graphs): 15-18x real time with 8 threads, 4x with
+one thread, first audio after about 0.3 s.
 
 ## Documentation
 

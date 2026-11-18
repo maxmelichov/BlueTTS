@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Any
 
@@ -62,12 +63,40 @@ def _load_config(config: str | dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _read_wav_mono(path: str, sample_rate: int) -> np.ndarray:
+def _read_wav_mono(path: str, sample_rate: int, res_type: str = "kaiser_best") -> np.ndarray:
     wav, sr = sf.read(path, always_2d=True, dtype="float32")
     wav = wav.mean(axis=1)
     if int(sr) != int(sample_rate):
-        wav = librosa.resample(wav, orig_sr=int(sr), target_sr=int(sample_rate), res_type="kaiser_best")
+        try:
+            wav = librosa.resample(wav, orig_sr=int(sr), target_sr=int(sample_rate), res_type=res_type)
+        except ModuleNotFoundError:   # "kaiser_best" needs the optional resampy package; soxr ships with librosa
+            wav = librosa.resample(wav, orig_sr=int(sr), target_sr=int(sample_rate), res_type="soxr_hq")
     return np.asarray(wav, dtype=np.float32)
+
+
+def _resample_training(wav: np.ndarray, orig_sr: int, new_sr: int, lowpass_filter_width: int = 64,
+                       rolloff: float = 0.9475937167399596, beta: float = 14.769656459379492) -> np.ndarray:
+    """The resampler the BlueV3 model was trained with (windowed-sinc interpolation, Kaiser window; the same
+    arithmetic as torchaudio's ``sinc_interp_kaiser``), in numpy. The reference encoder is sensitive to it: the
+    style tokens of a 24 kHz clip resampled another way differ a lot (cosine ~0.8 against ~0.997 with this one)."""
+    g = math.gcd(int(orig_sr), int(new_sr))
+    orig, new = int(orig_sr) // g, int(new_sr) // g
+    if orig == new:
+        return np.asarray(wav, dtype=np.float32)
+    base = min(orig, new) * rolloff
+    width = math.ceil(lowpass_filter_width * orig / base)
+    idx = np.arange(-width, width + orig, dtype=np.float64) / orig
+    t = (np.arange(0, -new, -1, dtype=np.float64)[:, None] / new + idx[None]) * base
+    t = np.clip(t, -lowpass_filter_width, lowpass_filter_width)
+    window = np.i0(beta * np.sqrt(1 - (t / lowpass_filter_width) ** 2)) / np.i0(beta)
+    t *= math.pi
+    kernels = np.where(t == 0, 1.0, np.sin(t) / np.where(t == 0, 1.0, t)) * window * (base / orig)   # [new, K]
+    # float32 from here on, as in training: the empty band above the source's Nyquist then holds the same
+    # rounding residue the model saw (it reads log-spectra, so that residue is part of its input)
+    x = np.pad(np.asarray(wav, dtype=np.float32), (width, width + orig))
+    frames = np.lib.stride_tricks.sliding_window_view(x, kernels.shape[1])[::orig]                   # [F, K]
+    out = (frames @ kernels.astype(np.float32).T).reshape(-1)
+    return out[: math.ceil(new * len(wav) / orig)]
 
 
 def _linear_mel_features(wav: np.ndarray, *, sample_rate: int, n_fft: int, win_length: int, hop_length: int, n_mels: int) -> np.ndarray:
@@ -184,6 +213,32 @@ def export_voice_style(
     return VoiceStyleExtractor(onnx_dir=onnx_dir, config=config, providers=providers).payload_from_wav(ref_wav)
 
 
+def _release_style_from_wav(ref_wav: str, onnx_dir: str, providers: list[str] | None = None) -> Style:
+    """BlueV3 bundles: ``reference_encoder.onnx`` maps a mono 44.1 kHz waveform straight to the style tokens.
+    The clip is right-padded to a multiple of ``pad_to_multiple`` samples, as the bundle's ``tts.json`` states."""
+    with open(os.path.join(onnx_dir, "tts.json"), "r", encoding="utf-8") as f:
+        rel = json.load(f).get("blue_release") or {}
+    ref = rel.get("reference") or {}
+    sr = int(ref.get("sample_rate", 44100))
+    k = int(ref.get("pad_to_multiple", 3072))
+    wav, src_sr = sf.read(ref_wav, always_2d=True, dtype="float32")
+    wav = wav.mean(axis=1)
+    if int(src_sr) != sr:
+        # An upsampled clip has an empty band above its own Nyquist, and the encoder reads log-spectra: what it
+        # sees there is the resampler's rounding residue, so the style tokens used to change with the resampler
+        # (cosine ~0.80 between two of them). Rounding to the 16-bit grid, as any PCM WAV has, gives that band a
+        # defined floor: the tokens then agree (~0.985) whichever resampler produced the clip.
+        wav = _resample_training(wav, int(src_sr), sr)
+        wav = (np.round(wav * 32767.0) / 32767.0).astype(np.float32)
+    if len(wav) < sr:
+        raise ValueError(f"reference clip is {len(wav) / sr:.2f} s: use at least 1 s of speech (3-10 s works best)")
+    wav = np.pad(wav, (0, (-len(wav)) % k))[None].astype(np.float32)
+    style_ttl, style_dp = _session(os.path.join(onnx_dir, "reference_encoder.onnx"), providers).run(None, {"wav": wav})
+    if not (np.isfinite(style_ttl).all() and np.isfinite(style_dp).all()):
+        raise RuntimeError("non-finite style tokens from the reference clip")
+    return Style(style_ttl.astype(np.float32), style_dp.astype(np.float32), model=rel.get("model"))
+
+
 def style_from_wav(
     ref_wav: str,
     *,
@@ -191,5 +246,10 @@ def style_from_wav(
     config: str | dict[str, Any] = "config/tts.json",
     providers: list[str] | None = None,
 ) -> Style:
-    """Return a runtime ``Style`` object from a reference WAV using ONNX Runtime only."""
+    """Return a runtime ``Style`` object from a reference WAV using ONNX Runtime only.
+
+    A BlueV3 bundle (``reference_encoder.onnx`` in ``onnx_dir``) uses that graph; blue-onnx-v2 uses its
+    ``codec_encoder`` / ``style_encoder`` / ``duration_style_encoder`` graphs."""
+    if os.path.exists(os.path.join(onnx_dir, "reference_encoder.onnx")):
+        return _release_style_from_wav(ref_wav, onnx_dir, providers)
     return VoiceStyleExtractor(onnx_dir=onnx_dir, config=config, providers=providers).from_wav(ref_wav)

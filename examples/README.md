@@ -8,7 +8,10 @@ Run these from the **repository root**, with the BlueV3 bundle in `./bluev3_onnx
 uv run python examples/basic.py       # he / en / es / it / de + mixed in one run
 uv run python examples/mixed.py       # inline <en>…</en> language spans
 uv run python examples/normalize.py   # numbers, dates, times, codes, emails
-uv run python examples/zero_shot.py   # voice conversion from a reference clip
+uv run python examples/clone.py ref.wav   # BlueV3 voice cloning from a reference clip
+uv run python examples/stream.py      # chunk-by-chunk streaming
+uv run python examples/benchmark.py   # speed on this machine (real-time factor)
+uv run python examples/zero_shot.py   # blue-onnx-v2 only: voice conversion from a reference clip
 uv run python examples/app.py --lang en --text "Hello world."
 uv run --extra server python examples/openai_server.py   # OpenAI-compatible HTTP server on :8000
 ```
