@@ -120,7 +120,7 @@ def resolve_onnx_dir(bundle: str) -> Path:
         return root
     raise FileNotFoundError(
         f"no BlueTTS bundle at {bundle!r}: download it with\n"
-        '  hf download notmax123/BlueV3-onnx --include "onnx/*" "voices/*" "frontend/*" --local-dir bluev3_onnx'
+        '  hf download notmax123/BlueV3-onnx --include "onnx/*" --include "voices/*" --include "frontend/*" --local-dir bluev3_onnx'
     )
 
 

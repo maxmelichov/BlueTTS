@@ -24,7 +24,7 @@
 git clone https://github.com/maxmelichov/BlueTTS.git
 cd BlueTTS
 uv sync
-uv run hf download notmax123/BlueV3-onnx --include "onnx/*" "voices/*" "frontend/*" --local-dir ./bluev3_onnx
+uv run hf download notmax123/BlueV3-onnx --include "onnx/*" --include "voices/*" --include "frontend/*" --local-dir ./bluev3_onnx
 uv pip install ./bluev3_onnx/frontend/polyg2p-*.whl     # G2P for en / de / es / it / ru (Linux x86-64, glibc >= 2.34)
 ```
 
@@ -124,7 +124,7 @@ server shared by [@MaximS](https://github.com/MaximS) in [#22](https://github.co
 
 ```bash
 uv sync --extra server              # fastapi + uvicorn; mp3 / opus / aac also need ffmpeg on PATH
-uv run hf download notmax123/BlueV3-onnx --include "onnx/*" "voices/*" "frontend/*" --local-dir ./bluev3_onnx
+uv run hf download notmax123/BlueV3-onnx --include "onnx/*" --include "voices/*" --include "frontend/*" --local-dir ./bluev3_onnx
 uv run python examples/openai_server.py --bundle bluev3_onnx --host 0.0.0.0 --port 8000
 ```
 
