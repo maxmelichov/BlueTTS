@@ -1315,7 +1315,7 @@ class BlueTTS:
         return self.tts.sample_rate
 
     def voice_from_wav(self, ref_wav: str, save_json: Optional[str] = None) -> Style:
-        """Clone a voice: the :class:`Style` of a reference recording (3-10 s of clean speech, any sample
+        """Clone a voice: the :class:`Style` of a reference recording (8-10 s of clean speech, any sample
         rate), from the bundle's own graphs. Pass it as ``style=`` to :meth:`synthesize` / :meth:`stream`, or
         ``save_json`` it and load it later as ``style_json``. A voice works only with the bundle it came from."""
         from .style import export_voice_style, style_from_payload

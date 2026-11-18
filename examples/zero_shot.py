@@ -3,7 +3,7 @@ Voice cloning from a reference WAV, ONNX only (no PyTorch).
 
 With the BlueV3 bundle (default, ``./bluev3_onnx``) the bundle's ``onnx/reference_encoder.onnx``
 turns the clip into a voice. Any sample rate and channel count works (it is mixed to mono and
-resampled to 44.1 kHz); use 3-10 s of one clean speaker. Only about the first 9 s are used.
+resampled to 44.1 kHz); use 8-10 s of one clean speaker. Only about the first 9 s are used.
 
 Prepare a reference clip:
     wget https://github.com/thewh1teagle/phonikud-chatterbox/releases/download/asset-files-v1/male1.wav -O ref.wav

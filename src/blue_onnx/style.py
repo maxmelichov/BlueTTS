@@ -28,7 +28,9 @@ def style_from_payload(payload: dict[str, Any]) -> Style:
     ttl = np.asarray(payload["style_ttl"]["data"], dtype=np.float32).reshape(payload["style_ttl"]["dims"])
     dp = np.asarray(payload["style_dp"]["data"], dtype=np.float32).reshape(payload["style_dp"]["dims"])
     scale = parse_speed_scale(payload.get("speed_scale"))
-    return Style(ttl, dp, speed_scale=[scale] if scale else None)
+    # Keep the model tag: without it a voice cloned in memory (voice_from_wav) printed the "no model tag"
+    # warning on its first synthesis although its payload carried the tag.
+    return Style(ttl, dp, model=payload.get("model"), speed_scale=[scale] if scale else None)
 
 
 def payload_from_style(style: Style, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -237,7 +239,7 @@ def _release_style_from_wav(ref_wav: str, onnx_dir: str, providers: list[str] | 
         wav = _resample_training(wav, int(src_sr), sr)
         wav = (np.round(wav * 32767.0) / 32767.0).astype(np.float32)
     if len(wav) < sr:
-        raise ValueError(f"reference clip is {len(wav) / sr:.2f} s: use at least 1 s of speech (3-10 s works best)")
+        raise ValueError(f"reference clip is {len(wav) / sr:.2f} s: use at least 1 s of speech (8-10 s works best)")
     wav = np.pad(wav, (0, (-len(wav)) % k))[None].astype(np.float32)
     style_ttl, style_dp = _session(os.path.join(onnx_dir, "reference_encoder.onnx"), providers).run(None, {"wav": wav})
     if not (np.isfinite(style_ttl).all() and np.isfinite(style_dp).all()):
