@@ -138,7 +138,7 @@ on HF under the git tag `v3.0.0`.
 |---|---|
 | [notmax123/BlueV3-onnx](https://huggingface.co/notmax123/BlueV3-onnx) | ONNX bundle: `onnx/` (the `blue_onnx` layout + `reference_encoder`), `voices/`, `frontend/` |
 | [notmax123/BlueV3](https://huggingface.co/notmax123/BlueV3) | PyTorch checkpoints (text-to-latent `ckpt_step_702000.pt`, duration predictor), latent stats, config, voices |
-| [notmax123/blue-codec](https://huggingface.co/notmax123/blue-codec) | the audio autoencoder, folder `bluev3_codec/` |
+| [notmax123/blue-codec](https://huggingface.co/notmax123/blue-codec) | the audio autoencoder, one file (`model.safetensors`) |
 
 Languages: Hebrew, English, German, Spanish, Italian, Russian, Yiddish. Operating point: 8 Euler steps,
 CFG 4.0, speed 1.0, language tags on.
