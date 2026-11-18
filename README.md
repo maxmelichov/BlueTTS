@@ -78,6 +78,20 @@ is mixed to mono and resampled the way the model was trained); only about the fi
 only with the bundle it was made from: voices of `exports/export_new_voice.py` and of blue-onnx-v2 are the v2
 architecture and do not work with BlueV3.
 
+### Getting a good clone
+
+- **The clip decides the result.** Use 5-10 s of one speaker, recorded close to the microphone, with no music, room
+  echo or background noise. An echoey or compressed clip gives an echoey or robotic voice. Only about the first 9 s
+  are read, so put the best part first.
+- **What is said in the clip does not matter**; no transcript is needed. How it is said does: the voice keeps the
+  clip's register, so a lively, conversational clip gives a livelier read and a flat one gives a flat read.
+- **Use a clip in the language you will synthesize** when you can; a voice cloned across languages keeps less of the
+  speaker.
+- **Prefer an original recording** (44.1 or 48 kHz WAV/FLAC) over a phone-band or heavily compressed file.
+- There are no emotion controls: the model reads the text in the voice and register of the clip. Punctuation
+  (`?`, `!`, `,`) does shape the delivery.
+- Very long sentences can sound uneven. Split them with punctuation where a speaker would breathe.
+
 ## Streaming
 
 `stream()` yields the audio chunk by chunk, so playback starts after the first chunk instead of after the
@@ -91,6 +105,10 @@ for chunk in tts.stream(long_text, lang="en"):   # mono float32 arrays at tts.sa
 The [OpenAI-compatible server](#openai-compatible-server) streams the same way (`stream_format: "audio"`).
 
 ## Speed
+
+"N x real time" means N seconds of audio are produced per second of compute: at 15x, one minute of speech takes
+four seconds. Cloning a voice from a clip adds one pass of the reference encoder (well under a second); after that a
+cloned voice runs at the same speed as a stock one.
 
 Measure it on your machine; the hosted demo shares one server and adds queue and network time:
 
