@@ -24,9 +24,14 @@
 git clone https://github.com/maxmelichov/BlueTTS.git
 cd BlueTTS
 uv sync
-uv run hf download notmax123/BlueV3-onnx --include "onnx/*" "voices/*" "frontend/*" --local-dir ./bluev3_onnx
+uv run hf download notmax123/BlueV3-onnx --include "onnx/*" --include "voices/*" --include "frontend/*" --local-dir ./bluev3_onnx
 uv pip install ./bluev3_onnx/frontend/polyg2p-*.whl     # G2P for en / de / es / it / ru (Linux x86-64, glibc >= 2.34)
 ```
+
+Give `--include` once per pattern: with `--include "onnx/*" "voices/*" ...` current `hf` versions skip `onnx/`
+without an error. The polyg2p wheel in the bundle is for Linux x86-64 only; on macOS and Windows, Hebrew and
+Yiddish work, and English, German, Spanish, Italian and Russian raise
+`RuntimeError: This release bundle needs polyg2p` for now.
 
 ```python
 import soundfile as sf
@@ -68,7 +73,10 @@ samples, sr = tts.synthesize("Hello, this is my cloned voice.", lang="en")
 tts.voice_from_wav("my_voice.wav", save_json="my_voice.json")   # keep it: BlueTTS(style_json="my_voice.json")
 ```
 
-Full script: [`examples/clone.py`](examples/clone.py). A voice works only with the bundle it was made from.
+Full script: [`examples/zero_shot.py`](examples/zero_shot.py). Any sample rate and channel count works (the clip
+is mixed to mono and resampled the way the model was trained); only about the first 9 s are read. A voice works
+only with the bundle it was made from: voices of `exports/export_new_voice.py` and of blue-onnx-v2 are the v2
+architecture and do not work with BlueV3.
 
 ## Streaming
 
@@ -90,8 +98,20 @@ Measure it on your machine; the hosted demo shares one server and adds queue and
 uv run python examples/benchmark.py              # CPU; --threads N, --providers CUDAExecutionProvider
 ```
 
-On a Ryzen 9 7950X with `blue_onnx` (8 steps, CFG 4, float32 graphs): 15-18x real time with 8 threads, 4x with
-one thread, first audio after about 0.3 s.
+BlueV3, 8 steps unless noted (`blue_onnx`, float32 graphs):
+
+| hardware | backend | threads | steps | x real time |
+|---|---|---|---|---|
+| Ryzen 9 7950X | ONNX Runtime CPU (`blue_onnx`), text front end included | 8 | 8 | 14-18x |
+| Ryzen 9 7950X | ONNX Runtime CPU (`blue_onnx`), text front end included | 4 | 8 | about 12x |
+| Ryzen 9 7950X | ONNX Runtime CPU (`blue_onnx`), text front end included | 1 | 8 | about 4x |
+| Apple M5 | ONNX Runtime CPU (`blue_onnx`), model time only | 4 | 8 | about 15x |
+| Apple M5 | ONNX Runtime CPU (`blue_onnx`), model time only | 4 | 4 | about 30x |
+| built-in GPU for the flow model | Rust engine (MamboTTS app), not `blue_onnx`; not re-measured | – | – | about 50x |
+
+First audio with `stream()` arrives after about 0.3 s on the Ryzen. More threads is not always faster: `blue_onnx`
+uses `min(8, cpu_count)` by default; set `ORT_NUM_THREADS` to try fewer. Fewer steps (`total_step=4`) is about
+twice as fast, with slightly lower quality.
 
 ## Documentation
 
@@ -124,7 +144,7 @@ server shared by [@MaximS](https://github.com/MaximS) in [#22](https://github.co
 
 ```bash
 uv sync --extra server              # fastapi + uvicorn; mp3 / opus / aac also need ffmpeg on PATH
-uv run hf download notmax123/BlueV3-onnx --include "onnx/*" "voices/*" "frontend/*" --local-dir ./bluev3_onnx
+uv run hf download notmax123/BlueV3-onnx --include "onnx/*" --include "voices/*" --include "frontend/*" --local-dir ./bluev3_onnx
 uv run python examples/openai_server.py --bundle bluev3_onnx --host 0.0.0.0 --port 8000
 ```
 
@@ -206,8 +226,9 @@ releases do not work with BlueV3.
 [notmax123/blue-onnx-v2](https://huggingface.co/notmax123/blue-onnx-v2) still load (no `blue_release` section in
 their `tts.json`), with the previous voices in [`voices/v2/`](voices/v2/), e.g.
 `BlueTTS(onnx_dir="onnx_models", style_json="voices/v2/noa.json")`. The BlueV3 voices in `voices/` carry
-`"model": "bluev3-702000"`, and `blue_onnx` refuses them with an older bundle. blue-onnx-v2 is the only bundle with the zero-shot
-voice-conversion graphs that `examples/zero_shot.py` and `blue_onnx.style` need.
+`"model": "bluev3-702000"`, and `blue_onnx` refuses them with an older bundle. `blue_onnx.style` and
+`examples/zero_shot.py` clone voices with either bundle (see [Voice cloning](#voice-cloning)); a voice
+cloned with blue-onnx-v2 works only with blue-onnx-v2.
 
 ## Citations
 

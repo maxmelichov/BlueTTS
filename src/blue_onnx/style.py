@@ -209,7 +209,13 @@ def export_voice_style(
     config: str | dict[str, Any] = "config/tts.json",
     providers: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Return a voice JSON payload from a reference WAV using ONNX Runtime only."""
+    """Return a voice JSON payload from a reference WAV using ONNX Runtime only (BlueV3 or blue-onnx-v2 bundle)."""
+    if os.path.exists(os.path.join(onnx_dir, "reference_encoder.onnx")):
+        style = _release_style_from_wav(ref_wav, onnx_dir, providers)
+        payload = payload_from_style(style, metadata={"ref_wav": os.path.basename(ref_wav)})
+        if style.model:
+            payload["model"] = style.model
+        return payload
     return VoiceStyleExtractor(onnx_dir=onnx_dir, config=config, providers=providers).payload_from_wav(ref_wav)
 
 

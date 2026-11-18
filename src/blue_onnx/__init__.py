@@ -1318,15 +1318,12 @@ class BlueTTS:
         """Clone a voice: the :class:`Style` of a reference recording (3-10 s of clean speech, any sample
         rate), from the bundle's own graphs. Pass it as ``style=`` to :meth:`synthesize` / :meth:`stream`, or
         ``save_json`` it and load it later as ``style_json``. A voice works only with the bundle it came from."""
-        from .style import payload_from_style, style_from_wav
-        style = style_from_wav(ref_wav, onnx_dir=self.onnx_dir, config=self.tts.cfgs, providers=self.providers)
+        from .style import export_voice_style, style_from_payload
+        payload = export_voice_style(ref_wav, onnx_dir=self.onnx_dir, config=self.tts.cfgs, providers=self.providers)
         if save_json:
-            payload = payload_from_style(style, metadata={"ref_wav": os.path.basename(ref_wav)})
-            if style.model:
-                payload["model"] = style.model
             with open(save_json, "w", encoding="utf-8") as f:
                 json.dump(payload, f)
-        return style
+        return style_from_payload(payload)
 
     def stream(self, text: str, lang: str = "he", speed: float = 1.0, style: Optional[Style] = None,
                total_step: Optional[int] = None, cfg_scale: Optional[float] = None,
