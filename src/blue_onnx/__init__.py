@@ -13,6 +13,7 @@ from unicodedata import normalize
 import numpy as np
 import onnxruntime as ort
 
+from .cpu import default_num_threads, int8_vector_estimator_path, resolve_precision, with_thread_options
 from .ipa_text import tag_latin_runs
 from .text_norm import (  # noqa: F401  (re-exported as the package's public API)
     EMOJI_RE,
@@ -1048,7 +1049,7 @@ def load_onnx(
 
 
 def load_onnx_all(
-    onnx_dir: str, opts: ort.SessionOptions, providers: list[str]
+    onnx_dir: str, opts: ort.SessionOptions, providers: list[str], precision: str = "fp32"
 ) -> tuple[
     ort.InferenceSession,
     ort.InferenceSession,
@@ -1063,6 +1064,8 @@ def load_onnx_all(
         dp_onnx_path = os.path.join(onnx_dir, "duration_predictor.onnx")
     text_enc_onnx_path = os.path.join(onnx_dir, "text_encoder.onnx")
     vector_est_onnx_path = os.path.join(onnx_dir, "vector_estimator.onnx")
+    if precision == "int8":
+        vector_est_onnx_path = int8_vector_estimator_path(onnx_dir, vector_est_onnx_path) or vector_est_onnx_path
     vocoder_onnx_path = os.path.join(onnx_dir, "vocoder.onnx")
 
     dp_ort = load_onnx(dp_onnx_path, opts, providers)
@@ -1149,28 +1152,32 @@ def load_text_to_speech(
     onnx_dir: str, use_gpu: bool = False, config_path: str = "config/tts.json",
     renikud_path: Optional[str] = None,
     providers: Optional[list[str]] = None,
+    precision: Optional[str] = None,
 ) -> TextToSpeech:
     """Load a bundle's graphs. ``providers`` is passed to every ONNX Runtime session
-    (e.g. ``["CUDAExecutionProvider", "CPUExecutionProvider"]``); the default is CPU."""
+    (e.g. ``["CUDAExecutionProvider", "CPUExecutionProvider"]``); the default is CPU.
+
+    ``precision`` is for the vector estimator: ``"auto"`` (default) runs it in int8 on the CPU provider of an
+    x86 CPU or ARM Linux and in float32 elsewhere; ``"fp32"`` / ``"int8"`` force one (see :mod:`blue_onnx.cpu`)."""
     opts = ort.SessionOptions()
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-    # ORT over-subscribes on many-core CPUs (NUMA/SMT contention).
-    # Empirically 4–8 intra-op threads is optimal for this model on CPU.
-    n_threads = int(os.environ.get("ORT_NUM_THREADS", min(8, os.cpu_count() or 1)))
+    # More threads than usable CPUs is much slower, not a little: in a 2-CPU container on a 16-thread host,
+    # 8 threads ran at a third of the speed of 2. Count the CPUs we may use (affinity, cgroup quota), max 8.
+    n_threads = default_num_threads()
     opts.intra_op_num_threads = n_threads
     opts.inter_op_num_threads = 1
     if providers:
-        providers = list(providers)
-        print(f"Using ONNX Runtime providers {providers} (intra_op_threads={n_threads})")
+        providers = with_thread_options(list(providers), n_threads)
     elif use_gpu:
         raise NotImplementedError("GPU mode is not fully tested")
     else:
         providers = ["CPUExecutionProvider"]
-        print(f"Using CPU for inference (intra_op_threads={n_threads})")
+    precision = resolve_precision(precision, providers)
+    print(f"Using ONNX Runtime providers {providers} (intra_op_threads={n_threads}, vector estimator {precision})")
     cfgs = load_cfgs(onnx_dir, config_path)
     dp_ort, text_enc_ort, vector_est_ort, vocoder_ort = load_onnx_all(
-        onnx_dir, opts, providers
+        onnx_dir, opts, providers, precision
     )
     text_processor = load_text_processor(onnx_dir)
     release = cfgs.get("blue_release")
@@ -1289,11 +1296,13 @@ class BlueTTS:
         config_path: str = "config/tts.json",
         providers: Optional[list[str]] = None,
         ref_wav: Optional[str] = None,
+        precision: Optional[str] = None,
     ):
         self.onnx_dir = onnx_dir
         self.providers = providers
         self.tts = load_text_to_speech(
-            onnx_dir, config_path=config_path, renikud_path=renikud_path, providers=providers
+            onnx_dir, config_path=config_path, renikud_path=renikud_path, providers=providers,
+            precision=precision,
         )
         if ref_wav is not None:   # clone the voice of a reference clip instead of loading a voice JSON
             self.style = self.voice_from_wav(ref_wav)
