@@ -140,7 +140,12 @@ def _trim_reference_latents(z: np.ndarray, *, max_frames: int = 150) -> np.ndarr
 
 
 def _session(path: str, providers: list[str] | None = None) -> ort.InferenceSession:
-    return ort.InferenceSession(path, providers=providers or ["CPUExecutionProvider"])
+    from .cpu import default_num_threads, with_thread_options
+
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = n = default_num_threads()   # ORT's own default ignores container CPU limits
+    return ort.InferenceSession(path, sess_options=opts,
+                                providers=with_thread_options(list(providers or ["CPUExecutionProvider"]), n))
 
 
 class VoiceStyleExtractor:

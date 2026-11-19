@@ -9,6 +9,7 @@ Run:
     uv run python examples/benchmark.py --threads 4 --steps 4
     uv run python examples/benchmark.py --ref-wav my_voice.wav      # a cloned voice
     uv run python examples/benchmark.py --providers CUDAExecutionProvider
+    uv run python examples/benchmark.py --precision fp32   # compare with the int8 vector estimator (x86 default)
 """
 
 import argparse
@@ -25,6 +26,8 @@ ap.add_argument("--ref-wav", default=None, help="clone this clip instead of load
 ap.add_argument("--steps", type=int, default=None, help="flow steps (default: the bundle's, 8)")
 ap.add_argument("--providers", default="CPUExecutionProvider")
 ap.add_argument("--threads", type=int, default=0, help="CPU threads (0 = the library default)")
+ap.add_argument("--precision", default=None, choices=["auto", "fp32", "int8"],
+                help="vector estimator precision (default auto: int8 on x86 CPUs, fp32 elsewhere)")
 ap.add_argument("--runs", type=int, default=5)
 args = ap.parse_args()
 if args.threads:
@@ -32,7 +35,7 @@ if args.threads:
 
 from src.blue_onnx import BlueTTS  # noqa: E402
 
-tts = BlueTTS(onnx_dir=args.onnx_dir, style_json=args.voice, providers=args.providers.split(","))
+tts = BlueTTS(onnx_dir=args.onnx_dir, style_json=args.voice, providers=args.providers.split(","), precision=args.precision)
 if args.ref_wav:
     t0 = time.perf_counter()
     tts.style = tts.voice_from_wav(args.ref_wav)   # one-off: cloning does not change the synthesis cost

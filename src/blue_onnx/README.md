@@ -193,9 +193,19 @@ uv sync --extra gpu      && uv pip uninstall onnxruntime   # NVIDIA CUDA
 ```
 
 Do not combine `openvino` and `gpu`. For TensorRT, see [`exports/`](../../exports/README.md).
-CPU thread count is `min(8, cpu_count)`, overridable with `ORT_NUM_THREADS`. More is not always
-faster: on an Apple M5 (4 performance + 6 efficiency cores) 4 threads were faster than all 10 cores
-(see [Speed](../../README.md#speed)).
+Pass `providers=["OpenVINOExecutionProvider"]` to use OpenVINO; `blue_onnx` gives it the same thread count as the
+CPU provider (`num_of_threads`, unless you pass your own options in a `(name, options)` tuple).
+
+CPU thread count is `min(8, usable CPUs)`, where usable CPUs honours the affinity mask and a cgroup CPU quota
+(Docker `--cpus`, Kubernetes limits, hosted containers report the host's CPU count otherwise). Override it with
+`ORT_NUM_THREADS`. More is not always faster: on an Apple M5 (4 performance + 6 efficiency cores) 4 threads were as
+fast as 8 (see [Speed](../../README.md#speed)).
+
+`precision` (on `BlueTTS` and `load_text_to_speech`, or `BLUE_ONNX_PRECISION`) picks the vector estimator graph:
+`"auto"` (default) uses a dynamic-int8 copy on the plain CPU provider of an x86 CPU or of ARM Linux (about 2x faster
+per flow step there, same WER and speaker similarity as float32) and float32 elsewhere; `"fp32"` / `"int8"` force
+one. The int8 copy is `vector_estimator.int8.onnx` if the bundle ships it, otherwise it is made on first load (a few
+seconds) next to the float32 graph, or under `~/.cache/blue_onnx` if that folder is read-only.
 
 ## Notes
 

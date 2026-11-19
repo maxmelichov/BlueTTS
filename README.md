@@ -153,16 +153,70 @@ clip takes 3 seconds. The first-run model load and downloads are not included. M
 hosted demo shares one server and adds queue and network time:
 
 ```bash
-uv run python examples/benchmark.py              # CPU; --threads N, --steps N, --ref-wav my_voice.wav, --providers CUDAExecutionProvider
+uv run python examples/benchmark.py              # CPU; --threads N, --steps N, --precision fp32|int8, --ref-wav my_voice.wav, --providers CUDAExecutionProvider
 ```
 
-BlueV3 v3.0.1, float32 graphs, English (the `blue_onnx` rows include the text front end):
+**x86, 2 CPUs** (Intel Xeon Platinum 8375C, 2 vCPU container: the free CPU tier of Hugging Face Spaces). BlueV3
+v3.0.1, English, 371 characters (23 s of audio), ONNX Runtime 1.29, text front end included:
+
+| setup | threads | steps | x real time |
+|---|---|---|---|
+| `blue_onnx` 3.0.1 defaults: 8 threads, float32 | 8 | 8 | 1.0-1.3x |
+| thread count fixed (2), float32 | 2 | 8 | 3.1-3.4x |
+| **current defaults**: 2 threads, int8 vector estimator | 2 | 8 | **5.4x** |
+| current defaults | 2 | 6 | 7.5x |
+| current defaults | 2 | 4 | 9.5x |
+| current defaults, 1 thread | 1 | 8 | 4.1x |
+| OpenVINO execution provider 1.24.1, float32, 2 threads | 2 | 8 | 4.9x |
+| OpenVINO execution provider 1.24.1, float32, 2 threads | 2 | 4 | 8.9x |
+
+Two things make the difference on x86:
+
+- **Threads.** The old default was `min(8, cpu_count)`, and in a container `cpu_count` is the host's CPUs (16 here),
+  not the 2 the container may use. 8 threads on 2 CPUs was 3x slower than 2 threads. `blue_onnx` now counts the CPUs
+  it can actually use (the affinity mask and the cgroup CPU quota of Docker, Kubernetes or a hosted container), still
+  at most 8. `ORT_NUM_THREADS` overrides it.
+- **int8 vector estimator.** The vector estimator (the flow-matching step model, run once per step) takes about 80% of
+  the time, almost all of it in matrix multiplies. On the CPU provider of an x86 CPU or of ARM Linux, `blue_onnx` now
+  runs a dynamic-int8 copy of it: about 2x faster per step on x86 (AVX-512 VNNI) and 2.5x on ARM Linux. The copy is
+  made from the float32 graph on first load (a few seconds, saved next to it as `vector_estimator.int8.onnx`, or under
+  `~/.cache/blue_onnx` if the folder is read-only). The vocoder stays float32: an int8 vocoder lowered speaker
+  similarity. On macOS the vector estimator stays float32, since int8 was no faster there (ONNX Runtime already uses
+  the Apple matrix unit for float32). Choose with `BlueTTS(..., precision="fp32" | "int8" | "auto")` or
+  `BLUE_ONNX_PRECISION`.
+
+Quality of the int8 vector estimator and of fewer steps, against float32 at 8 steps with the same starting noise
+(3 voices, 8 English and 8 Hebrew sentences on x86; plus 4 German and 4 Spanish on the M5). WER is Parakeet TDT 0.6B v3
+(en, de, es) and Whisper large-v3 turbo (he); SIM is the ECAPA speaker-embedding cosine to the float32 file with the
+same noise. For scale, float32 with a different noise draw scores SIM 0.90:
+
+| | x86 WER | x86 SIM | M5 WER | M5 SIM |
+|---|---|---|---|---|
+| float32, 8 steps | 1.3% | 1 | 1.0% | 1 |
+| float32, 8 steps, different noise | | | 1.1% | 0.90 |
+| int8 vector estimator, 8 steps (the x86 default) | 1.3% | 0.97 | 1.1% | 0.99 |
+| int8 vector estimator and int8 vocoder (not used) | 1.5% | 0.87 | 1.0% | 0.97 |
+| OpenVINO, float32, 8 steps | 1.3% | 0.94 | | |
+| float32, 6 steps | | | 1.2% | 0.98 |
+| float32, 4 steps | | | 2.0% (he 5.5% vs 3.2%) | 0.94 |
+
+So the int8 vector estimator changes the output less than a different noise draw does, and 6 steps is close to 8;
+4 steps doubles the word errors in Hebrew. The bundle's operating point stays at 8 steps; pass `total_step=6` to
+trade a little for speed.
+
+**OpenVINO.** On Intel CPUs the OpenVINO execution provider is an alternative (one user reads Russian books with it
+on an Intel N100 at about 1.7x real time): `uv sync --extra openvino && uv pip uninstall onnxruntime`, then
+`BlueTTS(..., providers=["OpenVINOExecutionProvider"])`. `blue_onnx` passes it the same thread count
+(`num_of_threads`); without that it starts one thread per host CPU, which was 2x slower in the container above. With
+OpenVINO the graphs stay float32.
+
+**Other machines**, BlueV3 v3.0.1, English (the `blue_onnx` rows include the text front end):
 
 | hardware | engine and backend | threads | steps | text | x real time | first audio |
 |---|---|---|---|---|---|---|
-| Ryzen 9 7950X | `blue_onnx`, ONNX Runtime CPU | 8 | 8 | | 14-18x | about 0.3 s |
-| Ryzen 9 7950X | `blue_onnx`, ONNX Runtime CPU | 4 | 8 | | about 12x | |
-| Ryzen 9 7950X | `blue_onnx`, ONNX Runtime CPU | 1 | 8 | | about 4x | |
+| Ryzen 9 7950X | `blue_onnx`, ONNX Runtime CPU, float32 | 8 | 8 | | 14-18x | about 0.3 s |
+| Ryzen 9 7950X | `blue_onnx`, ONNX Runtime CPU, float32 | 4 | 8 | | about 12x | |
+| Ryzen 9 7950X | `blue_onnx`, ONNX Runtime CPU, float32 | 1 | 8 | | about 4x | |
 | Apple M5 | `blue_onnx`, ONNX Runtime 1.29 CPU | 8 (default) | 8 | 371 characters, 23 s of audio | 22-23x | 0.26-0.29 s |
 | Apple M5 | `blue_onnx`, ONNX Runtime 1.29 CPU | 4 | 8 | same | 23x | 0.24 s |
 | Apple M5 | `blue_onnx`, ONNX Runtime 1.29 CPU | 1 | 8 | same | 14x | 0.36 s |
@@ -171,11 +225,15 @@ BlueV3 v3.0.1, float32 graphs, English (the `blue_onnx` rows include the text fr
 | Apple M5 | Rust engine of the MamboTTS app, ONNX Runtime 1.23.2 CPU | 8 | 8 | 58 s of audio | 10.2x | |
 | Apple M5 | browser, WebGPU | | | | 29-46x | |
 
-The M5 `blue_onnx` rows are the best of 5 runs of `examples/benchmark.py` with the system load average at 3-6 (other
-work running on the 10 cores). A cloned voice synthesizes at the same speed (22x in the same run); cloning itself
-is a one-off pass of about 0.14 s for a 10 s clip (0.3 s for a 30 s clip, which is resampled whole). More threads
-is not always faster: `blue_onnx` uses `min(8, cpu_count)` by default; set `ORT_NUM_THREADS` to try fewer. Fewer
-steps (`total_step=4`) is about 1.7 times as fast on the M5, with slightly lower quality.
+The Ryzen rows were measured before the int8 vector estimator, with float32. The M5 `blue_onnx` rows are the best of 5 runs of
+`examples/benchmark.py` with the system load average at 3-6 (other work running on the 10 cores). A cloned voice
+synthesizes at the same speed (22x in the same run); cloning itself is a one-off pass of about 0.14 s for a 10 s clip
+(0.3 s for a 30 s clip, which is resampled whole). Fewer steps (`total_step=4`) is about 1.7 times as fast on the M5.
+
+## Used by
+
+- [Subtitld](https://subtitld.org/addons/bluetts): the BlueTTS add-on dubs subtitles offline with BlueV3, including
+  voice cloning.
 
 ## Documentation
 
