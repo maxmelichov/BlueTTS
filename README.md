@@ -352,6 +352,10 @@ their `tts.json`), with the previous voices in [`voices/v2/`](voices/v2/), e.g.
 `examples/zero_shot.py` clone voices with either bundle (see [Voice cloning](#voice-cloning)); a voice
 cloned with blue-onnx-v2 works only with blue-onnx-v2.
 
+## Star history
+
+[![Star History Chart](https://api.star-history.com/svg?repos=maxmelichov/bluetts&type=date&legend=top-left)](https://www.star-history.com/?repos=maxmelichov%2Fbluetts&type=date&legend=top-left)
+
 ## Citations
 
 ```bibtex
