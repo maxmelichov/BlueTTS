@@ -1,5 +1,6 @@
 import sys
 import argparse
+import subprocess
 import soundfile as sf
 
 sys.path.append(".")
@@ -9,13 +10,16 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--text", default="שלום עולם")
 parser.add_argument("--lang", default="he")
 parser.add_argument("--voice", default="noa")
+parser.add_argument("--voice-json", help="Path to a voice style JSON (overrides --voice)")
 parser.add_argument("--out", default="output.wav")
 parser.add_argument("--onnx-dir", default="bluev3_onnx/onnx")
 parser.add_argument("--text-is-phonemes", action="store_true")
+parser.add_argument("--play", action="store_true", help="Play the generated WAV with macOS afplay")
 args = parser.parse_args()
 
 tts = load_text_to_speech(onnx_dir=args.onnx_dir)
-style = load_voice_style([f"voices/{args.voice}.json"])
+style_path = args.voice_json or f"voices/{args.voice}.json"
+style = load_voice_style([style_path])
 
 audio, _ = tts(
     args.text,
@@ -31,3 +35,7 @@ audio = limit_peak(audio)  # keep the WAV from clipping when the vocoder oversho
 sr = tts.sample_rate
 sf.write(args.out, audio, sr)
 print(f"Saved to {args.out}")
+if args.play:
+    if sys.platform != "darwin":
+        parser.error("--play currently requires macOS and afplay")
+    subprocess.run(["afplay", args.out], check=True)

@@ -10,7 +10,7 @@ uv run python examples/normalize.py   # numbers, dates, times, codes, emails
 uv run python examples/stream.py      # chunk-by-chunk streaming
 uv run python examples/benchmark.py   # speed on this machine (real-time factor)
 uv run python examples/zero_shot.py   # voice cloning from a reference clip (BlueV3, or blue-onnx-v2 with ONNX_DIR)
-uv run python examples/app.py --lang en --text "Hello world."
+uv run python examples/app.py --lang en --text "Hello world." --play  # play after synthesis on macOS
 uv run --extra server python examples/openai_server.py   # OpenAI-compatible HTTP server on :8000
 ```
 
@@ -23,6 +23,7 @@ Output goes to `examples/out/`; `app.py` defaults to `examples/out/app_output.wa
 
 - `basic.py`, `mixed.py`, `normalize.py` — set the `ONNX_DIR` environment variable.
 - `app.py` — pass `--onnx-dir`.
+- `app.py` — pass `--voice-json path/to/voice.json` for a custom or cloned voice, and `--play` to play the output on macOS.
 
 ## Imports
 
