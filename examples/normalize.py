@@ -30,7 +30,6 @@ tts = load_text_to_speech(onnx_dir=onnx_dir)
 style = load_voice_style(["voices/noa.json"])
 
 SAMPLES = [
-    ("he", 'ההזמנה IL-4829-7361-05 תגיע ב 12/05/2024 בשעה 08:15, מחיר 1,500 ש"ח (50% הנחה).'),
     ("en", "Invoice INV-77120 for 1,500 dollars is due 12/05/2024 at 08:15 (30% off)."),
 ]
 

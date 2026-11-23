@@ -11,9 +11,8 @@ tts = load_text_to_speech(onnx_dir=onnx_dir)
 style = load_voice_style(["voices/noa.json"])
 
 text = (
-    "<en>Yeah, but listen to this. It doesn't bleed the accents any more when you mix them. So I can be talking in English.</en> "
+    "Yeah, but listen to this. It doesn't bleed the accents any more when you mix them. So I can be talking in English, "
     "<es>y de repente pasar al español con un acento perfecto.</es> "
-        "ובעברית זה פשוט נשמע טבעי לגמרי."
     "<it>mantenendo la voce ma cambiando l'accento.</it> "
     "<de>und auf Deutsch klingt es wie ein Muttersprachler.</de>"
 )
@@ -21,7 +20,7 @@ text_is_phonemes = False
 
 audio, _ = tts(
     text,
-    lang="he",
+    lang="en",
     style=style,
     total_step=8,
     cfg_scale=4.0,

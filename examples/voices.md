@@ -38,7 +38,7 @@ the model's languages. `blue_onnx` refuses a voice whose `model` tag does not ma
 ## Picking one
 
 ```bash
-uv run python examples/app.py --lang he --voice noa   --text "שלום"
+uv run python examples/app.py --lang en --voice noa   --text "Good morning"
 uv run python examples/app.py --lang en --voice adam  --text "Hello"
 ```
 

@@ -38,10 +38,8 @@ import soundfile as sf
 from blue_onnx import BlueTTS
 
 tts = BlueTTS(onnx_dir="bluev3_onnx/onnx", style_json="voices/noa.json")
-samples, sr = tts.synthesize("שלום, זהו מודל דיבור בעברית.", lang="he")
+samples, sr = tts.synthesize("Hello, this is BlueTTS speaking.", lang="en")
 sf.write("out.wav", samples, sr)
-
-samples, sr = tts.synthesize("Hello, this is BlueTTS.", lang="en")
 ```
 
 The bundle sets the operating point itself (8 steps, CFG 4.0, speed 1.0, language tags on).
@@ -52,7 +50,7 @@ Numbers, dates, prices and codes are spoken as words automatically (Yiddish: spe
 inline with `<en>…</en>`:
 
 ```python
-samples, sr = tts.synthesize("שלום לכולם, <en>welcome to the presentation</en>.", lang="he")
+samples, sr = tts.synthesize("Welcome, everyone. <es>Bienvenidos a la presentación.</es>", lang="en")
 ```
 
 Hebrew grapheme-to-phoneme is [RenikudPlus](https://github.com/maxmelichov/RenikudPlus), with the
@@ -272,7 +270,7 @@ uv run python examples/openai_server.py --bundle bluev3_onnx --host 0.0.0.0 --po
 
 ```bash
 curl http://localhost:8000/v1/audio/speech -H "Content-Type: application/json" \
-  -d '{"model": "bluev3", "input": "שלום, מה שלומך?", "voice": "noa", "response_format": "wav"}' -o speech.wav
+  -d '{"model": "bluev3", "input": "Hello, how are you today?", "voice": "noa", "response_format": "wav"}' -o speech.wav
 ```
 
 One engine is loaded at startup (CPU by default; `--providers CUDAExecutionProvider,CPUExecutionProvider` for a
@@ -290,7 +288,7 @@ GPU build of ONNX Runtime) and requests are served one synthesis at a time. `--b
 | `stream_format` | `audio` (or `"stream": true`) streams `wav` / `pcm` sentence by sentence as chunked transfer; `sse` sends the same bytes as `speech.audio.delta` events. Other formats come back whole |
 
 **Voice markers** (extension): `[name]` in the input switches voice from that point on, e.g.
-`"Hello there. [adam] And hello from me. [lily] שלום!"`. Only names of available voices (or the OpenAI
+`"Hello there. [adam] And hello from me. [lily] Hi!"`. Only names of available voices (or the OpenAI
 aliases) count as markers; text without markers is read in the request's `voice`, and each segment gets its own
 language detection. Inline `<en>…</en>` spans work as in `synthesize`.
 
@@ -323,6 +321,7 @@ Languages: Hebrew, English, German, Spanish, Italian, Russian, Yiddish. Operatin
 CFG 4.0, speed 1.0, language tags on.
 
 ```python
+samples, sr = tts.synthesize("שלום, מה שלומך?", lang="he")
 samples, sr = tts.synthesize("Привет, как дела?", lang="ru")
 samples, sr = tts.synthesize("גוט מאָרגן, ווי גייט עס?", lang="yi")
 ```
