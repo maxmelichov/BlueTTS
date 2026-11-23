@@ -39,8 +39,8 @@ with open("examples/out/my_voice.json", "w", encoding="utf-8") as f:
 
 tts = BlueTTS(onnx_dir=onnx_dir, style_json="examples/out/my_voice.json")
 samples, sr = tts.synthesize(
-    "שימו לב נוסעים יקרים, הרכבת תיכנס לתחנת תל אביב מרכז בעוד מספר דקות.",
-    lang="he",
+    "Attention, passengers: the train to Central Station will arrive in a few minutes.",
+    lang="en",
 )
 out = "examples/out/zero_shot.wav"
 sf.write(out, samples, sr)

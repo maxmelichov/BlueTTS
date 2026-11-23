@@ -8,7 +8,7 @@ by pointing its base URL at this server.
     uv run python examples/openai_server.py --bundle bluev3_onnx
 
     curl http://localhost:8000/v1/audio/speech -H "Content-Type: application/json" \\
-        -d '{"model": "bluev3", "input": "שלום, מה שלומך?", "voice": "noa", "response_format": "wav"}' \\
+        -d '{"model": "bluev3", "input": "Hello, how are you today?", "voice": "noa", "response_format": "wav"}' \\
         -o speech.wav
 
 Extensions to the OpenAI request (all optional):

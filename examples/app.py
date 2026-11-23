@@ -7,8 +7,8 @@ sys.path.append(".")
 from src.blue_onnx import limit_peak, load_text_to_speech, load_voice_style
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--text", default="שלום עולם")
-parser.add_argument("--lang", default="he")
+parser.add_argument("--text", default="Hello, world.")
+parser.add_argument("--lang", default="en")
 parser.add_argument("--voice", default="noa")
 parser.add_argument("--voice-json", help="Path to a voice style JSON (overrides --voice)")
 parser.add_argument("--out", default="output.wav")
