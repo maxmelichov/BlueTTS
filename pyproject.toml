@@ -20,6 +20,13 @@ dependencies = [
     "onnxslim>=0.1.90",
 ]
 
+[project.urls]
+Homepage = "https://bluetts.com"
+Demo = "https://bluetts.com"
+Repository = "https://github.com/maxmelichov/BlueTTS"
+Documentation = "https://github.com/maxmelichov/BlueTTS#readme"
+Issues = "https://github.com/maxmelichov/BlueTTS/issues"
+
 [project.optional-dependencies]
 # Hebrew numbers that agree with the counted noun (3 ילדים → שלושה, 3 בנות → שלוש), plus
 # 12-hour clock readings and month-name dates. Pure Python; without it the normalizer
